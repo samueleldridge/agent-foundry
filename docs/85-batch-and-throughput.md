@@ -4,7 +4,7 @@
 
 The foundry is built to run agent *projects* in production, not just to prototype them. This doc specifies the scaling shape: how a configured project deploys as a multi-worker service that handles high-throughput batch processing and bursty real-time traffic cleanly, with trustworthy cost controls, end-to-end observability, and streaming that survives reconnects and worker loss.
 
-The concrete use case shaping this spec is **post-trade operations at a hedge fund** — nightly reconciliation of 50k+ trades through an agent system; intraday triage of bursty exception queues with tight latency SLAs. The design generalises.
+The concrete use case shaping this spec is **overnight batch reconciliation plus intraday exception triage** — e.g. 50k+ items processed through an agent system over a fixed window, with a bursty real-time triage stream layered on top and tight latency SLAs. The shape recurs across many regulated industries; the design is not finance-specific.
 
 ## What's in scope here
 

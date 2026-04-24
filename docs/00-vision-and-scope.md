@@ -2,7 +2,9 @@
 
 ## What agent-foundry is
 
-`agent-foundry` is a Python developer kit for constructing, evaluating, versioning, and orchestrating multi-agent LLM systems from declarative configs. It is a personal tool owned by a Lead AI engineer whose primary value add is integration of AI into existing enterprise systems — FDE-style work. The foundry automates the scaffolding, testing, and iteration work that would otherwise eat weeks per deployment, so the engineer can spend that time on integration.
+`agent-foundry` is a Python developer kit for constructing, evaluating, versioning, and orchestrating multi-agent LLM systems from declarative configs. It is designed for AI engineers whose primary value add is integration of AI into existing enterprise systems — FDE-style work. The foundry automates the scaffolding, testing, and iteration work that would otherwise eat weeks per deployment, so the engineer can spend that time on integration.
+
+The framework is distributed as a shareable kit; **institution-specific artifacts (projects, private tools, connections, prompts, eval sets, audit logs) live in each institution's own private repo**, never in the upstream framework. Multi-institution use is a first-class deployment pattern (see `86-multi-tenancy-and-ip.md`).
 
 ## What it is not
 
@@ -13,18 +15,20 @@
 
 ## North star
 
-> A Lead AI engineer should be able to describe a multi-agent system in ~5 minutes of typed-or-spoken prompt, iterate with the meta-agent until the eval harness passes a threshold (~30 minutes), review the resulting configs and prompts (~5 minutes), and commit the result to a git-tracked, rollback-able artifact that can be deployed into any supported runtime.
+> An AI engineer should be able to describe a multi-agent system in ~5 minutes of typed-or-spoken prompt, iterate with the meta-agent until the eval harness passes a threshold (~30 minutes), review the resulting configs and prompts (~5 minutes), and commit the result to a git-tracked, rollback-able artifact that can be deployed into any supported runtime.
 
 Everything in this doc tree is in service of that sentence.
 
 ## Primary persona
 
-**Sam — Lead AI engineer, FDE-leaning.**
+**AI engineer at an institution with compliance, IP, or data-residency sensitivities.**
 - Owns the architecture for AI systems that integrate into existing enterprise stacks.
+- Operates inside a regulated environment (financial services, healthcare, research) where tool auth, data handling, and audit trails are non-negotiable.
 - Deep Python, async, Pydantic, LLM-native.
 - Values leverage over abstraction purity — chooses frameworks based on how much hand-written glue they remove.
 - Reads git diffs, writes YAML, lives in a terminal and an IDE; does not want another SaaS dashboard unless it earns its keep.
 - Needs reproducibility: every deployed agent must trace back to a commit, a config version, and a passing eval run.
+- Needs institution-private artifacts to stay private: business logic, prompts referencing internal processes, and eval sets built from regulated data must live in the institution's own repository, never in the shared framework.
 
 ## Secondary personas (design for, don't optimize for yet)
 
@@ -56,7 +60,7 @@ Explicit non-goals prevent scope creep:
 - No fine-tuning. The foundry is purely prompt- and config-driven.
 - No multi-tenancy, no auth, no RBAC inside the foundry. These are integration concerns for the target system.
 - No distributed execution. Single-process async is fine for v1; LangGraph's checkpointer gives us resumability without needing a cluster.
-- No "agent marketplace" / sharing configs between users.
+- No *central* agent or tool marketplace hosted by the foundry. Institutions can selectively promote *generic* artifacts to the upstream public catalog via PR, but there is no runtime discovery of artifacts from other institutions, no account system, no hosted sharing. Multi-institution *deployment* is a first-class pattern (see `86-multi-tenancy-and-ip.md`); multi-institution *discovery* is not.
 
 ## Guiding principles
 
@@ -116,6 +120,10 @@ If two concepts can be separated, they are separated. A tool does not know about
 ### 11. Tools get typed, authenticated clients — not raw credentials.
 
 Tool handlers request connections by *slot name* via `ctx.connections.get(slot)` and receive a live, pooled, authenticated client. They never touch secrets, never run the auth flow, never manage token refresh. Auth logic lives in the `Connection` artifact; pool/refresh/health live in the runtime. A tool that a human wrote pre-2026 with inline `requests.post(..., auth=...)` code is a smell — it should be a catalog connection + a thin tool that uses it.
+
+### 12. Institution artifacts are institution-private by default.
+
+The upstream `agent-foundry` framework is a shared, composable kit — code and generic catalog entries. Everything institution-flavoured (business-specific tools, internal system connections, project configs, prompts that reference proprietary processes, eval sets built from regulated data, production audit logs) lives in each institution's own private repository. The foundry resolves artifacts across multiple catalog roots at runtime, so a private catalog overlays the public one without contamination. Cross-institution sharing is opt-in and requires a deliberate PR to the upstream public catalog — never an accident.
 
 ## Relationship to LangGraph
 

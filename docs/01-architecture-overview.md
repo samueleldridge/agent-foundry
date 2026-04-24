@@ -98,7 +98,7 @@ From user intent to committed versioned artifact:
    ┌─────────────────────────────────────────────────────────────────────────┐
    │                                                                         │
    │   USER INTENT                                                           │
-   │   "Build a recon agent for settlement breaks"                           │
+   │   "Build an agent that triages incoming exceptions"                     │
    │                                                                         │
    │                               │                                         │
    │                               ▼                                         │
@@ -217,6 +217,94 @@ Every LLM call, tool call, and state transition is a span in the OTel trace and 
 
 **Does not see:** Any running agent's memory, any non-foundry filesystem paths, `src/foundry/` source code, or projects outside the one it is scoped to. The meta-agent's `read_file` / `write_file` are sandboxed by absolute-path canonicalisation + prefix check against the scoped project directory.
 
+## Multi-institution deployment pattern
+
+`agent-foundry` is designed so multiple institutions can use the same framework while keeping their projects, institute-specific catalog items, prompts, eval sets, and audit logs fully private to their own repositories. The shape is a **three-layer overlay**: a shared upstream framework + public catalog, and private per-institution repos that overlay their own catalog + projects on top.
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  UPSTREAM FRAMEWORK  (public or shared-private)                    │
+│  github.com/<owner>/agent-foundry                                  │
+│                                                                    │
+│    src/foundry/            the Python package                      │
+│    docs/                   generic design docs                     │
+│    catalog/public/         generic tools + connections:            │
+│                              http_get, send_email_via_ses,         │
+│                              query_postgres, slack_workspace,      │
+│                              aws_session, azure_entra, ...         │
+│    tests/                  framework tests                         │
+│                                                                    │
+│  Distributed as a pip/uv package: `uv add foundry`                 │
+└─────────────────────────────┬──────────────────────────────────────┘
+                              │  (dependency)
+               ┌──────────────┴───────────────┐
+               │                              │
+               ▼                              ▼
+┌─────────────────────────────┐  ┌─────────────────────────────┐
+│  INSTITUTION A              │  │  INSTITUTION B              │
+│  github.com/A/foundry-A     │  │  github.com/B/foundry-B     │
+│  (private)                  │  │  (private)                  │
+│                             │  │                             │
+│  catalog/                   │  │  catalog/                   │
+│   ├─ tools/                 │  │   ├─ tools/                 │
+│   │   ├─ query_a_trade_db/  │  │   │   ├─ query_order_db/    │
+│   │   └─ post_a_ticket/     │  │   │   └─ issue_refund/      │
+│   └─ connections/           │  │   └─ connections/           │
+│       ├─ a_snowflake/       │  │       ├─ orders_postgres/   │
+│       └─ a_compliance_api/  │  │       └─ payments_api/      │
+│                             │  │                             │
+│  projects/                  │  │  projects/                  │
+│   ├─ exception_triage/      │  │   ├─ refund_triage/         │
+│   └─ compliance_surv/       │  │   └─ return_eligibility/    │
+│                             │  │                             │
+│  pyproject.toml             │  │  pyproject.toml             │
+│    foundry ==1.3.0          │  │    foundry ==1.3.0          │
+│                             │  │                             │
+│  deploy/                    │  │  deploy/                    │
+│    Dockerfile, k8s, etc.    │  │    Dockerfile, k8s, etc.    │
+└─────────────────────────────┘  └─────────────────────────────┘
+
+Institutions A and B cannot see each other's repos, catalogs,
+projects, eval sets, or audit logs. Both pin `foundry==1.3.0`
+and therefore share identical framework behaviour.
+```
+
+### Runtime root resolution
+
+The runtime reads two environment variables to locate artifacts:
+
+```
+FOUNDRY_CATALOG_ROOTS="/app/foundry/catalog/public,/app/foundry-A/catalog"
+FOUNDRY_PROJECTS_ROOT="/app/foundry-A/projects"
+```
+
+Catalog resolution walks roots left-to-right. The meta-agent's `write_file` sandbox is pinned to `FOUNDRY_PROJECTS_ROOT` + its scoped project directory — it cannot write to the framework package or to any catalog root.
+
+Shadowing (private catalog overriding a public entry with the same name) is permitted but logged loudly at startup, so accidental shadowing is visible.
+
+### What lives where (at-a-glance)
+
+| Artifact | Upstream framework | Institution-private repo |
+|---|---|---|
+| `foundry` Python package | ✅ source of truth | pinned as dependency |
+| Generic tools / connections | ✅ in `catalog/public/` | — |
+| Institution-specific tools | ❌ | ✅ in `catalog/tools/` |
+| Institution-specific connections | ❌ | ✅ in `catalog/connections/` |
+| Projects (SystemSpec, agents, prompts) | ❌ | ✅ in `projects/` |
+| Project-local tools / connections | ❌ | ✅ within each project |
+| Eval sets (may contain regulated data) | ❌ | ✅ |
+| Run artifacts, audit logs | ❌ | ✅ |
+| Deploy manifests (Dockerfile, k8s, env) | — | ✅ |
+| Credentials | ❌ (always out-of-band via SecretsProvider) | ❌ (ditto) |
+
+### Contribution flow
+
+- **Generic improvements** (framework bugs, new auth schemes, new public catalog tools that aren't institution-flavoured) go upstream via PR.
+- **Institution-specific additions** stay in the institution's repo. Full stop.
+- **Selective promotion**: if an institution builds something genuinely generic (say, a `query_postgres_read_replica` connection pattern), they can open a PR to move it into the public catalog. Human-reviewed, institution decides.
+
+Full spec: `86-multi-tenancy-and-ip.md`.
+
 ## Directory layout (target shape of the repo)
 
 ```
@@ -328,42 +416,35 @@ agent-foundry/
 │           ├── injection.py        prompt-injection guardrails
 │           └── validators.py       input/output validators
 │
-├── catalog/                        ← shared, versioned library of reusable artifacts
-│   ├── tools/
-│   │   ├── query_snowflake/
-│   │   │   ├── v1/
-│   │   │   │   ├── tool.yaml       ToolSpec (input/output schemas, handler ref, connection slots)
-│   │   │   │   ├── handler.py      async implementation
-│   │   │   │   ├── schemas.py      Pydantic input/output
-│   │   │   │   ├── eval.yaml       standalone tool eval
-│   │   │   │   └── README.md       what it does, when to use it
-│   │   │   ├── v2/…
-│   │   │   ├── versions.json       metadata: eval scores, deprecations
-│   │   │   └── LATEST              one-line file with the recommended version
-│   │   ├── send_slack/…
-│   │   └── escalate_to_team/…
-│   ├── connections/                shared authenticated handles to external systems
-│   │   ├── snowflake/
-│   │   │   ├── v1/
-│   │   │   │   ├── connection.yaml ConnectionSpec (auth_scheme, config_schema ref, factory ref, refresh/pool policy)
-│   │   │   │   ├── auth.py         async def build_connection(config, credentials, ctx) -> Connection
-│   │   │   │   ├── schemas.py      Pydantic config schema (account, warehouse, role, …)
-│   │   │   │   ├── health.yaml     optional health-check EvalSpec
-│   │   │   │   └── README.md
-│   │   │   ├── v2/…
-│   │   │   ├── versions.json
-│   │   │   └── LATEST
-│   │   ├── postgres/…
-│   │   ├── slack_workspace/…
-│   │   ├── aws_session/…           SigV4 / assume-role / SSO
-│   │   ├── azure_entra/…           managed identity / service principal
-│   │   ├── gmail_oauth/…
-│   │   └── github_app/…
-│   ├── agent_templates/            (optional; empty until needed)
-│   │   └── summarizer/v1/…
-│   └── index.yaml                  top-level catalog index (lists tools, connections, templates)
+├── catalog/                        ← the upstream public catalog
+│   └── public/                     ← generic artifacts shipped with the framework
+│       ├── tools/
+│       │   ├── http_get/v1/        generic HTTP GET with auth injection
+│       │   ├── send_email_via_ses/v1/
+│       │   ├── query_postgres/v1/  generic; accepts DSN via connection binding
+│       │   ├── send_slack/v1/
+│       │   └── escalate_generic/v1/
+│       ├── connections/            shared authenticated handles to widely-used systems
+│       │   ├── postgres/v1/        generic Postgres + OAuth2/mTLS
+│       │   ├── slack_workspace/v1/
+│       │   ├── aws_session/v1/     SigV4 / assume-role / SSO
+│       │   ├── azure_entra/v1/     managed identity / service principal
+│       │   ├── gmail_oauth/v1/
+│       │   └── github_app/v1/
+│       ├── agent_templates/        (optional; empty until needed)
+│       │   └── summarizer/v1/…
+│       └── index.yaml              catalog index for this root
 │
-├── projects/                       ← user-space: the configured multi-agent systems
+│                                   Institution-specific catalogs (`query_internal_trades`,
+│                                   `corp_snowflake`, etc.) live in a separate private
+│                                   repo with its own catalog/ tree mounted as an additional
+│                                   catalog root via FOUNDRY_CATALOG_ROOTS. See
+│                                   `86-multi-tenancy-and-ip.md` for the overlay model.
+│
+├── projects/                       ← institution-specific: configured multi-agent systems
+│                                   (in multi-institution deployments, this tree lives in
+│                                   the institution's private repo, not in the upstream;
+│                                   see `86-multi-tenancy-and-ip.md`)
 │   └── <project_name>/
 │       ├── system.yaml             SystemSpec — pins tool and prompt versions (the manifest)
 │       ├── state.yaml              StateSpec

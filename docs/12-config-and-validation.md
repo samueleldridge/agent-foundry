@@ -595,16 +595,51 @@ class ArtifactRef(BaseModel):
     def resolve_path(self, roots: FoundryRoots) -> Path: ...
 ```
 
-`FoundryRoots` is the small struct that tells the resolver where `catalog/` and `projects/<name>/` live on disk:
+`FoundryRoots` is the small struct that tells the resolver where catalogs and projects live on disk. **Catalogs are multi-root to support the multi-institution overlay pattern** (framework's public catalog + institution-private catalog).
 
 ```python
 class FoundryRoots(BaseModel):
-    repo_root: Path
-    catalog_root: Path
+    framework_root: Path
+    """Filesystem path to the installed `foundry` package; used for
+    resolving the bundled public catalog at <framework_root>/catalog/public/."""
+
+    catalog_roots: list[Path] = Field(min_length=1)
+    """Ordered list of catalog roots. Resolution walks left-to-right.
+    A ref `catalog/<name>@v<N>` is found at the first root that contains
+    the directory; later roots shadow via warning (logged at startup)."""
+
     projects_root: Path
+    """Single root under which all projects live for this deployment."""
+
     project_name: str | None = None
-    """If set, 'local/...' refs resolve against projects_root/project_name."""
+    """If set, 'local/...' refs resolve against projects_root/<project_name>."""
 ```
+
+### Environment variables
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `FOUNDRY_CATALOG_ROOTS` | Comma-separated list of catalog roots. First entry typically the framework's public catalog; later entries are institution-private catalogs. | `<framework_root>/catalog/public` |
+| `FOUNDRY_PROJECTS_ROOT` | Root under which the deployment's projects live. | `./projects` |
+| `FOUNDRY_FRAMEWORK_ROOT` | Override the detected framework root (rarely needed). | auto-detected from `foundry.__file__` |
+
+Example multi-institution deployment (as documented in `86-multi-tenancy-and-ip.md`):
+
+```
+FOUNDRY_CATALOG_ROOTS=/opt/foundry/catalog/public,/opt/foundry-acme/catalog
+FOUNDRY_PROJECTS_ROOT=/opt/foundry-acme/projects
+```
+
+### Ref resolution precedence
+
+1. `local/<name>@vN` → resolves under `projects_root/<project_name>/` (tools, connections).
+2. `catalog/<name>@vN` → resolves by walking `catalog_roots` left-to-right. First hit wins.
+3. If no root contains the named artifact: `RefResolutionError` naming the ref + each root it checked.
+4. If a later root shadows an earlier one (same name, different root), a warning is emitted at startup with both paths so shadowing is visible. An explicit `FOUNDRY_ALLOW_SHADOWING=strict` env makes shadowing an error instead.
+
+### Sandboxing for the meta-agent
+
+The meta-agent's `write_file` tool accepts paths only under `projects_root/<scoped_project>/`. It cannot write to any `catalog_roots` entry, cannot write to `framework_root`, cannot write to `projects_root` outside its scoped project. Enforced by absolute-path canonicalisation + prefix check against these exact strings.
 
 A ref that references a non-existent version or path fails fast at `resolve_path` with `RefResolutionError` including the resolved absolute path and a list of available versions if the name exists but the version doesn't.
 
