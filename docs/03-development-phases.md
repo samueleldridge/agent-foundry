@@ -66,7 +66,7 @@ Total calendar estimate (one engineer, focused): roughly 6–10 weeks. This is a
 
 ### Deliverables
 
-- **`foundry.core`** — `Agent` and `Tool` protocols; `Session`; `FoundryMessage`; `ModelResponse`; base exceptions.
+- **`foundry.core`** — `Agent` and `Tool` protocols; `Session` (incl. `CostBudget`); `FoundryMessage`; `ModelResponse` (incl. `TokenUsage` with `reasoning_tokens`); base exceptions (incl. `CostBudgetExceeded`).
 - **`foundry.providers`** — `Provider` interface + `ProviderCapabilities` + concrete implementations for Anthropic and OpenAI at minimum (Bedrock, Azure, Vertex can follow). `ModelBinding` Pydantic model.
 - **`foundry.config`** — YAML loader, Pydantic schemas for `AgentSpec`, `StateSpec`, `SystemSpec`, `ToolSpec` (stubs where needed for later phases), composition, secrets interface.
 - **Runtime adapter** — the beginning of `foundry.runtime.langgraph_adapter`, enough to run a single-node graph.
@@ -79,7 +79,9 @@ Total calendar estimate (one engineer, focused): roughly 6–10 weeks. This is a
 - [ ] Change `model_binding.provider` to an unknown provider → structured error: "unknown provider 'foo'; available: anthropic, openai".
 - [ ] `ruff` import-boundary check passes — no `langchain*` / `langgraph*` imports outside `foundry/runtime/`.
 - [ ] YAML with invalid shape produces a Pydantic error message that identifies the file, the field, and why it's invalid.
-- [ ] Unit tests cover: provider lookup, capabilities introspection, config loading, env-var interpolation in YAML, secret path handling.
+- [ ] **Cost budget enforcement**: `Guardrails.max_cost_usd: 0.01` against a project that would consume more → `CostBudgetExceeded` raised pre-call; run terminates with `RunFailed`; budget context surfaced in audit trail.
+- [ ] **TokenUsage.reasoning_tokens** populated when calling a reasoning-capable model (e.g. OpenAI o-series); zero when calling a non-reasoning model.
+- [ ] Unit tests cover: provider lookup, capabilities introspection, config loading, env-var interpolation in YAML, secret path handling, cost-budget check + record.
 
 ---
 

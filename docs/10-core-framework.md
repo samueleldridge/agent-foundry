@@ -84,7 +84,8 @@ A CI check runs `ruff check src/foundry/core/` with a gate on zero violations.
 | `SemanticCacheKey` | `cache.py` | Pydantic: structural hash + embedding vector of the inputs being cached. |
 | `SemanticCacheHit` | `cache.py` | Pydantic: result of a lookup hit — cached response + similarity score + metadata. |
 | `ResultCache` | `cache.py` | Protocol: exact-match cache for tool results (keyed by hash of validated input). |
-| `Session` | `session.py` | Immutable bundle of `run_id` + trace + logger + checkpointer handle. |
+| `Session` | `session.py` | Immutable bundle of `run_id` + trace + logger + checkpointer + cost-budget handles. |
+| `CostBudget` | `session.py` | Per-run dollar cap. Provider layer checks pre-call, records actual cost post-call; `CostBudgetExceeded` raised when next call would breach. |
 | `RunId` | `session.py` / `types.py` | ULID-based run identifier; string-serialisable. |
 | `FoundryMessage` | `messages.py` | Provider-agnostic message: role + content blocks. |
 | `MessageRole` | `messages.py` | Enum: `system`, `user`, `assistant`, `tool`. |
@@ -856,9 +857,54 @@ class Session(BaseModel):
     tracer: Tracer             # OTel tracer; convenience .span() below
     cancel_token: CancelToken  # propagates cancellation
     checkpointer: CheckpointerHandle  # opaque handle to the adapter's checkpointer
+    cost_budget: CostBudget | None     # per-run dollar cap; None = unbounded
 
     async def span(self, name: str, **attrs: Any) -> AbstractAsyncContextManager[Span]: ...
 ```
+
+### `CostBudget`
+
+Hard per-run dollar cap that the provider layer enforces around every LLM call (and cooperatively around every Reranker / Embedder call). Constructed once at run start from `Guardrails.max_cost_usd`; mutated by the provider adapter as calls succeed.
+
+```python
+class CostBudget(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    """Mutable internal state — same pattern as CancelToken. Session
+    itself remains frozen; the budget object inside it tracks accumulated
+    spend across calls."""
+
+    max_usd: Decimal
+    accumulated_usd: Decimal = Decimal("0")
+
+    def remaining_usd(self) -> Decimal:
+        return self.max_usd - self.accumulated_usd
+
+    def check(self, estimated_usd: Decimal) -> None:
+        """Raise CostBudgetExceeded if the next call would breach budget.
+        Provider adapters call this BEFORE the LLM call using the
+        provider's cost estimator (input_tokens × input_price + buffer
+        for output)."""
+        if self.accumulated_usd + estimated_usd > self.max_usd:
+            raise CostBudgetExceeded(
+                f"call would push spend to ${self.accumulated_usd + estimated_usd}, "
+                f"budget ${self.max_usd}",
+                context={
+                    "max_usd": str(self.max_usd),
+                    "accumulated_usd": str(self.accumulated_usd),
+                    "estimated_usd": str(estimated_usd),
+                    "remaining_usd": str(self.remaining_usd()),
+                },
+            )
+
+    def record(self, actual_usd: Decimal) -> None:
+        """Update accumulated spend after a call completes successfully.
+        Called by the provider adapter once the response is received."""
+        self.accumulated_usd += actual_usd
+```
+
+Composition: `Guardrails.max_cost_usd: Decimal | None` (in `SystemSpec`) → `CostBudget(max_usd=...)` constructed at session start → bound to `Session.cost_budget` → checked + recorded by every `ProviderAdapter` call. `None` for `max_cost_usd` skips construction entirely (no overhead).
+
+`CostBudgetExceeded` lives under `OrchestrationError` because it halts the run cleanly — same shape as `MaxHopsExceededError`.
 
 ### `RunId`
 
@@ -973,6 +1019,11 @@ class TokenUsage(BaseModel):
     output_tokens: int
     cached_read_tokens: int = 0
     cached_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    """Tokens spent on hidden reasoning (OpenAI o-series, future Anthropic
+    extended-thinking variants). Distinct from output_tokens — billed
+    separately on most vendors. Defaults to 0 for models without
+    reasoning."""
 
 class ModelResponse(BaseModel):
     message: FoundryMessage
@@ -1374,7 +1425,8 @@ FoundryError
 │   ├── UnknownPatternError
 │   ├── CompileError               graph compilation failed (ref, edge, schema)
 │   ├── CyclicDependencyError
-│   └── MaxHopsExceededError
+│   ├── MaxHopsExceededError
+│   └── CostBudgetExceeded         next call would breach Guardrails.max_cost_usd
 ├── CheckpointError
 │   ├── CheckpointWriteError
 │   └── CheckpointReadError
@@ -1498,7 +1550,9 @@ from .cache import (
     SemanticCache, SemanticCacheKey, SemanticCacheHit,
     ResultCache, CacheAccessor,
 )
-from .session import Session, RunId, CancelToken, CheckpointerHandle
+from .session import (
+    Session, RunId, CancelToken, CheckpointerHandle, CostBudget,
+)
 from .messages import (
     FoundryMessage, MessageRole,
     ContentBlock, TextBlock, ToolUseBlock, ToolResultBlock, ImageBlock,
@@ -1535,7 +1589,7 @@ from .errors import (
 __all__ = [
     "Agent", "AgentResult", "BaseAgent", "LifecycleHooks",
     "Tool", "BaseTool", "ToolRegistry", "RunContext", "RetryPolicy",
-    "Session", "RunId", "CancelToken", "CheckpointerHandle",
+    "Session", "RunId", "CancelToken", "CheckpointerHandle", "CostBudget",
     "FoundryMessage", "MessageRole",
     "ContentBlock", "TextBlock", "ToolUseBlock", "ToolResultBlock", "ImageBlock",
     "CacheControl",
@@ -1570,7 +1624,7 @@ __all__ = [
     "ToolError", "ToolInputValidationError", "ToolOutputValidationError",
     "ToolHandlerError", "ToolNotAllowedError", "ToolNotFoundError",
     "OrchestrationError", "UnknownPatternError", "CompileError",
-    "CyclicDependencyError", "MaxHopsExceededError",
+    "CyclicDependencyError", "MaxHopsExceededError", "CostBudgetExceeded",
     "CheckpointError", "CheckpointWriteError", "CheckpointReadError",
     "ConnectionError", "ConnectionConfigError", "ConnectionAuthError",
     "ConnectionTimeoutError", "ConnectionHealthCheckError",

@@ -166,6 +166,16 @@ For each idea in `personal_docs/meta-agent-configurator.jsx`, here is where it l
 | Python version | 2026-04-22 | 3.12 floor. |
 | Package manager | 2026-04-22 | `uv`, lockfile committed. |
 | Observability | 2026-04-22 | OTel always-on; structured audit trail for every LLM/tool/handoff; LangSmith opt-in. See principle 9. |
+| `connections_required` declaration site | 2026-04-25 | Tool-declared (not agent-declared). Cleaner contract; alternative solvable via project-local connection bindings. |
+| `CostBudget` primitive in core | 2026-04-25 | Yes. On `Session`; checked + recorded by provider adapters; `CostBudgetExceeded` halts runs cleanly. Plumbed via `Guardrails.max_cost_usd`. |
+| Custom reducer callables | 2026-04-25 | Deferred. The 4-enum set covers ~90%; revisit if real use cases surface. |
+| `reasoning_tokens` on `TokenUsage` | 2026-04-25 | Added now. Future-proofs audit trail for OpenAI o-series + extended-thinking variants. |
+| `provider_overrides` accessible to meta-agent | 2026-04-25 | No. Forbid via prompt + don't surface in `build_tool` / `build_agent` scaffolds. |
+| Catalog semver discipline | 2026-04-25 | Warning by default on schema-breaking promotion; `--strict-semver` flag to block. |
+| Per-project monthly cost budget | 2026-04-25 | Deferred to Tier 8 (observability/alerting); per-batch budget already specced in `85`. |
+| Cross-agent semantic cache sharing | 2026-04-25 | No. Keep current scopes (`agent` / `project` / `global`). |
+| Retrieval result caching | 2026-04-25 | Deferred. Observe via metrics first. |
+| Corpus ingestion as foundry concern | 2026-04-25 | Deferred. Document the pattern; promote to primitive only if 3+ projects ask. |
 
 ## Open questions for v1
 

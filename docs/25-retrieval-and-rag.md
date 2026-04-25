@@ -365,8 +365,8 @@ Same shape as tool and connection catalog entries. Discoverable via `foundry cat
 
 ## Open questions
 
-1. **Corpus ingestion workflow.** Retrieval assumes documents are already in the backing store. The foundry doesn't currently ship an ingestion primitive. Should it? Lean: no for v1 — ingestion is a pipeline concern, often bespoke per corpus; document the pattern (chunk → embed → upsert) but don't own it. Revisit if three+ projects ask.
-2. **Retrieval caching.** Should retrieval results themselves be cached (same query + filters → same docs within TTL)? Simple to add, worth evaluating for cost. Not in v1 unless there's demand.
+1. **Corpus ingestion workflow.** RESOLVED 2026-04-25: NO ingestion primitive in v1. Document the pattern (chunk → embed → upsert) per backing store; promote to a primitive only if 3+ projects ask. Ingestion is bespoke per corpus.
+2. **Retrieval caching.** RESOLVED 2026-04-25: DEFERRED. Add metrics first; revisit if hit-rate would justify for batch workloads. Not in v1.
 3. **Vector store schema migrations.** Re-embedding 100M documents when swapping embedders is an operator's problem, but the foundry should surface guidance. Add a `foundry retrieval migrate` stub in Phase 9 for documentation; actual migration logic is backend-specific.
 4. **Relevance feedback loops.** Agents mark retrieved docs as "useful" or not; the signal feeds back into the retriever (learned reranker, click-through biasing). Out of scope for v1; noted for research.
 5. **Hybrid weights in production.** The weighted-linear merge strategy has tunable weights. Is this a per-deployment setting that the meta-agent can iterate on via evals? Lean: yes — treat weights as a config parameter the meta-agent's `compare_versions` workflow can vary. Small extension.

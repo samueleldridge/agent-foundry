@@ -521,6 +521,17 @@ The adapter also wraps a per-(provider, model) `CircuitBreaker`. On sustained fa
 
 Full wire specification (Redis key layout, failure thresholds, multi-region considerations) in `85-batch-and-throughput.md`.
 
+## Cost-budget integration
+
+Every `ProviderAdapter.generate()` and `.stream()` call participates in `Session.cost_budget` enforcement when a budget is configured:
+
+1. **Pre-call**: estimate the call's cost from `input_tokens × input_per_1m + max_output_tokens × output_per_1m` (a generous upper bound), then call `session.cost_budget.check(estimate)`. Raises `CostBudgetExceeded` if the next call would breach.
+2. **Post-call**: compute actual cost from the response's `TokenUsage` × `ModelPricing`, then call `session.cost_budget.record(actual)`.
+
+If `session.cost_budget is None` (no budget set), both calls are no-ops. Embedder and Reranker adapters follow the same pattern with their own pricing.
+
+`CostBudgetExceeded` propagates as a clean `OrchestrationError` subclass and surfaces in the run's terminal `RunFailed` event with the budget's `context` dict — the audit trail records exactly how close the run was to the cap and where it tripped.
+
 ## Retry policy
 
 ```python
@@ -706,5 +717,5 @@ LangGraph's `init_chat_model` is used internally by `_build_chat_model` for most
 1. **Do we add `reasoning_tokens` to `TokenUsage`?** OpenAI o-series and future Anthropic models may surface it distinctly from `output_tokens`. Lean: yes, add `reasoning_tokens: int = 0` to `TokenUsage` now so we don't break downstream consumers when it becomes common.
 2. **Do we expose `cache_control` at the `TextBlock` level or only as a `ModelSettings.cache_control: CacheControlMode`?** Current design: both. The `CacheControlMode` governs which blocks get marked automatically; explicit per-block `cache_control` is for advanced users who want surgical control.
 3. **Do we support a `ModelRouter` pseudo-provider?** I.e. "use anthropic when X, openai when Y." Lean: no for v1; introduces cost and complexity; can be done by the orchestration layer's routing pattern instead.
-4. **`provider_overrides` sandbox.** Is it OK for the meta-agent to populate `provider_overrides`? Risk: the meta-agent invents a kwarg that works on current model versions but breaks later. Recommend: meta-agent's prompt explicitly forbids `provider_overrides` unless the human adds an instruction, and the meta-agent's tool suite doesn't surface it as an option.
+4. **`provider_overrides` sandbox.** RESOLVED 2026-04-25: meta-agent MUST NOT populate `provider_overrides`. Enforced via the meta-agent's prompt (explicit forbid) AND by the `build_tool` / `build_agent` scaffolds not surfacing it as a knob. Humans edit YAML manually if the escape hatch is genuinely needed. To be enforced in `60-meta-agent.md` prompt + `61-meta-tools.md` scaffold spec.
 5. **Vertex deferral.** Implement in Phase 1 or push to Phase 9? Recommend Phase 1 skeleton with manifests and a stub; full implementation as a Phase 1 polish task if time permits, else Phase 9.
