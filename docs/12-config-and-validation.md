@@ -256,8 +256,82 @@ class AgentSpec(BaseModel):
     iteration_limit: int = Field(default=20, ge=1, le=500)
     """Max tool-call rounds for this agent in a single invocation."""
 
+    semantic_cache: SemanticCacheConfig | None = None
+    """Opt-in similarity-based cache for this agent's LLM calls.
+    None = disabled (default). See 24-caching-and-optimisation.md."""
+
+    retrievers: list[RetrieverBinding] = Field(default_factory=list)
+    """Retrievers available to this agent. Used either as tool-style
+    callables or as pre-agent-start retrieval (depending on the agent's
+    flow). See 25-retrieval-and-rag.md."""
+
     metadata: dict[str, Any] = Field(default_factory=dict)
     schema_version: Literal[1] = 1
+
+class SemanticCacheConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    """Set False to keep the config block present for reference while
+    disabling the cache. Useful for A/B eval."""
+
+    embedder_binding: EmbedderBinding
+    """The embedder used to vectorise inputs for similarity search.
+    Provider-agnostic via the registry."""
+
+    similarity_threshold: float = Field(default=0.95, ge=0.5, le=1.0)
+    """Cosine similarity floor for a hit. Higher = stricter. Correctness-
+    critical; start high (0.95+) and lower based on eval evidence."""
+
+    ttl_s: int = Field(default=3600, ge=1, le=86400 * 30)
+    """Entry lifetime. Shorter TTLs mitigate staleness from upstream
+    data changes; longer maximise hit rate. 1h default errs on fresh."""
+
+    scope: Literal["agent", "project", "global"] = "agent"
+    """Isolation. 'agent' = cache only shared across calls to this agent.
+    'project' = shared across agents in this project (same model required).
+    'global' = shared across projects (rare; compliance-sensitive)."""
+
+    backend: Literal["in_process", "redis", "pgvector"] = "in_process"
+    """in_process: per-worker FAISS or SQLite-vss (dev only).
+       redis: Redis Stack with vector search (multi-worker production).
+       pgvector: Postgres extension (shared with checkpointer)."""
+
+    max_entries: int = Field(default=10000, ge=100)
+    """Cap on cache size. LRU eviction."""
+
+    backend_config: dict[str, Any] = Field(default_factory=dict)
+    """Backend-specific config (redis url, pgvector table, etc.).
+    Secrets still via CredentialsRef, not here."""
+
+class RetrieverBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slot: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    """Name the agent uses to reference this retriever."""
+
+    ref: str
+    """ArtifactRef to a catalog/local retriever template."""
+    version: str = Field(pattern=r"^v\d+$")
+
+    connection_bindings: dict[str, str] = Field(default_factory=dict)
+    """Retrievers reference a vector-store connection (or sparse-search
+    connection); binding is analogous to ToolBinding.connection_bindings."""
+
+    reranker: RerankerBinding | None = None
+    """Optional reranker stage."""
+
+    top_k: int = Field(default=20, ge=1, le=500)
+    """Default top_k for retrieval; agent code can override per call."""
+
+class RerankerBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ref: str
+    version: str = Field(pattern=r"^v\d+$")
+    connection_bindings: dict[str, str] = Field(default_factory=dict)
+    top_k: int | None = Field(default=None, ge=1, le=200)
+    """Reranker's output truncation; None means keep all input docs reordered."""
 
 class PromptRef(BaseModel):
     version: str = Field(pattern=r"^v\d+$")
@@ -353,6 +427,31 @@ class ToolSpec(BaseModel):
     """Connection slots this tool needs. Each entry declares the slot name
     the handler will use (`ctx.connections.get(slot)`) and which connection
     refs are acceptable for that slot."""
+
+    cacheable: bool = False
+    """Set True ONLY if the tool is idempotent: same validated input →
+    same output (within cache_ttl_s). When True, the runtime caches
+    outputs keyed by hash of the validated input. Default False because
+    silent caching of non-idempotent tools causes correctness bugs."""
+
+    cache_ttl_s: int | None = None
+    """Entry lifetime in seconds. Required when cacheable=True, ignored
+    otherwise. Tuned per tool based on how stale the underlying source
+    can be — an internal employee directory: 3600+. A pricing API feed:
+    60. A live market data call: don't cache at all."""
+
+    cache_scope: Literal["agent", "project", "global"] = "project"
+    """Isolation of cache entries. 'agent' = per-agent-per-call-site.
+    'project' = shared across agents within a project (default).
+    'global' = shared across projects (rare)."""
+
+    @model_validator(mode="after")
+    def _cache_consistency(self) -> "ToolSpec":
+        if self.cacheable and self.cache_ttl_s is None:
+            raise ValueError("cacheable tools must set cache_ttl_s")
+        if not self.cacheable and self.cache_ttl_s is not None:
+            raise ValueError("cache_ttl_s requires cacheable=True")
+        return self
 
     author: str | None = None
     created_at: datetime | None = None

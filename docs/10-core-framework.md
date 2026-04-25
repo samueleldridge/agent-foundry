@@ -14,6 +14,9 @@ src/foundry/core/
 ├── agent.py         Agent protocol, BaseAgent, LifecycleHooks
 ├── tool.py          Tool protocol, BaseTool, ToolRegistry, RunContext
 ├── connection.py    Connection protocol, ConnectionPool, ConnectionAccessor, ConnectionFactory
+├── embedder.py      Embedder protocol, Embedding, EmbedderCapabilities
+├── retrieval.py     Retriever, Reranker protocols, RetrievedDocument
+├── cache.py         SemanticCache, SemanticCacheKey, SemanticCacheHit, ResultCache (protocols)
 ├── session.py       Session, RunId
 ├── messages.py      FoundryMessage, MessageRole, ContentBlock
 ├── model.py         ModelResponse, ModelDelta, StopReason
@@ -65,6 +68,16 @@ A CI check runs `ruff check src/foundry/core/` with a gate on zero violations.
 | `ConnectionAccessor` | `connection.py` | Interface threaded into `RunContext`; tool handlers call `ctx.connections.get(slot)`. |
 | `ConnectionFactory` | `connection.py` | Protocol: what `catalog/connections/<name>/v<N>/auth.py` modules export; builds a Connection from typed config + resolved credentials. |
 | `ConnectionHealth` | `connection.py` | Typed result of a connection health check. |
+| `Embedder` | `embedder.py` | Protocol: produces vector embeddings from text. Separate from `Provider` (generation) because vendors and models differ. |
+| `Embedding` | `embedder.py` | Typed result of an embedding call: vector, dimensions, model, tokens. |
+| `EmbedderCapabilities` | `embedder.py` | Static descriptor: provider, model, dimensions, max input tokens, query/document split support, pricing. |
+| `Retriever` | `retrieval.py` | Protocol: returns relevant documents for a query. Implementations: dense, sparse (BM25), hybrid. |
+| `Reranker` | `retrieval.py` | Protocol: rescores a candidate list of documents. Separate from `Embedder` because it uses cross-encoder models. |
+| `RetrievedDocument` | `retrieval.py` | Pydantic: id, text, score, source, metadata. |
+| `SemanticCache` | `cache.py` | Protocol: similarity-based cache for LLM responses. Optional; opt-in per agent. |
+| `SemanticCacheKey` | `cache.py` | Pydantic: structural hash + embedding vector of the inputs being cached. |
+| `SemanticCacheHit` | `cache.py` | Pydantic: result of a lookup hit — cached response + similarity score + metadata. |
+| `ResultCache` | `cache.py` | Protocol: exact-match cache for tool results (keyed by hash of validated input). |
 | `Session` | `session.py` | Immutable bundle of `run_id` + trace + logger + checkpointer handle. |
 | `RunId` | `session.py` / `types.py` | ULID-based run identifier; string-serialisable. |
 | `FoundryMessage` | `messages.py` | Provider-agnostic message: role + content blocks. |
@@ -404,6 +417,288 @@ They are a cross-cutting primitive — the eval harness, the meta-agent's tool s
 
 The *concrete* auth-scheme helpers and pool implementation live in `foundry.auth` and `foundry.connections` respectively — see module layout in `01-architecture-overview.md`.
 
+## Embeddings
+
+Embedding calls are a distinct modality from generation calls — different vendors specialise (Voyage, Cohere, OpenAI's `text-embedding-*`), different pricing curves, different capabilities. The foundry treats them as first-class via a separate `Embedder` protocol. Semantic caching + RAG workflows depend on this abstraction.
+
+### `Embedder` protocol
+
+```python
+@runtime_checkable
+class Embedder(Protocol):
+    name: str
+    """Canonical provider name, e.g. 'voyage', 'openai', 'cohere'."""
+
+    model: str
+    """Model id the embedder is bound to, e.g. 'voyage-3', 'text-embedding-3-small'."""
+
+    capabilities: EmbedderCapabilities
+
+    async def embed(
+        self,
+        inputs: list[str],
+        purpose: Literal["query", "document"] = "document",
+    ) -> list[Embedding]:
+        """Embed a batch of texts.
+
+        `purpose` distinguishes retrieval-query vs retrieval-document embeddings
+        for vendors that support asymmetric embedding (Voyage, Cohere v3+).
+        Vendors without the distinction ignore the arg.
+
+        Raises:
+            EmbedderConfigError: unsupported model / invalid input size.
+            EmbedderAuthError: credentials rejected.
+            EmbedderError: anything else from the embedder vendor.
+        """
+```
+
+### `Embedding`
+
+```python
+class Embedding(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    vector: list[float]
+    dimensions: int
+    model: str           # echoed from the embedder; makes stored vectors self-describing
+    input_tokens: int
+    latency_ms: int
+    cost_estimate_usd: Decimal | None = None
+```
+
+### `EmbedderCapabilities`
+
+```python
+class EmbedderCapabilities(BaseModel):
+    provider: str
+    model: str
+    dimensions: int
+    max_input_tokens: int
+    supports_query_document_split: bool = False
+    supports_batch: bool = True
+    max_batch_size: int = 128
+    pricing: EmbedderPricing           # $/1M input tokens
+
+    def dim_matches(self, other: "EmbedderCapabilities") -> bool:
+        return self.dimensions == other.dimensions
+```
+
+### Why separate from `Provider`
+
+- Embedders and chat models are authenticated through different endpoints even for the same vendor (OpenAI Embeddings API vs Chat Completions API). Mixing them in one protocol forces every provider adapter to care about both.
+- Anthropic does not ship their own embedding model in 2026 — they recommend Voyage. The foundry's primary LLM provider and embedder will often be *different vendors*.
+- Semantic caching and RAG use embedders without ever calling `generate()` — keeping them separate lets these subsystems depend only on what they need.
+
+Full per-provider embedder detail and concrete implementations in `11-provider-abstraction.md`.
+
+## Retrieval primitives
+
+RAG pipelines need at minimum a retriever; production pipelines typically layer a reranker and often combine dense + sparse retrieval. These are first-class primitives so that agents can consume them uniformly, catalog templates can ship them, and observability can trace them.
+
+### `Retriever` protocol
+
+```python
+@runtime_checkable
+class Retriever(Protocol):
+    name: str
+    kind: Literal["dense", "sparse", "hybrid"]
+    """For observability and reasoning about behaviour. Dense = embedding
+    similarity. Sparse = lexical (BM25 / vendor-sparse). Hybrid = both
+    combined via RRF or weighted merge."""
+
+    async def retrieve(
+        self,
+        query: str,
+        top_k: int = 20,
+        filters: dict[str, Any] | None = None,
+    ) -> list[RetrievedDocument]:
+        """Return ranked documents. Ordering is the retriever's
+        responsibility; downstream rerankers can reorder. Filters are
+        interpreted by the retriever (e.g., {source: 'docs', year: 2026}
+        translates to a metadata filter against the backing store)."""
+```
+
+### `Reranker` protocol
+
+```python
+@runtime_checkable
+class Reranker(Protocol):
+    name: str
+    model: str
+
+    async def rerank(
+        self,
+        query: str,
+        documents: list[RetrievedDocument],
+        top_k: int | None = None,
+    ) -> list[RetrievedDocument]:
+        """Rescore and reorder. Truncates to top_k if provided.
+        Uses cross-encoder models (Cohere Rerank, Voyage Rerank, Jina, etc.)
+        which score (query, doc) pairs directly — more accurate than
+        embedding similarity, too expensive for initial retrieval."""
+```
+
+### `RetrievedDocument`
+
+```python
+class RetrievedDocument(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    text: str
+    score: float
+    """Retriever-specific score (cosine similarity, BM25 score, RRF rank, etc.).
+    Normalise comparisons across retrievers via rank-based metrics."""
+
+    source: str | None = None
+    """Where the doc came from — a collection name, a url, etc."""
+
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    """Arbitrary attached data: author, timestamp, chunk_index, etc."""
+```
+
+### Composition
+
+Retrievers and rerankers compose as ordinary async functions. A typical production pipeline:
+
+```python
+# Agent-side or tool-side code:
+docs = await retriever.retrieve(query, top_k=50)
+docs = await reranker.rerank(query, docs, top_k=8)
+# docs now ready to inject into the prompt
+```
+
+The orchestration layer emits `foundry.retrieval` events (see below) for every retriever and reranker call so the audit trail is complete.
+
+### Why separate from `Tool`
+
+Retrievers *can* be wrapped as tools (the LLM calls `retrieve_documents(query)`). They can also be invoked *before* the agent starts, as part of building the initial prompt — the LLM never decides whether to retrieve. Both patterns are legitimate; the protocol supports both.
+
+Full spec (implementations, hybrid-fusion strategies, backend catalog entries, RAG patterns, failure modes) in `25-retrieval-and-rag.md`.
+
+## Caching primitives
+
+The foundry supports three distinct cache layers, each at a different level:
+
+| Layer | What's cached | Keyed by | Where configured |
+|---|---|---|---|
+| **Prompt caching** (provider-native) | Prompt prefix reuse across calls | Exact bytes of cacheable blocks | `ModelSettings.cache_control` + `TextBlock.cache_control` |
+| **Semantic caching** | Whole `ModelResponse` for a given agent call | Structural hash + embedding similarity of input messages + tools | Per-agent `SemanticCacheConfig` (opt-in) |
+| **Tool-result caching** | Tool output for idempotent tools | Exact hash of validated input | Per-tool `cacheable: bool` + `cache_ttl_s` |
+
+All three compose. Prompt caching reduces per-call cost when semantic cache misses; semantic cache short-circuits the call entirely on similarity hit; tool-result cache short-circuits tool calls on exact-match hit.
+
+Full behavioural spec, correctness rules, and configuration schemas in `24-caching-and-optimisation.md`. The core protocols are below.
+
+### `SemanticCache` protocol
+
+```python
+class SemanticCache(Protocol):
+    """Similarity-based cache for full ModelResponses.
+
+    Opt-in per agent. Correctness hazard if thresholds are loose —
+    an LLM response cached at similarity 0.92 may not be a correct
+    response to a 0.92-similar but materially different input.
+    Threshold discipline is the operator's responsibility."""
+
+    async def lookup(
+        self,
+        key: SemanticCacheKey,
+        threshold: float,
+    ) -> SemanticCacheHit | None: ...
+
+    async def store(
+        self,
+        key: SemanticCacheKey,
+        response: ModelResponse,
+        ttl_s: int,
+    ) -> None: ...
+
+    async def invalidate(self, agent_name: str) -> None:
+        """Evict all cached entries for an agent. Called on agent-version
+        change (prompt or tool-binding edit) to prevent stale hits."""
+```
+
+### `SemanticCacheKey`
+
+```python
+class SemanticCacheKey(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    agent_name: str
+    agent_version: str
+    """Content-hash of the agent config at call time. Changes invalidate
+    all cached entries for that agent — see SemanticCache.invalidate()."""
+
+    model_binding_hash: str
+    """Hash of (provider + model + temperature + max_tokens + response_format).
+    Different model settings get different cache entries."""
+
+    tools_hash: str
+    """Exact hash of the tool schemas presented to the LLM. Different
+    tool sets get different cache entries."""
+
+    messages_structural_hash: str
+    """Hash of messages with content text stripped. Catches structural
+    changes (e.g. new tool-result blocks) independent of semantic content."""
+
+    messages_embedding: Embedding
+    """Vector used for similarity search. Embedded from the
+    concatenated textual content of messages."""
+```
+
+Lookup semantics: structural hash + model binding + tools must match exactly; semantic similarity is computed over the embedding within that exact-match bucket. This prevents cross-bucket false hits (an agent with tool-set A never hits an entry cached from the same messages under tool-set B).
+
+### `SemanticCacheHit`
+
+```python
+class SemanticCacheHit(BaseModel):
+    response: ModelResponse
+    similarity: float
+    cached_at: datetime
+    original_input_preview: str | None = None   # truncated, for debugging
+```
+
+### `ResultCache` (tool-result exact-match)
+
+```python
+class ResultCache(Protocol):
+    """Exact-match cache for tool outputs. Per-tool opt-in via
+    ToolSpec.cacheable; keyed by hash of validated input. Safe by
+    default because it only caches tools the author explicitly marked
+    as idempotent."""
+
+    async def lookup(
+        self,
+        tool_ref: str,
+        tool_version: str,
+        input_hash: str,
+    ) -> BaseModel | None: ...
+
+    async def store(
+        self,
+        tool_ref: str,
+        tool_version: str,
+        input_hash: str,
+        output: BaseModel,
+        ttl_s: int,
+    ) -> None: ...
+```
+
+Both cache protocols are accessed by upper layers via `Session` — the session carries a `cache: CacheAccessor` bundle with `semantic`, `tool_result`, and a no-op fallback when caching isn't configured. Tool handlers and provider calls never construct caches directly.
+
+### `CacheAccessor` on `Session`
+
+`Session` gains one field:
+
+```python
+cache: CacheAccessor
+"""Session-scoped accessor. .semantic, .tool_result, or NoOp when
+caching is disabled. Upper layers don't special-case configuration —
+they call through the accessor, and absent backends mean miss."""
+```
+
+No other core types change for caching.
+
 ## `Session`
 
 ```python
@@ -641,6 +936,61 @@ class ConnectionEvent(_RunEventBase):
     lifecycle: Literal["acquire", "cache_hit", "refresh", "release", "evict", "health_check"]
     latency_ms: int
 
+class EmbedCall(_RunEventBase):
+    event: Literal["embed"] = "embed"
+    agent_name: str
+    embedder: str             # e.g. 'voyage:voyage-3'
+    input_count: int
+    input_tokens: int
+    purpose: Literal["query", "document"]
+    latency_ms: int
+    cost_estimate_usd: Decimal | None
+
+class SemanticCacheHitEvent(_RunEventBase):
+    event: Literal["cache.semantic.hit"] = "cache.semantic.hit"
+    agent_name: str
+    similarity: float
+    threshold: float
+    cached_at: datetime
+    saved_tokens_estimate: int
+    saved_cost_estimate_usd: Decimal | None
+
+class SemanticCacheMiss(_RunEventBase):
+    event: Literal["cache.semantic.miss"] = "cache.semantic.miss"
+    agent_name: str
+    top_similarity: float      # best candidate seen, below threshold
+    threshold: float
+
+class SemanticCacheStore(_RunEventBase):
+    event: Literal["cache.semantic.store"] = "cache.semantic.store"
+    agent_name: str
+    ttl_s: int
+
+class ToolCacheHit(_RunEventBase):
+    event: Literal["cache.tool.hit"] = "cache.tool.hit"
+    agent_name: str
+    tool_ref: str
+    tool_version: str
+    cached_at: datetime
+
+class RetrievalEvent(_RunEventBase):
+    event: Literal["retrieval"] = "retrieval"
+    agent_name: str
+    retriever: str             # e.g. 'pgvector_docs'
+    kind: Literal["dense", "sparse", "hybrid"]
+    top_k: int
+    returned: int
+    latency_ms: int
+
+class RerankEvent(_RunEventBase):
+    event: Literal["rerank"] = "rerank"
+    agent_name: str
+    reranker: str              # e.g. 'cohere:rerank-3'
+    candidates: int
+    top_k: int | None
+    latency_ms: int
+    cost_estimate_usd: Decimal | None
+
 class Handoff(_RunEventBase):
     event: Literal["handoff"] = "handoff"
     from_agent: str
@@ -689,6 +1039,10 @@ RunEvent = Annotated[
     | LLMCallStarted | LLMDelta | LLMCallCompleted
     | ToolStarted | ToolCompleted
     | ConnectionEvent
+    | EmbedCall
+    | SemanticCacheHitEvent | SemanticCacheMiss | SemanticCacheStore
+    | ToolCacheHit
+    | RetrievalEvent | RerankEvent
     | Handoff | StateTransition
     | ApprovalRequired | ApprovalResolved
     | RunCompleted | RunFailed | RunCancelled,
@@ -866,6 +1220,14 @@ FoundryError
 │   ├── ConnectionSlotNotDeclaredError   tool asked for a slot it didn't declare
 │   ├── ConnectionSlotNotBoundError      project didn't bind a declared slot
 │   └── ConnectionRefreshError     token/cert refresh itself failed
+├── EmbedderError                  anything about embedding calls
+│   ├── EmbedderConfigError        unsupported model, invalid input size
+│   ├── EmbedderAuthError          credentials rejected
+│   ├── EmbedderTimeoutError       call exceeded budget
+│   └── EmbedderUnexpectedError    catch-all
+├── CacheError                     anything about cache operations
+│   ├── CacheBackendError          backing store unavailable (redis down, etc.)
+│   └── CacheCorruptedEntry        stored entry fails schema validation on read
 ├── ApprovalRequired               NOT AN ERROR — raised to signal HITL pause
 ├── RunCancelled                   session cancellation propagated
 └── VersioningError
@@ -955,6 +1317,12 @@ from .connection import (
     ConnectionHealth, ConnectionDescriptor, ConnectionContext,
     AuthScheme,
 )
+from .embedder import Embedder, Embedding, EmbedderCapabilities, EmbedderPricing
+from .retrieval import Retriever, Reranker, RetrievedDocument
+from .cache import (
+    SemanticCache, SemanticCacheKey, SemanticCacheHit,
+    ResultCache, CacheAccessor,
+)
 from .session import Session, RunId, CancelToken, CheckpointerHandle
 from .messages import (
     FoundryMessage, MessageRole,
@@ -1001,11 +1369,19 @@ __all__ = [
     "RunStarted", "AgentStarted", "AgentCompleted",
     "LLMCallStarted", "LLMDelta", "LLMCallCompleted",
     "ToolStarted", "ToolCompleted", "ConnectionEvent",
+    "EmbedCall",
+    "SemanticCacheHitEvent", "SemanticCacheMiss", "SemanticCacheStore",
+    "ToolCacheHit",
+    "RetrievalEvent", "RerankEvent",
     "Handoff", "StateTransition",
     "ApprovalRequired", "ApprovalResolved",
     "RunCompleted", "RunFailed", "RunCancelled",
     "InboundMessage", "InjectInput", "ApprovalResponse",
     "CancelRun", "PauseRun", "ResumeRun",
+    "Embedder", "Embedding", "EmbedderCapabilities", "EmbedderPricing",
+    "Retriever", "Reranker", "RetrievedDocument",
+    "SemanticCache", "SemanticCacheKey", "SemanticCacheHit",
+    "ResultCache", "CacheAccessor",
     "StateBase", "Reducer",
     # errors
     "FoundryError",
@@ -1022,6 +1398,9 @@ __all__ = [
     "ConnectionTimeoutError", "ConnectionHealthCheckError",
     "ConnectionPoolExhausted", "ConnectionSlotNotDeclaredError",
     "ConnectionSlotNotBoundError", "ConnectionRefreshError",
+    "EmbedderError", "EmbedderConfigError", "EmbedderAuthError",
+    "EmbedderTimeoutError", "EmbedderUnexpectedError",
+    "CacheError", "CacheBackendError", "CacheCorruptedEntry",
     "ApprovalRequired", "RunCancelled",
     "VersioningError", "RefResolutionError", "PinConflictError", "RollbackError",
     # connection primitives

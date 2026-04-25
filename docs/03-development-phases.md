@@ -20,7 +20,7 @@ Phases correspond to doc tiers but are not 1:1 with them. Some tiers (e.g. Tier 
 |---|---|---|---|---|
 | 0 | Decisions & skeleton | Repo layout, pinned deps, lint boundaries, empty but importable modules | — | 1–2 days |
 | 1 | Core framework + providers + config | Trivial agent runs against Anthropic AND OpenAI from YAML | 0 | 4–6 days |
-| 2 | Tool system + agent system + state + catalog + connections | Agents call pinned tools that acquire pooled, authenticated connections; slots compile-checked | 1 | 7–10 days |
+| 2 | Tool system + agent system + state + catalog + connections + caching + retrieval | Agents call pinned tools and authenticated connections; semantic cache + tool-result cache opt-ins; retrievers and rerankers as first-class primitives | 1 | 9–12 days |
 | 3 | Single-agent orchestration on LangGraph | `foundry run` compiles a SystemSpec into a StateGraph and runs it | 2 | 3–5 days |
 | 4 | Eval harness + per-artifact + comparison | `foundry eval` runs tool / agent / project evals; `compare` works across versions and pin-sets | 3 | 4–6 days |
 | 5 | Versioning + git backbone + per-artifact rollback + catalog promote | Per-tool, per-prompt, and per-project rollback all atomic; `foundry catalog promote` gated | 4 | 4–5 days |
@@ -83,23 +83,29 @@ Total calendar estimate (one engineer, focused): roughly 6–10 weeks. This is a
 
 ---
 
-## Phase 2 — Tool system + agent system + state management + catalog + connections
+## Phase 2 — Tool system + agent system + state management + catalog + connections + caching + retrieval
 
 ### Deliverables
 
 - **`foundry.core.tool`** — `Tool` protocol (async handler returning a typed result), `ToolRegistry`.
 - **`foundry.core.connection`** — `Connection` protocol, `ConnectionPool`, `ConnectionAccessor`, `ConnectionFactory`, `ConnectionHealth`, `ConnectionDescriptor`, `AuthScheme` enum.
-- **`foundry.core.state`** — Pydantic-based state primitive with reducer annotations (`Annotated[T, Reducer.APPEND]` etc.).
-- **`foundry.config.schemas`** — complete `ToolSpec` (including `connections_required: list[ConnectionSlot]`), `AgentSpec`, `StateSpec`, `SystemSpec` (including tool version pins + `connections: dict[str, ConnectionBinding]`), `ConnectionSpec`, `ConnectionBinding`, `RefreshPolicy`, `PoolPolicy`.
-- **`foundry.config.refs`** — `ArtifactRef` parser + resolver (`catalog/name@v2`, `local/name@v3` → on-disk path). Handles tool, connection, and agent_template kinds.
-- **`foundry.catalog`** — catalog index loader, version discovery for tools AND connections, `CatalogEntry` schema. No promotion yet (Phase 5).
-- **`foundry.auth`** — scheme helpers: `api_key`, `basic_auth`, `oauth2_client_credentials`, `oauth2_refresh_token`, `jwt_bearer`, `sigv4`, `mtls`, `custom`. Token cache. Redactor.
-- **`foundry.connections`** — `ConnectionPool` concrete implementation, registry (factory discovery), health runner, `ConnectionDescriptor` builder.
-- **Per-tool and per-connection directory versioning on disk** — `<root>/tools/<name>/v<N>/{tool.yaml, handler.py, schemas.py, eval.yaml, README.md}` and `<root>/connections/<name>/v<N>/{connection.yaml, auth.py, schemas.py, health.yaml, README.md}`. Each version immutable once committed.
+- **`foundry.core.embedder`** — `Embedder` protocol, `Embedding`, `EmbedderCapabilities`.
+- **`foundry.core.retrieval`** — `Retriever`, `Reranker` protocols, `RetrievedDocument`.
+- **`foundry.core.cache`** — `SemanticCache`, `ResultCache`, `CacheAccessor` protocols, key types.
+- **`foundry.core.state`** — Pydantic-based state primitive with reducer annotations.
+- **`foundry.config.schemas`** — complete `ToolSpec` (incl. `connections_required`, `cacheable`, `cache_ttl_s`, `cache_scope`), `AgentSpec` (incl. `semantic_cache: SemanticCacheConfig | None`, `retrievers: list[RetrieverBinding]`), `StateSpec`, `SystemSpec` (incl. tool + connection version pins), `ConnectionSpec`, `ConnectionBinding`, `RetrieverBinding`, `RerankerBinding`, `SemanticCacheConfig`, `EmbedderBinding`, refresh/pool policies.
+- **`foundry.config.refs`** — `ArtifactRef` parser + resolver handling tool, connection, retriever, and agent_template kinds.
+- **`foundry.catalog`** — catalog index loader, version discovery for tools, connections, retrievers. No promotion yet (Phase 5).
+- **`foundry.auth`** — 8 scheme helpers, token cache, redactor.
+- **`foundry.connections`** — `ConnectionPool` concrete impl, registry, health runner, descriptor builder.
+- **`foundry.providers.embedders`** — concrete embedder adapters for Voyage, OpenAI, Cohere, Bedrock.
+- **`foundry.cache`** — concrete `SemanticCache` + `ResultCache` implementations: `in_process` (SQLite/FAISS), `redis` (Redis Stack), `pgvector` (Postgres pgvector).
+- **`foundry.retrieval`** — concrete retrievers (`DenseRetriever`, `SparseRetriever`, `HybridRetriever` with RRF) and reranker adapters (Cohere, Voyage, Jina, local cross-encoder stub).
+- **Per-tool and per-connection directory versioning on disk**. Each version immutable once committed.
 - **`foundry.orchestration.state_scope`** — compile-time per-node visibility enforcement.
-- **Compile-time connection wiring validation**: every slot in a ToolSpec's `connections_required` must have a matching entry in the ToolBinding's `connection_bindings`, pointing at a valid ConnectionBinding in SystemSpec.connections whose ref matches the slot's `accepts` list.
-- **Example catalog**: seed `catalog/tools/` with 2–3 trivial shared tools and `catalog/connections/` with 2 trivial connections (e.g. `http_service/v1` using `api_key`, `local_fs/v1` using `custom`) so Phase 3+ can exercise the full binding chain end-to-end.
-- Updated trivial project: `hello_agent` uses a tool that declares a connection slot, bound to a catalog connection.
+- **Compile-time wiring validation** for connection slots, retriever bindings, cache backends (dimension match against embedder).
+- **Example catalog**: seed `catalog/tools/` with 2–3 trivial shared tools, `catalog/connections/` with 2 trivial connections + 1 vector-store (`pgvector`) + 1 reranker (`cohere_rerank`), and `catalog/retrievers/` with `pgvector_dense` + `hybrid_rrf` templates.
+- Updated trivial project: `hello_agent` uses a catalog tool that declares a connection slot; a second example project demonstrates semantic-cache + hybrid retriever in end-to-end use.
 
 ### Exit gate
 
@@ -116,7 +122,16 @@ Total calendar estimate (one engineer, focused): roughly 6–10 weeks. This is a
 - [ ] Secret-literal scan catches a credential accidentally placed inside `SystemSpec.connections.*.config` → `ConfigLoadError`.
 - [ ] State visibility: agent declared `read: [messages]` attempts to access `draft_plan` → compile-time `StateVisibilityError`.
 - [ ] State reducers work: `append` concatenates lists; `merge` merges dicts; unannotated fields last-write-wins.
-- [ ] Catalog index lists available tools AND connections with their versions; missing version referenced in a pin raises a structured error at compile time.
+- [ ] Catalog index lists available tools, connections, AND retrievers with their versions; missing version raises a structured error at compile time.
+- [ ] **Embedder round-trip**: `EmbedderBinding` for Voyage `voyage-3` and OpenAI `text-embedding-3-small` both resolve and produce embeddings of advertised dimensions.
+- [ ] **Semantic cache hit**: agent with `semantic_cache.backend: in_process` hits cache on the same input re-run; `cache.semantic.hit` event emitted with `similarity ≥ threshold`; `saved_cost_usd` populated.
+- [ ] **Semantic cache invalidation**: bump a prompt version; same input now misses cache and emits `invalidate` event.
+- [ ] **Tool-result cache**: tool with `cacheable: true` + `cache_ttl_s: 60` returns cached output on the second call in the same run; cache.tool.hit event emitted.
+- [ ] **Tool-cache validator**: `cacheable: true` without `cache_ttl_s` → structured `ConfigValidationError` at load.
+- [ ] **Cache failure fails open**: patched backend raises; run completes using LLM path + warning event; never blocks.
+- [ ] **Hybrid retriever**: `hybrid_rrf` retriever calls dense + sparse in parallel, merges via RRF, returns top_k docs; `retrieval` event emitted; one-branch-fail-other-branch-return test passes.
+- [ ] **Reranker**: `cohere_rerank` reorders input docs; `rerank` event emitted with cost_estimate.
+- [ ] **Dimension mismatch compile check**: configuring a dense retriever whose embedder dimensions don't match the vector store's configured dimensions fails load with `EmbedderConfigError`.
 
 ---
 

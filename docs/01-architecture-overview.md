@@ -80,6 +80,11 @@ Eight Pydantic models form the shared vocabulary of the entire foundry. Every ot
 | `StateSpec` | `22-state-management.md` | Tier 2 | A system's shared state schema; per-node visibility rules. |
 | `ConnectionSpec` | `23-connections-and-auth.md` | Tier 2 | A pooled, authenticated handle to an external enterprise system (Snowflake, Slack, S3, Salesforce, …). Standalone versioned artifact; tools declare slots that bind to connections. |
 | `ConnectionBinding` | `23-connections-and-auth.md` | Tier 2 | Project-level pin of a connection ref, version, config, and credentials_ref. Lives inside `SystemSpec.connections`. |
+| `Embedder` / `Embedding` | `11-provider-abstraction.md` + `24-caching-and-optimisation.md` | Tier 1/2 | Protocol + typed vector result for text embeddings. Separate vendor family from generation providers (Voyage, OpenAI, Cohere, Bedrock). |
+| `SemanticCache` / `SemanticCacheConfig` | `24-caching-and-optimisation.md` | Tier 2 | Optional similarity-based cache for LLM calls; opt-in per agent; correctness-sensitive so off by default. |
+| `ResultCache` + `ToolSpec.cacheable` | `24-caching-and-optimisation.md` + `20-tool-system.md` | Tier 2 | Exact-match cache for idempotent tool outputs; opt-in per tool. |
+| `Retriever` / `Reranker` / `RetrievedDocument` | `25-retrieval-and-rag.md` | Tier 2 | RAG primitives: dense/sparse/hybrid retrieval + cross-encoder reranking. |
+| `RetrieverBinding` / `RerankerBinding` | `25-retrieval-and-rag.md` | Tier 2 | Agent-level pin of retrievers (and optional reranker) with connection bindings. |
 | `SystemSpec` | `31-multi-agent-systems.md` | Tier 3 | A full multi-agent system: agents + flow + state + guardrails + tool version pins + connection bindings. The manifest. |
 | `EvalSpec` | `40-eval-harness.md` | Tier 4 | An eval set: cases, scorers, threshold, metadata. Attached to a tool version, an agent, a project, or a connection health check. |
 | `EvalComparison` | `40-eval-harness.md` | Tier 4 | Result of running the same eval against multiple artifact versions or pin-sets. |
@@ -351,6 +356,17 @@ agent-foundry/
 │       │   ├── registry.py         discovery + factory loading
 │       │   ├── health.py           health-check runner
 │       │   └── descriptors.py      ConnectionDescriptor builder
+│       ├── cache/
+│       │   ├── __init__.py         CacheAccessor composition
+│       │   ├── semantic.py         SemanticCache implementations: in-process, redis, pgvector
+│       │   ├── tool_result.py      ResultCache implementations
+│       │   └── keys.py             stable hashing for cache keys
+│       ├── retrieval/
+│       │   ├── __init__.py         Retriever / Reranker registry
+│       │   ├── dense.py            DenseRetriever (Embedder + vector store)
+│       │   ├── sparse.py           SparseRetriever (BM25, vendor sparse)
+│       │   ├── hybrid.py           HybridRetriever (RRF, weighted merge)
+│       │   └── rerankers/          cross-encoder adapters (cohere, voyage, jina)
 │       ├── orchestration/
 │       │   ├── compiler.py         SystemSpec → CompiledSystem (resolves refs + versions)
 │       │   ├── patterns.py         supervisor, sequential, parallel, router
@@ -426,11 +442,21 @@ agent-foundry/
 │       │   └── escalate_generic/v1/
 │       ├── connections/            shared authenticated handles to widely-used systems
 │       │   ├── postgres/v1/        generic Postgres + OAuth2/mTLS
+│       │   ├── pgvector/v1/        Postgres with pgvector for RAG
+│       │   ├── pinecone/v1/        managed vector store
+│       │   ├── qdrant/v1/          open-source vector store
+│       │   ├── elasticsearch/v1/   lexical / sparse search
+│       │   ├── cohere_rerank/v1/   rerank service
+│       │   ├── voyage_embed/v1/    embedding service
 │       │   ├── slack_workspace/v1/
 │       │   ├── aws_session/v1/     SigV4 / assume-role / SSO
 │       │   ├── azure_entra/v1/     managed identity / service principal
 │       │   ├── gmail_oauth/v1/
 │       │   └── github_app/v1/
+│       ├── retrievers/             reusable retriever templates
+│       │   ├── pgvector_dense/v1/  dense-only pgvector
+│       │   ├── elastic_bm25/v1/    sparse-only Elasticsearch
+│       │   └── hybrid_rrf/v1/      composed dense + sparse with RRF
 │       ├── agent_templates/        (optional; empty until needed)
 │       │   └── summarizer/v1/…
 │       └── index.yaml              catalog index for this root
@@ -783,6 +809,11 @@ LangSmith integration is **opt-in** (`FOUNDRY_TRACING=langsmith`). OTel + SQLite
 | `foundry.llm` | `run_id`, `agent`, `provider`, `model`, `prompt_tokens`, `completion_tokens`, `cached_read_tokens`, `cache_write_tokens`, `latency_ms`, `cost_estimate_usd`, `temperature`, `max_tokens`, `tool_schemas_count`, `stop_reason`, `error` |
 | `foundry.tool` | `run_id`, `agent`, `tool_ref`, `tool_version`, `input_hash`, `output_hash`, `success`, `latency_ms`, `retry_count`, `error_category`, `connections_used` (list of ConnectionDescriptor refs) |
 | `foundry.connection` | `run_id`, `connection_ref`, `connection_version`, `slot`, `auth_scheme`, `principal` (redacted), `event` (`acquire`/`cache_hit`/`refresh`/`release`/`evict`), `latency_ms`, `config_hash`, `error_category` |
+| `foundry.embed` | `run_id`, `agent`, `embedder`, `model`, `input_count`, `input_tokens`, `purpose` (`query`/`document`), `latency_ms`, `cost_estimate_usd` |
+| `foundry.cache.semantic` | `run_id`, `agent`, `event` (`hit`/`miss`/`store`/`invalidate`), `similarity` (hit/miss), `threshold`, `cached_at` (hit), `saved_tokens_estimate` (hit), `saved_cost_usd` (hit), `ttl_s` (store) |
+| `foundry.cache.tool` | `run_id`, `agent`, `tool_ref`, `tool_version`, `event` (`hit`/`miss`/`store`), `cached_at` (hit), `input_hash` |
+| `foundry.retrieval` | `run_id`, `agent`, `retriever`, `kind` (`dense`/`sparse`/`hybrid`), `top_k`, `returned`, `latency_ms` |
+| `foundry.rerank` | `run_id`, `agent`, `reranker`, `model`, `candidates`, `top_k`, `latency_ms`, `cost_estimate_usd` |
 | `foundry.handoff` | `run_id`, `from_agent`, `to_agent`, `trigger` (`rule`/`llm`/`end`), `hop_number`, `state_size_bytes` |
 | `foundry.state_transition` | `run_id`, `agent`, `fields_written`, `bytes_delta` |
 | `foundry.eval` | `eval_run_id`, `project`, `eval_spec_ref`, `pin_set_hash`, `cases_total`, `cases_passed`, `score`, `per_case_results_ref` |

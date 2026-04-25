@@ -24,7 +24,16 @@ src/foundry/providers/
 ├── vertex.py                VertexProvider — Gemini + Anthropic-on-Vertex (deferred if risky)
 ├── pricing.py               per-model cost estimation
 ├── errors.py                maps provider exceptions → FoundryError subclasses
-└── streaming.py             ModelDelta assembly for each provider's streaming format
+├── streaming.py             ModelDelta assembly for each provider's streaming format
+├── rate_limit.py            RateLimiter protocol + InProcessTokenBucket + RedisTokenBucket
+└── embedders/
+    ├── __init__.py          EmbedderAdapter, EmbedderBinding, registry lookup
+    ├── _base.py             abstract EmbedderAdapter base class
+    ├── voyage.py            VoyageEmbedder — voyage-3, voyage-large (asymmetric q/d)
+    ├── openai.py            OpenAIEmbedder — text-embedding-3-small / -large
+    ├── cohere.py            CohereEmbedder — embed-v3 (asymmetric q/d, multilingual)
+    ├── bedrock.py           BedrockEmbedder — titan-embed, cohere-on-bedrock
+    └── manifests/           per-vendor embedder manifests (dims, max tokens, pricing)
 ```
 
 ## What `providers` imports
@@ -309,6 +318,97 @@ The base class does the heavy lifting (spans, timing, cost, retries, logging) an
 
 - Gemini models + Anthropic-on-Vertex.
 - Deferred to Phase 1 polish if integration proves thorny; contract is the same as the others.
+
+## Embedders (separate adapter family)
+
+Embedding endpoints are distinct from generation endpoints — different APIs, different vendor strengths, different pricing. Embedders get their own adapter family alongside `ProviderAdapter`, with an analogous shape.
+
+### `EmbedderBinding`
+
+```python
+class EmbedderBinding(BaseModel):
+    provider: str
+    """Canonical embedder provider: 'voyage', 'openai', 'cohere', 'bedrock'."""
+
+    model: str
+    """Model id, e.g. 'voyage-3', 'text-embedding-3-small', 'embed-english-v3.0'."""
+
+    settings: EmbedderSettings = Field(default_factory=EmbedderSettings)
+    credentials_ref: CredentialsRef | None = None
+
+class EmbedderSettings(BaseModel):
+    batch_size: int = 64
+    timeout_s: float = 30.0
+    retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
+```
+
+`EmbedderBinding` appears in `AgentSpec.semantic_cache.embedder_binding` and in retriever/reranker catalog configs. Same pattern as `ModelBinding` — provider-agnostic, pluggable, compile-time validated.
+
+### Concrete embedders
+
+| Provider | Models | Asymmetric q/d | Batch | Notes |
+|---|---|---|---|---|
+| **Voyage** | `voyage-3`, `voyage-3-large`, `voyage-code-3` | ✅ | up to 128 | Recommended partner for Anthropic deployments (no native Anthropic embedder as of 2026). |
+| **OpenAI** | `text-embedding-3-small` (1536), `text-embedding-3-large` (3072, configurable down) | ❌ | up to 2048 | Native to OpenAI / Azure OpenAI. Dimension truncation via `dimensions` param. |
+| **Cohere** | `embed-english-v3.0`, `embed-multilingual-v3.0` | ✅ | up to 96 | Strong multilingual. Pairs well with Cohere Rerank. |
+| **Bedrock** | `amazon.titan-embed-text-v2`, `cohere.embed-*` | varies | varies | SigV4 auth; same `aws_session` connection pattern as Bedrock generation. |
+
+### `EmbedderAdapter` base
+
+```python
+class EmbedderAdapter(ABC):
+    name: ClassVar[str]
+    capabilities: EmbedderCapabilities
+
+    @abstractmethod
+    def _build_client(self) -> Any: ...
+
+    @abstractmethod
+    async def _embed_batch(
+        self,
+        texts: list[str],
+        purpose: Literal["query", "document"],
+    ) -> list[list[float]]: ...
+
+    @abstractmethod
+    def _classify_error(self, exc: Exception) -> EmbedderError | None: ...
+
+    async def embed(
+        self,
+        inputs: list[str],
+        purpose: Literal["query", "document"] = "document",
+    ) -> list[Embedding]:
+        """Default impl: chunks inputs into batches of
+        capabilities.max_batch_size, dispatches concurrently via
+        create_task_group, applies retries + rate limiting + timeout,
+        emits foundry.embed events, returns ordered results."""
+        ...
+```
+
+The base does retries, rate limiting, per-attempt timeouts, event emission, and error classification. Concrete adapters implement the three hooks.
+
+### Capability-required extension for `ModelBinding`
+
+An agent that enables semantic caching declares an `embedder_binding` in its `SemanticCacheConfig`. The capability-required compile-time check is extended:
+
+- The chosen embedder must exist in the registry.
+- The embedder's dimensions must match the semantic cache backend's expected dimensions (or backend is dynamic-dim).
+- `supports_query_document_split` required only if the agent's config requests asymmetric use; otherwise optional.
+
+Failures surface as `EmbedderConfigError` at compile time — same pattern as provider capabilities.
+
+### Rate limiting and cost
+
+Embedders share the `RateLimiter` from the generation side — keyed on `(embedder_provider, embedder_model)` separately from generation keys. Cost estimation via `EmbedderCapabilities.pricing` (typically $/1M input tokens; embedders don't have output tokens).
+
+### Error translation
+
+Mirrors the generation-side error hierarchy:
+
+- `EmbedderAuthError` — 401/403.
+- `EmbedderConfigError` — unsupported model, invalid input size, dimension mismatch.
+- `EmbedderTimeoutError` — client-side or provider-side timeout.
+- `EmbedderUnexpectedError` — anything else, with provider error text in `context`.
 
 ## Streaming contract
 
