@@ -20,7 +20,7 @@ Phases correspond to doc tiers but are not 1:1 with them. Some tiers (e.g. Tier 
 |---|---|---|---|---|
 | 0 | Decisions & skeleton | Repo layout, pinned deps, lint boundaries, empty but importable modules | — | 1–2 days |
 | 1 | Core framework + providers + config | Trivial agent runs against Anthropic AND OpenAI from YAML | 0 | 4–6 days |
-| 2 | Tool system + agent system + state + catalog + connections + caching + retrieval | Agents call pinned tools and authenticated connections; semantic cache + tool-result cache opt-ins; retrievers and rerankers as first-class primitives | 1 | 9–12 days |
+| 2 | Tool system + agent system + state + catalog + connections + caching + retrieval + memory | Adds the previous + Memory coordinator with working/episodic/semantic layers, off-by-default | 1 | 10–13 days |
 | 3 | Single-agent orchestration on LangGraph | `foundry run` compiles a SystemSpec into a StateGraph and runs it | 2 | 3–5 days |
 | 4 | Eval harness + per-artifact + comparison | `foundry eval` runs tool / agent / project evals; `compare` works across versions and pin-sets | 3 | 4–6 days |
 | 5 | Versioning + git backbone + per-artifact rollback + catalog promote | Per-tool, per-prompt, and per-project rollback all atomic; `foundry catalog promote` gated | 4 | 4–5 days |
@@ -91,6 +91,7 @@ Total calendar estimate (one engineer, focused): roughly 6–10 weeks. This is a
 - **`foundry.core.connection`** — `Connection` protocol, `ConnectionPool`, `ConnectionAccessor`, `ConnectionFactory`, `ConnectionHealth`, `ConnectionDescriptor`, `AuthScheme` enum.
 - **`foundry.core.embedder`** — `Embedder` protocol, `Embedding`, `EmbedderCapabilities`.
 - **`foundry.core.retrieval`** — `Retriever`, `Reranker` protocols, `RetrievedDocument`.
+- **`foundry.core.memory`** — `Memory`, `MemoryLayer` protocols, `MemoryEnvelope`, `MemoryContribution`, `MemoryWrite`, `MemoryContext`.
 - **`foundry.core.cache`** — `SemanticCache`, `ResultCache`, `CacheAccessor` protocols, key types.
 - **`foundry.core.state`** — Pydantic-based state primitive with reducer annotations.
 - **`foundry.config.schemas`** — complete `ToolSpec` (incl. `connections_required`, `cacheable`, `cache_ttl_s`, `cache_scope`), `AgentSpec` (incl. `semantic_cache: SemanticCacheConfig | None`, `retrievers: list[RetrieverBinding]`), `StateSpec`, `SystemSpec` (incl. tool + connection version pins), `ConnectionSpec`, `ConnectionBinding`, `RetrieverBinding`, `RerankerBinding`, `SemanticCacheConfig`, `EmbedderBinding`, refresh/pool policies.
@@ -101,6 +102,7 @@ Total calendar estimate (one engineer, focused): roughly 6–10 weeks. This is a
 - **`foundry.providers.embedders`** — concrete embedder adapters for Voyage, OpenAI, Cohere, Bedrock.
 - **`foundry.cache`** — concrete `SemanticCache` + `ResultCache` implementations: `in_process` (SQLite/FAISS), `redis` (Redis Stack), `pgvector` (Postgres pgvector).
 - **`foundry.retrieval`** — concrete retrievers (`DenseRetriever`, `SparseRetriever`, `HybridRetriever` with RRF) and reranker adapters (Cohere, Voyage, Jina, local cross-encoder stub).
+- **`foundry.memory`** — `DefaultMemory` coordinator, three concrete layers (`WorkingMemoryLayer`, `EpisodicMemoryLayer`, `SemanticMemoryLayer`), prompt-assembly logic.
 - **Per-tool and per-connection directory versioning on disk**. Each version immutable once committed.
 - **`foundry.orchestration.state_scope`** — compile-time per-node visibility enforcement.
 - **Compile-time wiring validation** for connection slots, retriever bindings, cache backends (dimension match against embedder).
@@ -132,6 +134,13 @@ Total calendar estimate (one engineer, focused): roughly 6–10 weeks. This is a
 - [ ] **Hybrid retriever**: `hybrid_rrf` retriever calls dense + sparse in parallel, merges via RRF, returns top_k docs; `retrieval` event emitted; one-branch-fail-other-branch-return test passes.
 - [ ] **Reranker**: `cohere_rerank` reorders input docs; `rerank` event emitted with cost_estimate.
 - [ ] **Dimension mismatch compile check**: configuring a dense retriever whose embedder dimensions don't match the vector store's configured dimensions fails load with `EmbedderConfigError`.
+- [ ] **Memory: working layer**: configured with `max_messages: 5`; on a 10-turn run, agent prompt contains exactly the last 5 message turns from state.
+- [ ] **Memory: episodic layer**: configured against a seeded retriever; agent's prompt includes top-K retrieved past snippets in the configured `system_suffix` placement; `memory.read` event lists `episodic` in `layers_read`.
+- [ ] **Memory: semantic layer with periodic consolidation**: every N turns, the consolidator prompt runs and writes synthesised content into the configured state field; `memory.consolidate` event emitted with input/output token counts.
+- [ ] **Memory: degrade-gracefully (default)**: a failed retriever in episodic layer → contribution empty + warning event; run completes.
+- [ ] **Memory: fail-strict mode**: same failure → `MemoryLayerError` raised, run aborted.
+- [ ] **Memory: envelope token cap**: configured `max_envelope_tokens` triggers truncation of last-listed layer first; `truncated: true` flag in event.
+- [ ] **Memory: layer-name uniqueness**: two layers with the same name → `ConfigValidationError` at load.
 
 ---
 

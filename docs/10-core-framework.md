@@ -16,6 +16,7 @@ src/foundry/core/
 ├── connection.py    Connection protocol, ConnectionPool, ConnectionAccessor, ConnectionFactory
 ├── embedder.py      Embedder protocol, Embedding, EmbedderCapabilities
 ├── retrieval.py     Retriever, Reranker protocols, RetrievedDocument
+├── memory.py        Memory, MemoryLayer protocols, MemoryEnvelope, MemoryContribution, MemoryWrite
 ├── cache.py         SemanticCache, SemanticCacheKey, SemanticCacheHit, ResultCache (protocols)
 ├── session.py       Session, RunId
 ├── messages.py      FoundryMessage, MessageRole, ContentBlock
@@ -74,6 +75,11 @@ A CI check runs `ruff check src/foundry/core/` with a gate on zero violations.
 | `Retriever` | `retrieval.py` | Protocol: returns relevant documents for a query. Implementations: dense, sparse (BM25), hybrid. |
 | `Reranker` | `retrieval.py` | Protocol: rescores a candidate list of documents. Separate from `Embedder` because it uses cross-encoder models. |
 | `RetrievedDocument` | `retrieval.py` | Pydantic: id, text, score, source, metadata. |
+| `Memory` | `memory.py` | Protocol: coordinates multi-layer memory — read, write, consolidate. |
+| `MemoryLayer` | `memory.py` | Protocol: a single memory layer (working / episodic / semantic / custom). |
+| `MemoryEnvelope` | `memory.py` | Pydantic: per-layer contributions assembled for prompt injection. |
+| `MemoryContribution` | `memory.py` | Pydantic: one layer's typed output (messages list / docs / synthesised text). |
+| `MemoryWrite` | `memory.py` | Pydantic: a write payload, routed by kind to the appropriate layer. |
 | `SemanticCache` | `cache.py` | Protocol: similarity-based cache for LLM responses. Optional; opt-in per agent. |
 | `SemanticCacheKey` | `cache.py` | Pydantic: structural hash + embedding vector of the inputs being cached. |
 | `SemanticCacheHit` | `cache.py` | Pydantic: result of a lookup hit — cached response + similarity score + metadata. |
@@ -575,6 +581,141 @@ Retrievers *can* be wrapped as tools (the LLM calls `retrieve_documents(query)`)
 
 Full spec (implementations, hybrid-fusion strategies, backend catalog entries, RAG patterns, failure modes) in `25-retrieval-and-rag.md`.
 
+## Memory primitives
+
+The foundry treats agent memory as a **composition over existing primitives** rather than a new heavy subsystem. A `Memory` is a coordinator that gathers contributions from one or more `MemoryLayer`s, assembles them into a typed envelope for prompt injection, and routes writes to the appropriate layer. Three standard layer kinds are shipped — working (recency window), episodic (retrieval-based), and semantic (synthesised) — each implemented on top of primitives we already have (state + reducer, `Retriever`, state + lifecycle hook).
+
+Cross-session persistent memory (a `MemoryStore` keyed on user / session) is **explicitly deferred** to v1.1; the spec documents the gap and where it would slot in without changing today's protocols.
+
+Full behavioural spec (lifecycle, prompt-assembly rules, consolidation, failure modes, observability, deferred work) in `26-memory-and-context.md`. Core types below.
+
+### `Memory` protocol
+
+```python
+@runtime_checkable
+class Memory(Protocol):
+    layers: list[MemoryLayer]
+
+    async def read(
+        self,
+        query: str,
+        ctx: MemoryContext,
+    ) -> MemoryEnvelope:
+        """Gather contributions from each configured layer in declared order.
+        Layer-level errors degrade gracefully: a failed layer contributes
+        an empty contribution + warning event, rather than aborting the read."""
+
+    async def write(
+        self,
+        content: MemoryWrite,
+        ctx: MemoryContext,
+    ) -> None:
+        """Route to the appropriate layer. If `content.target_layer` is set
+        the routing is explicit; otherwise the kind selects a default
+        (`message` → working, `summary`/`fact` → semantic, `raw` → all
+        writable layers)."""
+
+    async def consolidate(self, ctx: MemoryContext) -> None:
+        """Trigger consolidation across layers (e.g., summarise older
+        working messages into the semantic layer). Called by lifecycle
+        hooks at configured triggers (every N turns, end of session,
+        explicit invocation)."""
+```
+
+### `MemoryLayer` protocol
+
+```python
+@runtime_checkable
+class MemoryLayer(Protocol):
+    kind: Literal["working", "episodic", "semantic", "custom"]
+    name: str
+    """Stable identifier within an agent. Referenced from
+    MemoryInjectionRule and from MemoryWrite.target_layer."""
+
+    async def read(
+        self,
+        query: str,
+        ctx: MemoryContext,
+    ) -> MemoryContribution: ...
+
+    async def write(
+        self,
+        content: MemoryWrite,
+        ctx: MemoryContext,
+    ) -> None:
+        """No-op for layers that don't accept writes (some episodic
+        configurations are read-only against an external corpus)."""
+
+    async def consolidate(self, ctx: MemoryContext) -> None:
+        """No-op for stateless layers (working from state, episodic
+        from external store). Meaningful for semantic — typically runs
+        an LLM call to summarise recent activity into the layer's
+        backing field."""
+```
+
+### Types
+
+```python
+class MemoryContext(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    run_id: RunId
+    agent_name: str
+    session: Session
+
+    state_view: dict[str, Any]
+    """Read-only projection of the current state, scoped to fields
+    the memory subsystem may read. Provided by the orchestration runtime
+    on every memory call."""
+
+    state_writer: Callable[[str, Any], Awaitable[None]] | None = None
+    """Bound callable that writes a state field within the agent's
+    declared write scope. None when the memory layer is read-only in
+    this context."""
+
+class MemoryContribution(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    layer_name: str
+    layer_kind: Literal["working", "episodic", "semantic", "custom"]
+    content: list[FoundryMessage] | list[RetrievedDocument] | str
+    """Working returns a message list, episodic returns retrieved docs,
+    semantic returns synthesised text. Custom layers pick one of the
+    three carriers."""
+    tokens_estimate: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+class MemoryEnvelope(BaseModel):
+    contributions: list[MemoryContribution]
+    """Ordered as declared in MemoryConfig.layers."""
+    total_tokens_estimate: int
+    truncated: bool = False
+    """True if any layer's contribution was truncated due to per-rule
+    or envelope-level token limits."""
+
+class MemoryWrite(BaseModel):
+    kind: Literal["message", "summary", "fact", "raw"]
+    content: str | FoundryMessage
+    target_layer: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+```
+
+### Why a coordinator rather than direct state munging
+
+- **Uniformity across projects.** Every project that needs memory configures it the same way; meta-agent can scaffold `memory:` blocks without each project reinventing the conventions.
+- **Eval-driven tuning.** Memory becomes an explicit configuration axis; `compare_versions` can vary it (turn off episodic, change window size, swap semantic consolidator) and measure end-to-end impact.
+- **Observability.** Memory reads/writes/consolidations are typed events in the run stream — debugging long conversations becomes "show me the memory envelope this agent saw."
+- **Fail-safe composition.** A failing episodic retriever degrades to "no episodic context this turn" rather than blowing up the whole agent step. Coordinator owns the degrade-vs-fail policy.
+
+### Why not a heavy persistent store in v1
+
+The three standard layers cover ~90% of what conversational agents actually use. All three implement on top of *existing* primitives:
+
+- Working = state field + reducer.
+- Episodic = `Retriever` over a conversation-history corpus.
+- Semantic = state field + consolidator hook.
+
+A persistent cross-session `MemoryStore` (e.g. user-keyed memory across visits) is real but heavier — a backing DB, retention rules, identity management. That's a v1.1 concern when a real customer-facing project surfaces. The current protocol shape doesn't preclude it; a future `PersistentSemanticLayer` reads/writes a cross-session store using the same `MemoryLayer` interface.
+
 ## Caching primitives
 
 The foundry supports three distinct cache layers, each at a different level:
@@ -982,6 +1123,31 @@ class RetrievalEvent(_RunEventBase):
     returned: int
     latency_ms: int
 
+class MemoryRead(_RunEventBase):
+    event: Literal["memory.read"] = "memory.read"
+    agent_name: str
+    layers_read: list[str]
+    layers_failed: list[str] = Field(default_factory=list)
+    total_tokens_estimate: int
+    truncated: bool
+
+class MemoryWriteEvent(_RunEventBase):
+    event: Literal["memory.write"] = "memory.write"
+    agent_name: str
+    layer_name: str
+    layer_kind: Literal["working", "episodic", "semantic", "custom"]
+    write_kind: Literal["message", "summary", "fact", "raw"]
+    bytes: int
+
+class MemoryConsolidate(_RunEventBase):
+    event: Literal["memory.consolidate"] = "memory.consolidate"
+    agent_name: str
+    layer_name: str
+    trigger: Literal["periodic", "session_end", "explicit"]
+    input_tokens_summarised: int
+    output_tokens_written: int
+    latency_ms: int
+
 class RerankEvent(_RunEventBase):
     event: Literal["rerank"] = "rerank"
     agent_name: str
@@ -1043,6 +1209,7 @@ RunEvent = Annotated[
     | SemanticCacheHitEvent | SemanticCacheMiss | SemanticCacheStore
     | ToolCacheHit
     | RetrievalEvent | RerankEvent
+    | MemoryRead | MemoryWriteEvent | MemoryConsolidate
     | Handoff | StateTransition
     | ApprovalRequired | ApprovalResolved
     | RunCompleted | RunFailed | RunCancelled,
@@ -1228,6 +1395,10 @@ FoundryError
 ├── CacheError                     anything about cache operations
 │   ├── CacheBackendError          backing store unavailable (redis down, etc.)
 │   └── CacheCorruptedEntry        stored entry fails schema validation on read
+├── MemoryError                    anything about memory subsystem
+│   ├── MemoryConfigError          bad layer config / circular references
+│   ├── MemoryLayerError           one layer failed (degrades gracefully unless strict)
+│   └── MemoryConsolidateError     consolidator LLM/state write failed
 ├── ApprovalRequired               NOT AN ERROR — raised to signal HITL pause
 ├── RunCancelled                   session cancellation propagated
 └── VersioningError
@@ -1319,6 +1490,10 @@ from .connection import (
 )
 from .embedder import Embedder, Embedding, EmbedderCapabilities, EmbedderPricing
 from .retrieval import Retriever, Reranker, RetrievedDocument
+from .memory import (
+    Memory, MemoryLayer, MemoryContext,
+    MemoryEnvelope, MemoryContribution, MemoryWrite,
+)
 from .cache import (
     SemanticCache, SemanticCacheKey, SemanticCacheHit,
     ResultCache, CacheAccessor,
@@ -1373,6 +1548,7 @@ __all__ = [
     "SemanticCacheHitEvent", "SemanticCacheMiss", "SemanticCacheStore",
     "ToolCacheHit",
     "RetrievalEvent", "RerankEvent",
+    "MemoryRead", "MemoryWriteEvent", "MemoryConsolidate",
     "Handoff", "StateTransition",
     "ApprovalRequired", "ApprovalResolved",
     "RunCompleted", "RunFailed", "RunCancelled",
@@ -1380,6 +1556,8 @@ __all__ = [
     "CancelRun", "PauseRun", "ResumeRun",
     "Embedder", "Embedding", "EmbedderCapabilities", "EmbedderPricing",
     "Retriever", "Reranker", "RetrievedDocument",
+    "Memory", "MemoryLayer", "MemoryContext",
+    "MemoryEnvelope", "MemoryContribution", "MemoryWrite",
     "SemanticCache", "SemanticCacheKey", "SemanticCacheHit",
     "ResultCache", "CacheAccessor",
     "StateBase", "Reducer",
@@ -1401,6 +1579,8 @@ __all__ = [
     "EmbedderError", "EmbedderConfigError", "EmbedderAuthError",
     "EmbedderTimeoutError", "EmbedderUnexpectedError",
     "CacheError", "CacheBackendError", "CacheCorruptedEntry",
+    "MemoryError", "MemoryConfigError", "MemoryLayerError",
+    "MemoryConsolidateError",
     "ApprovalRequired", "RunCancelled",
     "VersioningError", "RefResolutionError", "PinConflictError", "RollbackError",
     # connection primitives

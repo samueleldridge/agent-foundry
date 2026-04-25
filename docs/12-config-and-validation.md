@@ -265,6 +265,12 @@ class AgentSpec(BaseModel):
     callables or as pre-agent-start retrieval (depending on the agent's
     flow). See 25-retrieval-and-rag.md."""
 
+    memory: MemoryConfig | None = None
+    """Opt-in multi-layer memory (working / episodic / semantic).
+    None = no memory subsystem; the agent's prompt is built directly
+    from state. Default for batch / one-shot agents. See
+    26-memory-and-context.md."""
+
     metadata: dict[str, Any] = Field(default_factory=dict)
     schema_version: Literal[1] = 1
 
@@ -332,6 +338,123 @@ class RerankerBinding(BaseModel):
     connection_bindings: dict[str, str] = Field(default_factory=dict)
     top_k: int | None = Field(default=None, ge=1, le=200)
     """Reranker's output truncation; None means keep all input docs reordered."""
+
+class MemoryConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layers: list[MemoryLayerConfig] = Field(min_length=1)
+    """Layers in declared order. Order is the prompt-injection order
+    when no per-rule order is given."""
+
+    inject_into_prompt: list[MemoryInjectionRule] = Field(default_factory=list)
+    """How each layer's output is woven into the agent's prompt. If
+    empty, defaults are used: working → messages, episodic → system_suffix,
+    semantic → system_prefix."""
+
+    max_envelope_tokens: int | None = Field(default=None, ge=100, le=200000)
+    """Hard ceiling on total memory contribution per turn. When exceeded,
+    layers are truncated in reverse priority order (last-listed first)."""
+
+    fail_strict: bool = False
+    """If False (default): a failed layer contributes empty + warning event.
+    If True: a failed layer raises MemoryLayerError and aborts the run."""
+
+    @model_validator(mode="after")
+    def _names_unique(self) -> "MemoryConfig":
+        names = [l.name for l in self.layers]
+        if len(names) != len(set(names)):
+            raise ValueError("MemoryConfig.layers names must be unique")
+        return self
+
+# --- Layer config: discriminated union over the three standard kinds ---
+
+class MemoryWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    max_messages: int | None = Field(default=None, ge=1, le=10000)
+    max_tokens: int | None = Field(default=None, ge=1, le=200000)
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "MemoryWindow":
+        if (self.max_messages is None) == (self.max_tokens is None):
+            raise ValueError("Exactly one of max_messages or max_tokens must be set")
+        return self
+
+class WorkingMemoryLayerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["working"] = "working"
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    source_field: str = "messages"
+    """State field the layer reads from. Must be a list of FoundryMessage
+    or a string. Validated at compile against StateSpec.schema."""
+    window: MemoryWindow
+
+class EpisodicMemoryLayerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["episodic"] = "episodic"
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    retriever_slot: str
+    """Must be a slot defined in AgentSpec.retrievers."""
+    top_k: int = Field(default=5, ge=1, le=200)
+    relevance_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    purpose: Literal["query", "document"] = "query"
+
+class SemanticMemoryLayerConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["semantic"] = "semantic"
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    state_field: str
+    """State field that holds the synthesised content (typically a string,
+    e.g. Markdown). Validated at compile against StateSpec.schema."""
+
+    consolidate_every_n_turns: int | None = Field(default=None, ge=1, le=1000)
+    consolidate_on_session_end: bool = False
+    """At least one consolidation trigger must be set, or consolidation
+    must be invoked explicitly via lifecycle hook / tool call."""
+
+    consolidator_prompt: str | None = None
+    """Path to a prompt file relative to the agent dir (e.g.
+    'prompts/consolidate_v1.md'). Required when a trigger is set."""
+
+    consolidator_model_binding: ModelBinding | None = None
+    """Model used for consolidation. Defaults to the agent's main
+    model_binding; override for cheaper-but-good-enough summarisation."""
+
+    max_size_tokens: int = Field(default=2000, ge=100, le=50000)
+    """Target size of the synthesised content. Consolidator is prompted
+    to keep within this; envelope-level truncation as a safety net."""
+
+MemoryLayerConfig = Annotated[
+    WorkingMemoryLayerConfig | EpisodicMemoryLayerConfig | SemanticMemoryLayerConfig,
+    Field(discriminator="kind"),
+]
+
+class MemoryInjectionRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer: str
+    """Must match a name in MemoryConfig.layers."""
+
+    placement: Literal[
+        "system_prefix",
+        "system_suffix",
+        "messages",
+        "user_message_prefix",
+    ]
+    """Where in the prompt envelope this layer's content lands.
+    'messages' means the layer's contribution IS the conversation
+    (working memory's typical placement). Others wrap content as
+    text in the named position."""
+
+    template: str | None = None
+    """Optional formatting template. Variables: {content}, {docs},
+    {messages} depending on the layer's contribution type. None uses
+    sensible defaults per layer kind."""
+
+    max_tokens: int | None = Field(default=None, ge=1, le=200000)
+    """Per-rule truncation ceiling."""
 
 class PromptRef(BaseModel):
     version: str = Field(pattern=r"^v\d+$")

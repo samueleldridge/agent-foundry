@@ -18,7 +18,7 @@ After Tier 0 you can either read top-down (Tier 1 → Tier 8) or jump to a speci
 | Tier | Layer | Docs |
 |---|---|---|
 | 1 | Core framework | `10-core-framework.md` · `11-provider-abstraction.md` · `12-config-and-validation.md` |
-| 2 | Agents, tools, state, connections, caching, retrieval | `20-tool-system.md` · `21-agent-system.md` · `22-state-management.md` · `23-connections-and-auth.md` · `24-caching-and-optimisation.md` · `25-retrieval-and-rag.md` |
+| 2 | Agents, tools, state, connections, caching, retrieval, memory | `20-tool-system.md` · `21-agent-system.md` · `22-state-management.md` · `23-connections-and-auth.md` · `24-caching-and-optimisation.md` · `25-retrieval-and-rag.md` · `26-memory-and-context.md` |
 | 3 | Orchestration | `30-orchestration-patterns.md` · `31-multi-agent-systems.md` · `32-human-in-the-loop.md` |
 | 4 | Eval | `40-eval-harness.md` · `41-eval-driven-iteration.md` |
 | 5 | Versioning & rollback | `50-versioning-model.md` · `51-git-backbone.md` · `52-rollback-and-audit.md` |

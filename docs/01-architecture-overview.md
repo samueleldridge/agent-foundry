@@ -85,6 +85,8 @@ Eight Pydantic models form the shared vocabulary of the entire foundry. Every ot
 | `ResultCache` + `ToolSpec.cacheable` | `24-caching-and-optimisation.md` + `20-tool-system.md` | Tier 2 | Exact-match cache for idempotent tool outputs; opt-in per tool. |
 | `Retriever` / `Reranker` / `RetrievedDocument` | `25-retrieval-and-rag.md` | Tier 2 | RAG primitives: dense/sparse/hybrid retrieval + cross-encoder reranking. |
 | `RetrieverBinding` / `RerankerBinding` | `25-retrieval-and-rag.md` | Tier 2 | Agent-level pin of retrievers (and optional reranker) with connection bindings. |
+| `Memory` / `MemoryLayer` | `26-memory-and-context.md` | Tier 2 | Multi-layer memory coordinator + per-layer protocol. Composes existing primitives (state, retriever, hooks). |
+| `MemoryConfig` + `MemoryLayerConfig` | `26-memory-and-context.md` | Tier 2 | Agent-level config: which layers, their settings, prompt-injection rules. Off by default. |
 | `SystemSpec` | `31-multi-agent-systems.md` | Tier 3 | A full multi-agent system: agents + flow + state + guardrails + tool version pins + connection bindings. The manifest. |
 | `EvalSpec` | `40-eval-harness.md` | Tier 4 | An eval set: cases, scorers, threshold, metadata. Attached to a tool version, an agent, a project, or a connection health check. |
 | `EvalComparison` | `40-eval-harness.md` | Tier 4 | Result of running the same eval against multiple artifact versions or pin-sets. |
@@ -367,6 +369,14 @@ agent-foundry/
 │       │   ├── sparse.py           SparseRetriever (BM25, vendor sparse)
 │       │   ├── hybrid.py           HybridRetriever (RRF, weighted merge)
 │       │   └── rerankers/          cross-encoder adapters (cohere, voyage, jina)
+│       ├── memory/
+│       │   ├── __init__.py         Memory coordinator factory + registry
+│       │   ├── coordinator.py      DefaultMemory implementation (assembles envelopes)
+│       │   ├── layers/
+│       │   │   ├── working.py      WorkingMemoryLayer (state + window)
+│       │   │   ├── episodic.py     EpisodicMemoryLayer (wraps Retriever)
+│       │   │   └── semantic.py     SemanticMemoryLayer (state field + consolidator)
+│       │   └── prompt_assembly.py  envelope → prompt-injection logic
 │       ├── orchestration/
 │       │   ├── compiler.py         SystemSpec → CompiledSystem (resolves refs + versions)
 │       │   ├── patterns.py         supervisor, sequential, parallel, router
@@ -814,6 +824,9 @@ LangSmith integration is **opt-in** (`FOUNDRY_TRACING=langsmith`). OTel + SQLite
 | `foundry.cache.tool` | `run_id`, `agent`, `tool_ref`, `tool_version`, `event` (`hit`/`miss`/`store`), `cached_at` (hit), `input_hash` |
 | `foundry.retrieval` | `run_id`, `agent`, `retriever`, `kind` (`dense`/`sparse`/`hybrid`), `top_k`, `returned`, `latency_ms` |
 | `foundry.rerank` | `run_id`, `agent`, `reranker`, `model`, `candidates`, `top_k`, `latency_ms`, `cost_estimate_usd` |
+| `foundry.memory.read` | `run_id`, `agent`, `layers_read` (list), `layers_failed` (list), `total_tokens_estimate`, `truncated` |
+| `foundry.memory.write` | `run_id`, `agent`, `layer_name`, `layer_kind`, `write_kind`, `bytes` |
+| `foundry.memory.consolidate` | `run_id`, `agent`, `layer_name`, `trigger` (`periodic`/`session_end`/`explicit`), `input_tokens_summarised`, `output_tokens_written`, `latency_ms` |
 | `foundry.handoff` | `run_id`, `from_agent`, `to_agent`, `trigger` (`rule`/`llm`/`end`), `hop_number`, `state_size_bytes` |
 | `foundry.state_transition` | `run_id`, `agent`, `fields_written`, `bytes_delta` |
 | `foundry.eval` | `eval_run_id`, `project`, `eval_spec_ref`, `pin_set_hash`, `cases_total`, `cases_passed`, `score`, `per_case_results_ref` |
