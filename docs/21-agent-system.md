@@ -615,6 +615,124 @@ Every failure emits a structured `RunEvent` for the audit trail.
 2. **Agent identity invalidation**: bump `prompts/v3` → `v4` (pin change), `agent_version` changes; semantic-cache lookup miss; clean re-run.
 3. **Worker reusability**: same agent config used in two different `SystemSpec.flow` topologies; both runs produce identical outputs given identical state.
 
+## Function nodes (the non-LLM alternative)
+
+Not every node in a flow needs an LLM. Input normalisation, output formatting, deterministic business-rule gates, pure data transformations — these benefit from being explicit nodes (state-visibility-enforced, observed, retryable, checkpointed) but don't need a model call.
+
+`FunctionNode` is the deterministic-Python alternative to `Agent` at the same flow position. Both implement the `Node` protocol; the orchestration compiler accepts either interchangeably. Spec details: `10-core-framework.md` § FunctionNode protocol; schema: `12-config-and-validation.md` § FunctionNodeSpec.
+
+### Directory shape
+
+```
+projects/<name>/functions/<node_name>/
+├── function.yaml      FunctionNodeSpec (function ref + state visibility + retry/timeout)
+├── function.py        async def <name>(state_view, ctx) -> dict[str, Any]
+└── README.md          what it does, when to use
+```
+
+### Realistic example
+
+```yaml
+# function.yaml
+name: normalize_input
+description: |
+  Normalise incoming break records into the canonical shape the
+  downstream agents expect. Trims whitespace; coerces date formats;
+  computes derived fields (severity_band).
+
+function: function.py::normalise
+
+state_visibility:
+  read: [raw_input]
+  write: [normalized_input, severity_band]
+
+retry_policy:
+  max_attempts: 1     # function should be deterministic; retries usually pointless
+
+timeout_s: 2.0
+```
+
+```python
+# function.py
+from foundry import RunContext
+
+async def normalise(state_view: dict, ctx: RunContext) -> dict:
+    raw = state_view["raw_input"]
+    return {
+        "normalized_input": {
+            "trade_id": raw["trade_id"].strip().upper(),
+            "amount_usd": float(raw["amount"]),
+            "timestamp": parse_timestamp(raw["timestamp"]),
+        },
+        "severity_band": classify_severity(raw["amount"]),
+    }
+```
+
+Used in flow:
+
+```yaml
+# system.yaml
+agents: [classifier, investigator, resolver]
+functions: [normalize_input, format_response]
+
+flow:
+  type: sequential
+  steps: [normalize_input, classifier, investigator, resolver, format_response]
+```
+
+The compiler resolves each step name to either an agent or a function node. Names cannot collide across the two namespaces (compile-time check).
+
+### What function nodes DO have
+
+- State visibility (same enforcement as agents).
+- Retry policy + timeout (same plumbing).
+- `RunContext` access (session, connections — for function nodes that need to call external systems via the same pooled connections).
+- Lifecycle hooks (same instrumentation surface).
+- Their own `RunEvent`s (`function_node.started`, `function_node.completed`).
+- Content-hashed `node_version` (over function source + config).
+
+### What function nodes DO NOT have
+
+- Model binding, prompt, output schema (no LLM).
+- Tools allowlist (function nodes can't call tools — they're meant to be self-contained Python).
+- Memory or semantic_cache (no LLM, nothing to cache against the input meaningfully).
+- Iteration limit (functions run exactly once per invocation).
+- `OutputValidationError` auto-repair (no LLM to repair the output).
+
+### When to choose FunctionNode over Agent
+
+- The decision is deterministic from state. No LLM judgement adds value.
+- Latency or cost matters and the work is mechanically expressible.
+- The transformation is shape-changing (e.g., transforming a list of agent outputs into a structured report).
+- A business-rule gate ("if state.x < 100, skip; else continue") that doesn't need natural-language reasoning.
+
+### When NOT to choose FunctionNode
+
+- The decision needs LLM judgement (classification with grey areas, summarisation, free-text generation). Use Agent.
+- You need tool calls. Use Agent (with tools allowlist).
+- The "function" would be inventing complex logic the meta-agent could handle in a prompt. Prefer Agent for rapid iteration via prompt edits.
+
+The asymmetry: agents are configuration + prompt (cheap to iterate); function nodes are configuration + Python (handmade, requires engineering review). Use FunctionNode when determinism is the goal; Agent when flexibility is the goal.
+
+### `build_function_node` (meta-agent path)
+
+The meta-agent's `build_function_node` tool scaffolds:
+
+```
+projects/<scoped_project>/functions/<name>/
+├── function.yaml      stub
+├── function.py        empty async function with correct signature
+└── README.md          templated
+```
+
+The meta-agent fills in:
+1. State-visibility lists (read/write).
+2. The function body — usually small, deterministic transformations.
+
+Then runs the project eval to confirm the function integrates correctly. No standalone eval for function nodes (they're tested via the project eval; their determinism makes regressions instantly visible).
+
+Same guardrails apply: meta-agent doesn't write `subprocess`, `eval`, `exec` (lint catches), doesn't bypass connection slots if external system access is needed.
+
 ## Open questions
 
 1. **Per-agent `LifecycleHooks` config**. Agents currently inherit project-level hooks via `Session`. Should an agent be able to declare its own hooks (e.g., a custom `before_node` that mutates state)? Lean: no in v1 — keep hooks instrumentation-only. Revisit if needed.

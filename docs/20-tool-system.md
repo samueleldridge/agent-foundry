@@ -11,6 +11,133 @@ Two load-bearing properties:
 1. **Tools are versioned, shareable, and pinned.** A tool is a directory with a fixed file shape under `catalog/tools/<name>/v<N>/` (shared) or `projects/<name>/tools/<name>/v<N>/` (project-local). Projects pin specific versions. Rolling forward is deliberate.
 2. **Tool handlers never touch credentials.** They request connections by slot via `ctx.connections.get(slot)` and receive typed authenticated clients. Auth, pooling, refresh, retries, audit — all framework concerns.
 
+## Tools are handmade Python (the asymmetry with agents)
+
+The foundry treats agents and tools asymmetrically on purpose:
+
+| | Agents | Tools |
+|---|---|---|
+| Config | YAML + markdown prompt + Pydantic output schema | YAML + Pydantic schemas |
+| Behaviour | LLM-driven; declarative | Imperative Python handler |
+| Authoring | Easy to scaffold, easy to iterate via prompt edits | Real engineering; meta-agent helps but doesn't replace judgement |
+| Versioning | Content hash over config + prompt | Frozen `v<N>/` directory; immutable once committed |
+| Meta-agent role | Generates and iterates prompts; high quality on most tasks | Scaffolds structure, fills handler body for known patterns; needs human review |
+| Failure mode if wrong | Prompt edit + re-eval; cheap | Code change + new version; more expensive |
+| Catalog promotion | (agents are project-scoped; templates exist for archetypes) | First-class — catalog tools are a primary asset of the framework |
+
+This asymmetry is deliberate. Tools touch real systems with real consequences (DB writes, emails sent, money moved); LLMs writing arbitrary tool code unsupervised is a recipe for production incidents. The framework structurally constrains what tools can do (the 5-file shape, the connection-slot pattern, the typed schemas, the standalone eval) so even meta-agent-written tools fall within safe bounds.
+
+### What this means in practice
+
+**For simple, well-understood tools** (HTTP GET against a typed REST API, SQL query against a documented schema, sending a Slack message, reading an S3 object) — meta-agent's `build_tool` produces a working first-pass. Standalone eval catches obvious bugs. Human review before catalog promotion is cheap.
+
+**For complex, domain-specific tools** (proprietary internal API, multi-step protocol with retry semantics, anything calling a system the meta-agent has no documentation for) — meta-agent scaffolds the structure (5 files, schemas, tool.yaml). Human writes the handler body. Meta-agent can refine via standalone eval iteration.
+
+**For dangerous tools** (`dangerous: true` — code execution, arbitrary URL fetch, side-effecting actions without strict input constraints) — meta-agent does not scaffold. Human writes; explicit `--allow-dangerous-tools` flag required for `forge` to even surface them as candidates.
+
+### Why the catalog matters here
+
+The catalog is the foundry's bet that **the asymmetry compounds in your favour over time**:
+
+- Quarter 1: most tools are project-local, often human-written. Catalog is small. Meta-agent's tool-writing impact is modest.
+- Quarter 3: catalog has 30+ shared tools. New projects pin from catalog ~80% of the time. Meta-agent's `build_tool` is a fallback for genuinely project-specific tools.
+- Quarter 6: catalog quality is high (each tool battle-tested across multiple projects); meta-agent's job is "which catalog tool fits" not "write a new one."
+
+The meta-agent's job is bounded by what's in the catalog. Investing in catalog quality early pays off in meta-agent reliability later.
+
+## Preprocessing: where it goes
+
+When a tool needs preprocessing (input transformation, validation, audit, authorization), there's a decision tree for where to put it. The wrong choice creates duplication or pollutes concerns.
+
+### Decision tree
+
+```
+Is the preprocessing about the inputs to THIS tool only?
+   │
+   ├─ YES → Inside the tool handler, before connection acquisition.
+   │        (Most common case. Pure handler code.)
+   │
+   └─ NO → Is it cross-cutting across MANY tools?
+       │
+       ├─ Auth, audit logging, rate limiting → In the connection.
+       │  The connection's auth.py wraps the returned client to add
+       │  logging, retries, audit; tools that use the connection inherit.
+       │
+       ├─ Multi-tool input transformation → A function node before the
+       │  agent that calls the tools. Computes the normalised inputs once,
+       │  writes to state; downstream tools read from state.
+       │
+       ├─ Per-call dynamic policy ("can this user/agent call X with Y?") →
+       │  A "guard tool" the agent must call first. Explicit in the
+       │  agent's allowlist; returns approved/rejected; downstream tool
+       │  reads the verdict from state OR refuses if the verdict isn't there.
+       │
+       └─ Pure-Python pre-API-call validation → Middleware before
+          the foundry API endpoint. Out of foundry scope; lives in the
+          consuming pipeline.
+```
+
+### Examples
+
+**Inside the tool handler** — input format normalisation:
+
+```python
+# handler.py
+async def handle(inputs: QueryIn, ctx: RunContext) -> QueryOut:
+    # Preprocessing: normalise SQL whitespace, validate parameter binding format
+    sql = re.sub(r'\s+', ' ', inputs.sql.strip())
+    if any(p.startswith('%') for p in inputs.parameters):
+        raise ToolInputValidationError("Use pyformat parameter binding (%(name)s), not %s")
+    
+    conn = await ctx.connections.get("warehouse")
+    ...
+```
+
+**In the connection** — audit logging that applies to every tool using it:
+
+```python
+# catalog/connections/snowflake/v3/auth.py
+async def build_connection(config, credentials, ctx):
+    raw_client = build_snowflake_client(config, credentials)
+    return AuditingSnowflakeConnection(
+        client=raw_client,
+        audit_callback=lambda sql, params: emit_audit_event(...)
+    )
+```
+
+Every tool using `catalog/snowflake@v3` gets audit logging; tool authors don't think about it.
+
+**A function node** — multi-tool input transformation:
+
+```yaml
+# system.yaml
+agents: [investigator]
+functions: [enrich_trade_context]
+
+flow:
+  type: sequential
+  steps: [enrich_trade_context, investigator]
+```
+
+The function fetches reference data (counterparty names, market mid prices) once, writes to state. The investigator agent's tools (`query_snowflake`, `validate_deltas`) read from the enriched state — no per-tool re-fetching.
+
+**Guard tool** — per-call dynamic policy:
+
+```yaml
+# agent.yaml
+tools: [check_authorization, send_email, send_slack, escalate_to_human]
+```
+
+The agent's prompt instructs it to call `check_authorization(action, args)` before any side-effecting tool. The check tool returns approved/rejected based on policy state; downstream tools refuse if the most recent authorization in state doesn't match.
+
+This pattern is enforceable via lifecycle hooks too (after_tool checks the previous tool was an authorization).
+
+### Why preprocessing is rarely a function node
+
+Because most preprocessing is concern-specific (one tool's input shape, one connection's audit, one policy's check), function nodes are usually overkill. Function nodes shine when the preprocessing serves multiple downstream consumers — which is rare for tool inputs but common for run-wide context enrichment.
+
+Don't reach for function nodes as the default preprocessing answer. Use them when state-shape transformation is the thing.
+
 ## Module layout
 
 ```

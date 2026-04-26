@@ -11,7 +11,9 @@ This doc is the interface contract for the foundry. If this is wrong, everything
 ```
 src/foundry/core/
 ├── __init__.py      public surface (small, curated re-exports)
+├── node.py          Node protocol (common parent of Agent and FunctionNode)
 ├── agent.py         Agent protocol, BaseAgent, LifecycleHooks
+├── function_node.py FunctionNode protocol, BaseFunctionNode (deterministic Python nodes)
 ├── tool.py          Tool protocol, BaseTool, ToolRegistry, RunContext
 ├── connection.py    Connection protocol, ConnectionPool, ConnectionAccessor, ConnectionFactory
 ├── embedder.py      Embedder protocol, Embedding, EmbedderCapabilities
@@ -57,9 +59,12 @@ A CI check runs `ruff check src/foundry/core/` with a gate on zero violations.
 
 | Type | File | One-liner |
 |---|---|---|
-| `Agent` | `agent.py` | Protocol: the thing that produces a response given state + session. |
+| `Agent` | `agent.py` | Protocol: an LLM-driven node — produces a response given state + session via prompt + tools. |
 | `BaseAgent` | `agent.py` | Convenience base class implementing `Agent` with lifecycle-hook plumbing. |
-| `LifecycleHooks` | `agent.py` | Optional pre/post/error hooks users can attach to an agent or session. |
+| `FunctionNode` | `function_node.py` | Protocol: a deterministic Python node — runs a function over state, no LLM. Same flow position as an agent. |
+| `BaseFunctionNode` | `function_node.py` | Convenience base class implementing `FunctionNode` with lifecycle-hook plumbing + observability. |
+| `Node` | `node.py` | Common protocol both `Agent` and `FunctionNode` satisfy: anything the orchestration compiler accepts as a flow node. |
+| `LifecycleHooks` | `agent.py` | Optional pre/post/error hooks users can attach to an agent, function node, or session. |
 | `Tool` | `tool.py` | Protocol: a callable with typed input/output schemas and an async handler. |
 | `BaseTool` | `tool.py` | Convenience base class for authoring tools in Python. |
 | `ToolRegistry` | `tool.py` | Name-and-version indexed lookup; enforces agent-level allowlists. |
@@ -206,6 +211,99 @@ class LifecycleHooks(BaseModel):
 Hooks are **optional** and **never swallow exceptions** — they log and re-raise. They are not a dependency-injection mechanism; they are an instrumentation mechanism. Use them for: cross-cutting metrics, audit-trail-augmentation, circuit-breaker wiring. Do not use them for: business logic, state mutation, control-flow alteration.
 
 Methods on the base class are no-ops when the corresponding hook is `None`, so there is no cost to leaving them unset.
+
+## The `FunctionNode` protocol
+
+Some flow nodes don't need an LLM: input normalisation, output formatting, deterministic routing, business-rule gates, pure data transformations. Forcing them through `Agent` (with a stub LLM call) wastes cost + latency and pollutes the audit trail with vacuous LLM events.
+
+`FunctionNode` is the deterministic-Python alternative. Same flow position as `Agent` — both implement `Node` — same state-visibility enforcement, same retry/timeout/observability/checkpointing. Just no LLM, no tools, no prompt, no output schema (the function returns a state delta directly).
+
+```python
+@runtime_checkable
+class FunctionNode(Protocol):
+    name: str
+    version: str
+    """Content hash of the function source + node config — same role as
+    Agent.version. Caches and audit identity key on it."""
+
+    async def run(
+        self,
+        state: StateBase,
+        session: Session,
+    ) -> NodeResult: ...
+
+class NodeResult(BaseModel):
+    """Common result shape for both Agent and FunctionNode."""
+    state_delta: dict[str, Any]
+    output: Any | None = None      # populated by Agent on terminal turn; usually None for FunctionNode
+    next: str | Literal["END"] | None = None
+```
+
+`Agent.run()` returns `AgentResult` which is a `NodeResult` subclass with the LLM-specific output extraction. `FunctionNode.run()` returns plain `NodeResult` with `state_delta` populated and `output` typically None.
+
+### `BaseFunctionNode`
+
+```python
+class BaseFunctionNode(FunctionNode):
+    def __init__(
+        self,
+        name: str,
+        version: str,
+        hooks: LifecycleHooks | None = None,
+        retry_policy: RetryPolicy | None = None,
+        timeout_s: float = 30.0,
+    ) -> None: ...
+
+    async def run(self, state: StateBase, session: Session) -> NodeResult:
+        async with session.span("foundry.function_node", node=self.name, version=self.version):
+            await self._hooks.before_node(self, state, session)
+            try:
+                result = await self._step(state, session)
+            except Exception as exc:
+                await self._hooks.on_error(self, exc, session)
+                raise
+            await self._hooks.after_node(self, result, state, session)
+            return result
+
+    async def _step(self, state: StateBase, session: Session) -> NodeResult:
+        raise NotImplementedError
+```
+
+Concrete function nodes are loaded by the compiler from a project's `functions/<name>/function.py`; the compiler wraps `function.run` in a `BaseFunctionNode` subclass that delegates to it. Detail in `21-agent-system.md` § Function nodes.
+
+### Why `FunctionNode` is a separate protocol (not just `Agent` with `model_binding=None`)
+
+The schemas diverge:
+- `Agent` has `model_binding`, `prompt`, `output_schema`, `tools`, `iteration_limit`, `semantic_cache`, `retrievers`, `memory` — none of which apply to a function node.
+- `FunctionNode` has just `function_ref`, `state_visibility`, `retry_policy`, `timeout_s`.
+
+Forcing both into one Pydantic schema with optional fields produces a schema where half the fields are mutually exclusive based on a discriminator. Cleaner to split. The shared abstraction lives at the `Node` protocol level (which the orchestration compiler programs against).
+
+### `Node` protocol (shared parent)
+
+```python
+@runtime_checkable
+class Node(Protocol):
+    name: str
+    version: str
+    async def run(self, state: StateBase, session: Session) -> NodeResult: ...
+```
+
+Anything implementing `Node` is a valid flow node. Both `Agent` and `FunctionNode` satisfy it by virtue of having the right methods (Protocol is structural). The compiler accepts a `dict[str, Node]` registry and doesn't care which kind each entry is.
+
+### When to use which
+
+| Use case | Pick |
+|---|---|
+| Decision needs LLM judgement (classification, summarisation, free-text generation) | `Agent` |
+| Tool calls with branching reasoning between them | `Agent` (loop with iteration_limit) |
+| Deterministic input shape transformation | `FunctionNode` |
+| Final output formatting / aggregation | `FunctionNode` |
+| Business-rule gate ("if amount < $X, skip downstream") | `FunctionNode` |
+| Deterministic routing (when conditions are simple expressions over state) | Use a `graph` flow's `when:` predicate, not even a function node |
+| Side effects (write to a DB, send an alert) | A `Tool` called by an Agent — tools are how the foundry interacts with side-effecting systems |
+
+`FunctionNode` does NOT replace tools. Tools are how you interact with the outside world (with connections, retries, sandboxing). Function nodes are how you compute over state without an LLM.
 
 ## The `Tool` protocol
 
@@ -1079,6 +1177,18 @@ class AgentCompleted(_RunEventBase):
     agent_name: str
     output_summary: str | None = None   # short, safe-to-log
 
+class FunctionNodeStarted(_RunEventBase):
+    event: Literal["function_node.started"] = "function_node.started"
+    node_name: str
+    node_version: str
+
+class FunctionNodeCompleted(_RunEventBase):
+    event: Literal["function_node.completed"] = "function_node.completed"
+    node_name: str
+    fields_written: list[str]
+    bytes_delta: int
+    latency_ms: int
+
 class LLMCallStarted(_RunEventBase):
     event: Literal["llm.started"] = "llm.started"
     agent_name: str
@@ -1253,6 +1363,7 @@ class RunCancelled(_RunEventBase):
 
 RunEvent = Annotated[
     RunStarted | AgentStarted | AgentCompleted
+    | FunctionNodeStarted | FunctionNodeCompleted
     | LLMCallStarted | LLMDelta | LLMCallCompleted
     | ToolStarted | ToolCompleted
     | ConnectionEvent
@@ -1533,7 +1644,9 @@ Every span is emitted. Every `await` respects cancellation. Every exception has 
 
 ```python
 # src/foundry/core/__init__.py
+from .node import Node, NodeResult
 from .agent import Agent, AgentResult, BaseAgent, LifecycleHooks
+from .function_node import FunctionNode, BaseFunctionNode
 from .tool import Tool, BaseTool, ToolRegistry, RunContext, RetryPolicy
 from .connection import (
     Connection, ConnectionFactory, ConnectionPool, ConnectionAccessor,
@@ -1587,7 +1700,9 @@ from .errors import (
 )
 
 __all__ = [
+    "Node", "NodeResult",
     "Agent", "AgentResult", "BaseAgent", "LifecycleHooks",
+    "FunctionNode", "BaseFunctionNode",
     "Tool", "BaseTool", "ToolRegistry", "RunContext", "RetryPolicy",
     "Session", "RunId", "CancelToken", "CheckpointerHandle", "CostBudget",
     "FoundryMessage", "MessageRole",
@@ -1596,6 +1711,7 @@ __all__ = [
     "ModelResponse", "ModelDelta", "StopReason", "TokenUsage",
     "RunEvent",
     "RunStarted", "AgentStarted", "AgentCompleted",
+    "FunctionNodeStarted", "FunctionNodeCompleted",
     "LLMCallStarted", "LLMDelta", "LLMCallCompleted",
     "ToolStarted", "ToolCompleted", "ConnectionEvent",
     "EmbedCall",

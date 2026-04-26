@@ -91,6 +91,7 @@ Total calendar estimate (one engineer, focused): roughly 6–10 weeks. This is a
 
 - **`foundry.core.tool`** — `Tool` protocol (async handler returning a typed result), `ToolRegistry`.
 - **`foundry.core.connection`** — `Connection` protocol, `ConnectionPool`, `ConnectionAccessor`, `ConnectionFactory`, `ConnectionHealth`, `ConnectionDescriptor`, `AuthScheme` enum.
+- **`foundry.core.node` + `foundry.core.function_node`** — `Node` protocol (parent of Agent + FunctionNode), `FunctionNode` protocol, `BaseFunctionNode`, `NodeResult`. Deterministic-Python flow nodes with same state-visibility / observability / retry plumbing as agents but no LLM.
 - **`foundry.core.embedder`** — `Embedder` protocol, `Embedding`, `EmbedderCapabilities`.
 - **`foundry.core.retrieval`** — `Retriever`, `Reranker` protocols, `RetrievedDocument`.
 - **`foundry.core.memory`** — `Memory`, `MemoryLayer` protocols, `MemoryEnvelope`, `MemoryContribution`, `MemoryWrite`, `MemoryContext`.
@@ -143,6 +144,11 @@ Total calendar estimate (one engineer, focused): roughly 6–10 weeks. This is a
 - [ ] **Memory: fail-strict mode**: same failure → `MemoryLayerError` raised, run aborted.
 - [ ] **Memory: envelope token cap**: configured `max_envelope_tokens` triggers truncation of last-listed layer first; `truncated: true` flag in event.
 - [ ] **Memory: layer-name uniqueness**: two layers with the same name → `ConfigValidationError` at load.
+- [ ] **FunctionNode end-to-end**: a `sequential` flow `[normalize_input_function, hello_agent, format_output_function]` runs; both function nodes execute their Python; agent runs in between; final state reflects the full pipeline.
+- [ ] **FunctionNode state visibility**: function with `read: [a, b], write: [c]` returning `{a: ..., c: ...}` → only `c` is written; `a` is dropped + warning event.
+- [ ] **FunctionNode observability**: `function_node.started` and `function_node.completed` events emitted with `node_name`, `node_version`, `fields_written`, `bytes_delta`, `latency_ms`.
+- [ ] **Node namespace collision**: an agent and function with the same name → `CompileError` at load.
+- [ ] **Mixed flow validation**: a `graph` flow's `from`/`to` references resolve to either agents or functions interchangeably; missing reference → `CompileError`.
 
 ---
 

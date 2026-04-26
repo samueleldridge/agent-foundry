@@ -33,6 +33,7 @@ src/foundry/config/
 | `projects/<name>/system.yaml` | `load_system_spec(path)` | `SystemSpec` |
 | `projects/<name>/state.yaml` | `load_state_spec(path)` | `StateSpec` |
 | `projects/<name>/agents/<agent>/agent.yaml` | `load_agent_spec(path)` | `AgentSpec` |
+| `projects/<name>/functions/<name>/function.yaml` | `load_function_node_spec(path)` | `FunctionNodeSpec` |
 | `projects/<name>/tools/<tool>/v<N>/tool.yaml` | `load_tool_spec(path)` | `ToolSpec` |
 | `catalog/tools/<tool>/v<N>/tool.yaml` | `load_tool_spec(path)` | `ToolSpec` (same) |
 | `projects/<name>/connections/<name>/v<N>/connection.yaml` | `load_connection_spec(path)` | `ConnectionSpec` |
@@ -48,6 +49,7 @@ src/foundry/config/
 def load_system_spec(path: Path) -> SystemSpec: ...
 def load_state_spec(path: Path) -> StateSpec: ...
 def load_agent_spec(path: Path) -> AgentSpec: ...
+def load_function_node_spec(path: Path) -> FunctionNodeSpec: ...
 def load_tool_spec(path: Path) -> ToolSpec: ...
 def load_connection_spec(path: Path) -> ConnectionSpec: ...
 def load_eval_spec(path: Path) -> EvalSpec: ...
@@ -101,8 +103,15 @@ class SystemSpec(BaseModel):
 
     name: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
     description: str
-    agents: list[str] = Field(min_length=1)
-    """Agent names (not refs) — relative to projects/<name>/agents/*."""
+    agents: list[str] = Field(default_factory=list)
+    """LLM-driven node names — relative to projects/<name>/agents/*.
+    May be empty if the system uses only function nodes."""
+
+    functions: list[str] = Field(default_factory=list)
+    """Deterministic-Python node names — relative to projects/<name>/functions/*.
+    May be empty if the system uses only LLM agents.
+
+    Validator: at least one of agents OR functions must be non-empty."""
 
     state: str = "state.yaml"
     """Relative path to the state spec."""
@@ -472,6 +481,78 @@ class OutputSchemaRef(BaseModel):
     schema: str
     """Module:Class path, e.g. 'output_schema.py::Greeting'. Loaded by importlib
     at compile time relative to the agent directory."""
+
+### `FunctionNodeSpec`
+
+Deterministic Python node — same flow position as an agent but no LLM. Lives at `projects/<name>/functions/<name>/function.yaml`.
+
+```python
+class FunctionNodeSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,63}$")
+    description: str = ""
+
+    function: str
+    """'function.py::callable_name' — async def callable(state_view, ctx) ->
+    dict[str, Any]. Loaded by importlib at compile."""
+
+    state_visibility: StateVisibility
+    """Per-node read/write access to state fields. Same enforcement as agents."""
+
+    retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
+    """Default retry policy if the function raises a retryable error."""
+
+    timeout_s: float = Field(default=30.0, gt=0)
+    """Per-invocation timeout."""
+
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    schema_version: Literal[1] = 1
+```
+
+Function node directory shape (3 files):
+
+```
+projects/<name>/functions/<node_name>/
+├── function.yaml      FunctionNodeSpec
+├── function.py        async def <name>(state_view, ctx) -> dict[str, Any]
+└── README.md          what it does, when to use
+```
+
+The function signature:
+
+```python
+# function.py
+from foundry import RunContext
+
+async def normalise(state_view: dict[str, Any], ctx: RunContext) -> dict[str, Any]:
+    """Pure-Python preprocessing. Returns a state delta — only fields
+    in state_visibility.write may be returned; others are dropped at the
+    boundary with a warning event."""
+    raw = state_view["raw_input"]
+    return {
+        "normalized_input": clean(raw),
+        "input_format_version": detect_version(raw),
+    }
+```
+
+`state_view` is a dict (NOT a Pydantic model) projected to the function's `state_visibility.read` fields. The return dict is validated against `state_visibility.write` at the boundary; extra keys are dropped + warning event; missing required-write fields produce no harm (function is allowed to write subsets of its declared write scope).
+
+Function nodes do NOT have:
+- A model_binding, prompt, or output_schema (no LLM).
+- A tools allowlist (function nodes can't call tools — they're meant to be self-contained Python).
+- Memory or semantic_cache configuration (no LLM, nothing to cache against).
+- An iteration_limit (functions run exactly once per invocation).
+
+Function nodes DO have:
+- State visibility (same enforcement).
+- Retry policy + timeout (same plumbing).
+- RunContext access (session, connections — for function nodes that need to call external systems via the same pooled connections agents use).
+- Lifecycle hooks (same instrumentation surface).
+
+If a function node needs to call an external system, it acquires a connection via `ctx.connections.get(slot)` — same pattern as a tool handler. The function node's parent project declares the slot binding at the system level (see `SystemSpec.connections`).
+
+If a function node would need to do anything LLM-shaped, it's the wrong abstraction — use an agent.
 ```
 
 ### `StateSpec`

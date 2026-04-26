@@ -28,11 +28,16 @@ Three load-bearing properties:
 projects/<project_name>/
 ├── system.yaml             SystemSpec — the manifest
 ├── state.yaml              StateSpec — fields, reducers, visibility
-├── agents/
+├── agents/                 LLM-driven nodes
 │   └── <agent_name>/
 │       ├── agent.yaml      AgentSpec
 │       ├── prompts/v<N>.md
 │       └── output_schema.py
+├── functions/              deterministic Python nodes (preprocessing, formatting, gates)
+│   └── <node_name>/
+│       ├── function.yaml   FunctionNodeSpec
+│       ├── function.py
+│       └── README.md
 ├── tools/                  project-local tools (optional)
 │   └── <tool_name>/v<N>/...
 ├── connections/            project-local connections (optional)
@@ -159,6 +164,7 @@ Every field is consumed by the compiler. Nothing is decorative.
 │     - system.yaml → SystemSpec                              │
 │     - state.yaml → StateSpec                                │
 │     - each agents/<name>/agent.yaml → AgentSpec             │
+│     - each functions/<name>/function.yaml → FunctionNodeSpec│
 │     - each pinned tool's tool.yaml → ToolSpec               │
 │     - each pinned connection's connection.yaml → ConnSpec   │
 │     - each retriever template's retriever.yaml → RSpec      │
@@ -204,6 +210,9 @@ Every field is consumed by the compiler. Nothing is decorative.
 │         compile to a BaseAgent instance                     │
 │         (Provider resolved, tools wired, retrievers wired,  │
 │          memory wired, semantic_cache wired, hooks attached)│
+│     - For each FunctionNodeSpec:                            │
+│         compile to a BaseFunctionNode instance              │
+│         (function loaded via importlib, hooks attached)     │
 │     - For each ToolSpec: register in ToolRegistry           │
 │     - For each ConnectionBinding: register in ConnectionPool│
 │     - Handoff tools generated for supervisor patterns       │

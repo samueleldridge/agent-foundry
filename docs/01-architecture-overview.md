@@ -76,7 +76,9 @@ Eight Pydantic models form the shared vocabulary of the entire foundry. Every ot
 | Primitive | Defined in | Owned by | One-line description |
 |---|---|---|---|
 | `ToolSpec` | `20-tool-system.md` | Tier 2 | A tool's identity, schema, handler reference, connection slots, versioning metadata. One per tool version. |
-| `AgentSpec` | `21-agent-system.md` | Tier 2 | A single agent's identity: model binding, prompt ref, tools (with version pins), output schema, state contract. |
+| `AgentSpec` | `21-agent-system.md` | Tier 2 | A single LLM agent's identity: model binding, prompt ref, tools (with version pins), output schema, state contract. |
+| `FunctionNodeSpec` | `21-agent-system.md` | Tier 2 | A deterministic-Python flow node: function ref, state visibility, retry/timeout. No LLM, no tools, no prompt. Same flow position as an agent. |
+| `Node` (protocol) | `10-core-framework.md` | Tier 1 | Common parent of `Agent` and `FunctionNode`; what the orchestration compiler programs against. |
 | `StateSpec` | `22-state-management.md` | Tier 2 | A system's shared state schema; per-node visibility rules. |
 | `ConnectionSpec` | `23-connections-and-auth.md` | Tier 2 | A pooled, authenticated handle to an external enterprise system (Snowflake, Slack, S3, Salesforce, …). Standalone versioned artifact; tools declare slots that bind to connections. |
 | `ConnectionBinding` | `23-connections-and-auth.md` | Tier 2 | Project-level pin of a connection ref, version, config, and credentials_ref. Lives inside `SystemSpec.connections`. |
@@ -484,7 +486,7 @@ agent-foundry/
 │   └── <project_name>/
 │       ├── system.yaml             SystemSpec — pins tool and prompt versions (the manifest)
 │       ├── state.yaml              StateSpec
-│       ├── agents/
+│       ├── agents/                 LLM agents
 │       │   └── <agent_name>/
 │       │       ├── agent.yaml      AgentSpec — pins prompt version, declares tools + state scope
 │       │       ├── prompts/
@@ -492,6 +494,11 @@ agent-foundry/
 │       │       │   ├── v2.md
 │       │       │   └── …           (numbered; agent.yaml pins which is live)
 │       │       └── output_schema.py
+│       ├── functions/              deterministic Python nodes (preprocessing, formatting, gates)
+│       │   └── <node_name>/
+│       │       ├── function.yaml   FunctionNodeSpec — function ref + state visibility
+│       │       ├── function.py     async def <name>(state_view, ctx) -> dict[str, Any]
+│       │       └── README.md
 │       ├── tools/                  project-LOCAL tools (not promoted to catalog)
 │       │   └── <tool_name>/
 │       │       ├── v1/             same 5-file shape as catalog tools
@@ -819,6 +826,7 @@ LangSmith integration is **opt-in** (`FOUNDRY_TRACING=langsmith`). OTel + SQLite
 | `foundry.llm` | `run_id`, `agent`, `provider`, `model`, `prompt_tokens`, `completion_tokens`, `cached_read_tokens`, `cache_write_tokens`, `latency_ms`, `cost_estimate_usd`, `temperature`, `max_tokens`, `tool_schemas_count`, `stop_reason`, `error` |
 | `foundry.tool` | `run_id`, `agent`, `tool_ref`, `tool_version`, `input_hash`, `output_hash`, `success`, `latency_ms`, `retry_count`, `error_category`, `connections_used` (list of ConnectionDescriptor refs) |
 | `foundry.connection` | `run_id`, `connection_ref`, `connection_version`, `slot`, `auth_scheme`, `principal` (redacted), `event` (`acquire`/`cache_hit`/`refresh`/`release`/`evict`), `latency_ms`, `config_hash`, `error_category` |
+| `foundry.function_node` | `run_id`, `node_name`, `node_version`, `event` (`started`/`completed`), `fields_written` (on completed), `bytes_delta`, `latency_ms` |
 | `foundry.embed` | `run_id`, `agent`, `embedder`, `model`, `input_count`, `input_tokens`, `purpose` (`query`/`document`), `latency_ms`, `cost_estimate_usd` |
 | `foundry.cache.semantic` | `run_id`, `agent`, `event` (`hit`/`miss`/`store`/`invalidate`), `similarity` (hit/miss), `threshold`, `cached_at` (hit), `saved_tokens_estimate` (hit), `saved_cost_usd` (hit), `ttl_s` (store) |
 | `foundry.cache.tool` | `run_id`, `agent`, `tool_ref`, `tool_version`, `event` (`hit`/`miss`/`store`), `cached_at` (hit), `input_hash` |

@@ -27,6 +27,17 @@ src/foundry/runtime/
 └── langgraph_adapter.py   the only place LangGraph is touched
 ```
 
+## Nodes: agents and function nodes
+
+Every "step" referenced by a flow pattern is a **node**. The foundry has two node kinds:
+
+- **Agent** — LLM-driven; full prompt + tools + memory + output-schema apparatus. See `21-agent-system.md`.
+- **FunctionNode** — deterministic Python; no LLM, no tools, no prompt. Same flow position as an agent. See `21-agent-system.md` § Function nodes (and `10-core-framework.md` § FunctionNode protocol).
+
+All five patterns below accept either kind interchangeably. A `sequential` flow can mix `[normalise_function_node, classifier_agent, format_function_node]`. A `supervisor`'s workers can be a mix. A `graph`'s `from`/`to` references resolve to either via the project's `agents:` or `functions:` lists in `SystemSpec`.
+
+The compiler validates every node reference at compile time — every `to:` / `worker:` / `step:` must resolve to either an agent or a function node, and the resolution is unambiguous (names cannot collide across the two namespaces; the loader fails on collision).
+
 ## The five patterns
 
 ### 1. `single`
@@ -373,6 +384,119 @@ The `RunEvent.Handoff` taxonomy already supports this. Tooling (`foundry obs`, d
 | Parallel branch fails (cancel_siblings) | propagates as `MultiBranchError` after sibling cancellation | runtime |
 | Parallel branch fails (collect_all) | recorded in state field; aggregator handles | runtime |
 | Nested flow circular | `CompileError("nested flow cycle")` | compiler |
+
+## Parallel guard / observer pattern
+
+A common need: a "guard" or "monitor" that evaluates state continuously alongside the main flow without blocking it. Examples:
+- **Compliance monitor** — checks every agent output for policy violations; cancels the run on breach.
+- **Cost trajectory monitor** — watches cumulative spend; cancels if the run is trending toward budget breach before the hard cap fires.
+- **Adversarial / prompt-injection detector** — scans tool outputs being injected back into the LLM for known attack patterns.
+- **Quality drift monitor** — compares the run's behaviour to a baseline; flags anomalies for human review post-hoc.
+
+The foundry does NOT have this as a flow primitive. It's a configuration shape that doesn't fit cleanly under any of the five patterns (it's not parallel-with-join, it's not a graph node, it's not a supervisor's worker — it's a side-channel observer).
+
+Three mechanisms cover the use cases. Pick by latency / blocking tolerance.
+
+### Mechanism 1: `LifecycleHooks` (synchronous, blocking)
+
+`BaseAgent.LifecycleHooks` (per `10-core-framework.md`) fires `before_node` / `after_node` / `on_error` / `before_tool` / `after_tool` synchronously around every node and tool. Good for fast, blocking checks where the result must influence the next step.
+
+```python
+async def output_pii_scanner(agent, result, state, session) -> None:
+    """after_node hook. Blocks the run until scan completes."""
+    if contains_pii(result.output):
+        session.cancel_token.cancel(reason="pii_in_output")
+
+hooks = LifecycleHooks(after_node=output_pii_scanner)
+```
+
+Tradeoffs:
+- ✅ Simple. Already supported. Cancellation propagates cleanly.
+- ❌ Blocks the run. A 500ms compliance LLM-judge call adds 500ms to every node.
+- ❌ One project = one hooks bundle (per agent). Multiple guards compose by the hooks themselves, but it gets messy.
+
+Use when: the check is fast (<50ms) and its result must gate the next step.
+
+### Mechanism 2: Event-stream observer (async, non-blocking) — RECOMMENDED for most guards
+
+Every run publishes a typed `RunEvent` stream (`10-core-framework.md` § Streaming events). An external async task can subscribe to the stream, evaluate events asynchronously, and call `session.cancel_token.cancel(reason)` when it detects a violation. The main flow never waits on the observer.
+
+```python
+async def compliance_guard(run_id: RunId, session: Session, judge: Provider):
+    """Subscribes to the run's event stream. Runs an LLM-judge on every
+    agent.completed event in parallel with the main flow. Cancels on
+    policy violation."""
+    async for event in session.event_stream():
+        if event.event == "agent.completed":
+            verdict = await judge.generate(
+                messages=build_compliance_prompt(event),
+                tools=[],
+                settings=ModelSettings(temperature=0, max_tokens=200),
+            )
+            if violates_policy(verdict):
+                session.cancel_token.cancel(reason=f"compliance_violation: {verdict.summary}")
+                # Persist the finding for audit:
+                await session.observability.write_guard_finding(
+                    run_id=run_id,
+                    guard="compliance",
+                    event=event,
+                    verdict=verdict,
+                )
+                return  # observer terminates after firing
+```
+
+The observer is launched as a sibling task when the run starts:
+
+```python
+async with anyio.create_task_group() as tg:
+    tg.start_soon(compiled_system.run, input, session=session)
+    tg.start_soon(compliance_guard, session.run_id, session, judge_provider)
+```
+
+Tradeoffs:
+- ✅ Non-blocking. Main flow runs at full speed; guard runs in parallel.
+- ✅ Multiple guards compose by adding more sibling tasks.
+- ✅ Guard logic lives in project code; testable independently.
+- ⚠️ Race condition: a violation may be detected after the offending output has already been used (e.g., emitted to the LLM in the next turn). Mitigation: pair with `after_node` lifecycle hook for the strictly-must-block-before-next-node case.
+
+Use when: guard latency is non-trivial (LLM judges, slow heuristics) and the violation can be acted on with eventual consistency (cancel the run before final output, even if some intermediate state was emitted).
+
+### Mechanism 3: Hybrid (observer + critical-path hook)
+
+For maximum coverage, combine both:
+
+```python
+# Fast check on critical-path output (blocks if violation):
+def critical_path_check(agent, result, state, session):
+    if obvious_violation(result.output):
+        session.cancel_token.cancel(reason="obvious_violation")
+
+# Slower nuanced check via observer (catches what fast check misses):
+async def nuanced_observer(...):
+    # LLM-judge on every event...
+```
+
+The fast check catches obvious violations cheaply with blocking certainty; the observer catches nuanced violations without slowing the main path.
+
+### Why not a built-in flow primitive
+
+A `guard` flow primitive was considered. Rejected for v1:
+
+- The two existing mechanisms (lifecycle hooks + event-stream observers) cover the use cases without adding pattern surface.
+- A flow primitive would need to specify when the guard runs (before/after every node? every event?), which already overlaps with hooks + observers.
+- Project-side composition via `anyio.create_task_group` is ~10 lines of code; a primitive would add YAML config that compiles to roughly the same thing.
+
+If 3+ projects build similar guards from the same template, promote the template to `catalog/guard_templates/` (analogous to `agent_templates/`). v1.1 work.
+
+### Audit completeness
+
+Guard findings (regardless of mechanism) MUST be written to the audit store via `session.observability.write_guard_finding(...)`. This is a required call so the audit trail records "guard X fired on run Y because of event Z." Querying audit for guard fires:
+
+```bash
+$ foundry obs guards --project pipeline_recon --since 7d
+```
+
+Implementation lives in `foundry.observability.guards`; the API is intentionally narrow so guards can't pollute the audit store with arbitrary writes.
 
 ## Custom patterns (deferred)
 
