@@ -301,6 +301,157 @@ After retrieval, the agent's prompt template includes `<doc id="...">text</doc>`
 
 The agent rates each retrieved doc's relevance in its output. The eval harness compares the agent's ranking against human-labelled relevance judgments. Not a framework feature but a useful eval pattern documented in `40-eval-harness.md` (when written).
 
+## Few-shot learning examples (FSLs)
+
+Many production agents benefit from few-shot examples in their prompts — concrete (input, expected_output) pairs that demonstrate the desired behaviour. The foundry supports three FSL patterns from increasing-sophistication, all built on existing primitives.
+
+### Pattern A: static FSLs in the prompt (always supported, simplest)
+
+Hand-curated examples written directly into the agent's prompt file:
+
+```markdown
+<!-- prompts/v3.md -->
+# Task
+Investigate the break and recommend an action.
+
+# Examples
+
+Input: {trade_id: "ABC123", mismatch_usd: 12500, ...}
+Output: {root_cause: "late_amendment", recommended_action: "auto_resolve", confidence: 0.92, ...}
+
+Input: {trade_id: "XYZ789", mismatch_usd: 87000, ...}
+Output: {root_cause: "partial_settlement", recommended_action: "escalate", confidence: 0.78, ...}
+
+# Now investigate the actual case below.
+```
+
+Versioned with the prompt; trivially supported; zero new primitives.
+
+**When to use**: small set of stable, representative examples that don't depend on the input. Good for setting tone, output shape, and edge-case handling.
+
+**Limits**: prompt size grows with example count; static set can't adapt to varied input distributions.
+
+### Pattern B: dynamic FSL retrieval (RAG over examples)
+
+The agent has a `Retriever` bound to an "FSL corpus" — a vector store of historical (input, expected_output) pairs. At runtime, the agent retrieves the top-K most similar examples to the current input and injects them into the prompt.
+
+This is RAG with the corpus being examples instead of documents. Same primitives (`Retriever`, `Reranker`, `Embedder`); same configuration shape.
+
+```yaml
+# agent.yaml
+retrievers:
+  - slot: fsl_lookup
+    ref: catalog/dense_retriever
+    version: v1
+    connection_bindings:
+      vector_store: fsl_pgvector
+    top_k: 5
+    reranker:
+      ref: catalog/cohere_rerank
+      version: v1
+      top_k: 3
+```
+
+In the agent's prompt template:
+
+```markdown
+{{MEMORY_PREFIX}}
+
+# Examples relevant to this case
+{{retriever:fsl_lookup}}     ← framework injects top-3 reranked FSLs
+
+# Current case
+{{user_input}}
+```
+
+The corpus is populated by:
+- Hand-curating high-quality examples into a YAML file → batch-ingest into the vector store.
+- Capturing production runs that operators marked as exemplary (analogous to `foundry eval capture` for eval cases — see Pattern C).
+- Lifting top-scoring eval cases (Pattern C below).
+
+**When to use**: large pool of examples where input-similarity matters (different break types, different domains, different complexity levels). Adapts to the input distribution.
+
+**Limits**: requires the corpus to be populated and maintained; cold-start has no examples.
+
+### Pattern C: adaptive FSLs from eval results
+
+Eval cases that scored well are high-quality FSL candidates by construction — they're explicitly labelled (input, expected_output) pairs that the agent did handle correctly. Pipeline:
+
+1. After every eval run, the harness can write passing cases into an "FSL corpus" (a vector store catalog connection — `pgvector_dense` or similar).
+2. The agent's retriever (Pattern B) is bound to that corpus.
+3. At runtime, the agent retrieves examples from its own track record.
+
+This is fully composable from existing v1 primitives — no new abstractions needed. Pieces:
+
+- `EvalRunResult.per_case` (per `40-eval-harness.md`) provides the raw cases with scores.
+- `Embedder` + vector store connection (per `25` § Retrieval strategies) provides the corpus.
+- A function node or background script ingests passing cases into the corpus.
+- A retriever binds the agent to the corpus.
+
+The orchestration is consumer code; the foundry primitives support it.
+
+**When to use**: mature projects with substantial eval history (50+ passing cases); want the agent to learn from its own validated track record over time.
+
+**Limits**: drift risk — if the eval set is stale, the FSL corpus will be too. Mitigation: TTL on FSL entries + re-validation against current production behaviour.
+
+### Catalog template (recommended addition)
+
+A catalog template `catalog/retrievers/fsl_from_evals/v1/` packaging Pattern C: configures a dense retriever over a vector store + ships an ingestion function-node that reads `EvalRunResult` artifacts + populates the corpus. Operators get the wiring for free.
+
+Spec'd as a v1 polish item; ship in Phase 5 alongside catalog promotion or Phase 9 dev-UX.
+
+### What's deferred to v1.1+
+
+- **Best-performing FSL for similar input** as a built-in retriever kind that auto-curates from eval results without operator wiring.
+- **Per-FSL effectiveness tracking** — which examples actually helped on which inputs, surfaced in observability for tuning.
+- **Adaptive FSL TTL + re-validation** — automatically retire stale examples that no longer match current production patterns.
+
+These compound the value of Pattern C but require investment beyond v1 scope.
+
+## Schema introspection for tools (a related pattern)
+
+When an agent calls a tool that targets a structured data system (Snowflake, Postgres, REST API with OpenAPI), the agent often needs to know the data schema to construct the right call. Three patterns:
+
+### A. Schema in the tool's README + description (default for stable schemas)
+
+The tool's `README.md` and `tool.yaml.description` document the schemas the tool operates against. The framework injects tool descriptions into the agent's prompt (via `{{TOOL_SUMMARIES}}`); the agent reads the documented schema and constructs calls accordingly.
+
+✅ Trivial to set up.
+⚠️ Goes stale; manual sync when the underlying schema changes.
+
+### B. `describe_schema(target)` tool (dynamic, recommended for evolving schemas)
+
+A separate tool the agent calls before constructing data-system calls. Returns the current schema for a table / endpoint:
+
+```yaml
+# catalog/tools/describe_schema/v1/tool.yaml (recommended catalog template)
+name: describe_schema
+description: |
+  Return the schema for a given target (table, endpoint, etc.) of the
+  bound data system. Use this BEFORE constructing queries when you're
+  unsure of the schema.
+
+input_schema: schemas.py::DescribeIn
+output_schema: schemas.py::SchemaDescription
+
+connections_required:
+  - slot: data_system
+    accepts: [catalog/snowflake, catalog/postgres, catalog/openapi_service]
+```
+
+The handler is connection-kind-aware: for Snowflake it queries `INFORMATION_SCHEMA`, for OpenAPI services it parses the OpenAPI doc, etc. Catalog ships per-connection-kind variants.
+
+✅ Always current; agent self-discovers.
+⚠️ Adds round-trips; works best when schemas are stable enough that one fetch per agent turn is acceptable.
+
+### C. Schema baked into the connection (deferred)
+
+Connection's `client_type` could expose a `.schema()` method per connection kind. Agent reads `ctx.connections.get(slot).schema(table)` directly without a separate tool. More integrated; doesn't require an extra tool dispatch.
+
+Deferred to v1.1+. The connection protocol in `23-connections-and-auth.md` doesn't currently mandate a schema-introspection method; adding it cleanly across connection kinds is non-trivial.
+
+For v1: ship `describe_schema` as a recommended catalog tool for each connection kind that benefits (Snowflake, Postgres, OpenAPI services). Document in tool READMEs that agents calling structured-data tools should use `describe_schema` before constructing queries when in doubt.
+
 ## Observability
 
 Every retrieval and rerank emits events (`foundry.retrieval`, `foundry.rerank`) with attributes defined in `10-core-framework.md` and `01-architecture-overview.md`.

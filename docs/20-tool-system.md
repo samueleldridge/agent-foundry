@@ -606,6 +606,34 @@ Tags are not enforced — they're descriptive. Recommended conventions:
 
 Tag conventions are documented in the catalog's `index.yaml` and in each tool's README.
 
+## Standalone evals are behavioural contracts, not code-level tests
+
+Worth being explicit about what a tool's `eval.yaml` is and isn't, because the line is fuzzy for deterministic tools.
+
+A standalone tool eval is a **behavioural contract test**: given input X, the tool produces output Y (within scorer tolerance). It's:
+- ✅ Stored as a typed `EvalRunResult` artifact for cross-version comparison.
+- ✅ The catalog promotion gate (`foundry catalog promote` checks the eval score against a floor).
+- ✅ Visible to the meta-agent — when scaffolding a project, the meta-agent reads `versions.json` and prefers tools with strong eval scores.
+- ✅ The primary test surface for **non-deterministic tools** (LLM-using tools, tools whose output depends on a live system's state).
+
+It is NOT:
+- ❌ A replacement for code-level unit testing of `handler.py` (off-by-one bugs, error-path coverage, fixture-sensitive edge cases).
+- ❌ A comprehensive integration test suite (use pytest with real or replayed connections for that).
+- ❌ The right home for fuzz testing or property-based testing.
+
+### Recommended testing posture per tool kind
+
+| Tool kind | Eval cases | Pytest |
+|---|---|---|
+| **Deterministic, no external system** (pure math, validators, formatters) | 3–5 representative cases — enough for catalog gate + meta-agent visibility | Comprehensive unit tests for code coverage; this is most of the testing |
+| **Deterministic, calls external system** (DB query, HTTP API) | 5–10 cases against a test fixture connection or replayed responses | Code-level unit tests + integration tests with mocked / replayed external system |
+| **Non-deterministic (uses LLM internally)** | Comprehensive cases (10+); LLM-judge scorers with calibration | Pytest can cover code paths but cannot meaningfully test LLM output quality — eval is the primary surface |
+| **Side-effecting (sends email, triggers RPA)** | Eval cases against test fixtures (real send blocked); assert structured output | Integration tests with mocked external endpoints |
+
+Pytest fixtures for testing handler.py code are spec'd in Tier 8 (`82-dev-ux.md`) — `foundry.testing.RunContextFixture`, `MockConnection`, etc. The two surfaces complement; they don't overlap.
+
+The mistake to avoid: building a comprehensive eval set for a deterministic tool because "every tool needs one." A 3-case eval is fine for catalog gate; pytest covers the rest. The mistake on the other side: skipping the eval for an LLM-using tool because "I have pytest." Pytest can't measure LLM output quality.
+
 ## Standalone tool eval workflow
 
 Tools have their own eval set independent of any agent or project. The workflow:

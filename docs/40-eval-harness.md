@@ -32,6 +32,38 @@ src/foundry/eval/
     └── user.py            user-plugged scorer entrypoint discovery
 ```
 
+## Eval is behavioural; pytest is code-level
+
+A common point of confusion worth surfacing up-front: the eval harness is for **behavioural testing** (does this tool / agent / project produce the expected output for this input?). It is NOT a replacement for code-level testing of project-local Python (handler bodies, function-node bodies, custom helpers).
+
+The two surfaces complement:
+
+| Question | Tool |
+|---|---|
+| Does this tool produce the expected output shape on these 5 representative inputs? | **Eval** (`eval.yaml`) |
+| Does this agent reach the right classification on a labelled set of 100 cases? | **Eval** |
+| Does the whole multi-agent system handle a representative trade-break workload? | **Eval** (project-level) |
+| Does `handler.py`'s SQL builder handle parameter quoting correctly across 17 edge cases? | **Pytest** |
+| Does the function-node body raise the right error on a None input? | **Pytest** |
+| Does `output_schema.py`'s validator reject malformed amounts as expected? | **Pytest** |
+| Did refactoring `handler.py` preserve all the edge-case behaviour? | **Pytest** |
+
+Why eval and not pytest for behavioural testing:
+- Eval results are stored as typed artifacts (`EvalRunResult`) enabling `compare_versions` across iterations.
+- Eval scores feed catalog-promotion + production-deploy gates (per `52-rollback-and-audit.md`).
+- The meta-agent reads eval results directly — pytest results aren't part of its decision surface.
+- LLM-using tools / agents have non-deterministic outputs; eval scorers (LLM-judge, rubric) handle this; pytest doesn't.
+
+Why pytest and not eval for code-level testing:
+- Code-level edge cases (off-by-one, type coercion, error paths) are exhaustive and granular — eval cases would be hundreds and slow.
+- Pytest integrates with IDE test runners, debuggers, coverage.
+- Operators already know pytest.
+- Foundry ships `foundry.testing` fixtures (Tier 8 — `82-dev-ux.md`) for testing handler.py / function.py / state transitions cleanly.
+
+The mental model: eval is the **contract** (what should this thing DO?); pytest is the **implementation correctness** (does the code that implements the contract have bugs?). Both are needed for production-grade systems.
+
+Detail on testing conventions in `82-dev-ux.md` (Tier 8). What follows in this doc is the eval surface specifically.
+
 ## Three scopes
 
 Eval shape doesn't change between scopes. The differences are: where the spec lives, what target is evaluated, what the input/output schemas are.
