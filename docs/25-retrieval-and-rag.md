@@ -434,6 +434,15 @@ description: |
 input_schema: schemas.py::DescribeIn
 output_schema: schemas.py::SchemaDescription
 
+# Schema introspection is idempotent within the TTL window — same target
+# returns the same schema until the underlying system changes. Mark it
+# cacheable so repeated calls (same run, same project, multiple agents)
+# don't re-hit the data system. See 24-caching-and-optimisation.md § Tool-
+# result caching.
+cacheable: true
+cache_ttl_s: 1800              # 30 minutes; balance freshness vs savings
+cache_scope: project           # shared across agents in this project
+
 connections_required:
   - slot: data_system
     accepts: [catalog/snowflake, catalog/postgres, catalog/openapi_service]
@@ -442,7 +451,34 @@ connections_required:
 The handler is connection-kind-aware: for Snowflake it queries `INFORMATION_SCHEMA`, for OpenAPI services it parses the OpenAPI doc, etc. Catalog ships per-connection-kind variants.
 
 ✅ Always current; agent self-discovers.
-⚠️ Adds round-trips; works best when schemas are stable enough that one fetch per agent turn is acceptable.
+✅ Tool-result cache eliminates re-introspection within the TTL window.
+⚠️ Adds round-trips for first-call-of-window; subsequent calls are cache hits.
+
+### TTL tuning for schema caching
+
+| TTL | When | Tradeoff |
+|---|---|---|
+| 5–10 min | DBA pushes schema changes hourly; ops cares about catching them within minutes | More cache misses; more lookups per day |
+| 30 min (default) | Typical production schema stability window | Balanced |
+| 1–4 hr | Very stable schemas; cost-sensitive workloads | Risk if DBA pushes a rename mid-day; manual `foundry cache evict --tool describe_schema --project <name>` to refresh |
+
+Operators tune per environment. Default of 30 min works for most production schemas.
+
+### Connection-level schema caching (deferred)
+
+A natural enhancement: the connection's `client_type` itself carries a `.schema(target)` method that caches across the pool — no separate `describe_schema` tool dispatch needed. The agent reads schema directly from the connection client.
+
+Benefits over tool-result caching:
+- No tool-dispatch overhead.
+- Pool-wide cache shared across all runs using the same connection (slightly broader than `cache_scope: project`).
+
+Why deferred to v1.1+:
+- Tool-result caching covers ~95% of the value in v1.
+- Adds complexity to the connection abstraction.
+- Not all connection kinds need it (only structured-data ones).
+- Operators uncomfortable with the extra implicit caching can skip the v1.1 enhancement and stay on the explicit `describe_schema` tool.
+
+For v1: ship `describe_schema` with `cacheable: true` per the recommended config above. Connection-level introspection is a v1.1+ enhancement when real ops demand it.
 
 ### C. Schema baked into the connection (deferred)
 
