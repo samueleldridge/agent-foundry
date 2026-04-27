@@ -335,6 +335,111 @@ $ foundry obs eval-trend --project pipeline_recon --since 30d
 
 Every project eval result feeds the trend dashboard. Drift becomes visible: if score is monotonically declining, the eval set may have grown stale or the production environment shifted (model versions, data distribution, etc.).
 
+## Drift detection (operational patterns + future automation)
+
+A real concern for any deployed agent system: quality drifts over time even when nothing in the project changes. Causes:
+
+- **Provider-side model updates** behind the same model name (e.g., Anthropic releases a fine-tune of `claude-opus-4-7` weeks after deployment; behaviour shifts subtly).
+- **Production traffic distribution shifts** (new break categories appear; the eval set no longer represents real workload).
+- **Cross-model performance differences** (a prompt tuned for Anthropic underperforms on OpenAI even though both pass the eval at deploy time).
+- **Connection / data source changes** (a downstream system updates its API or reference data; tools start returning subtly different shapes).
+
+### What's possible today (operational guidance)
+
+Three patterns that work with v1 primitives, no new code:
+
+#### Pattern A: scheduled re-eval (the cheapest signal)
+
+Schedule the project's eval on a recurring cadence. Compare scores over time. Alert on regression.
+
+```yaml
+# .github/workflows/foundry-drift-watch.yml
+on:
+  schedule:
+    - cron: "0 6 * * MON"           # Monday 6am
+jobs:
+  eval-trend:
+    steps:
+      - uses: actions/checkout@v4
+      - run: foundry eval pipeline_recon evals/q1.yaml \
+               --json > /tmp/eval-result.json
+      - run: foundry obs eval-trend --project pipeline_recon \
+               --since 30d --check-regression --threshold-drop 0.03
+        # exits non-zero if score dropped >3pts vs 30-day average → CI alert
+```
+
+Same eval, same target, periodic execution. Audit trail captures the trend; observability surfaces it. Score drop without code change = drift signal.
+
+#### Pattern B: model-swap eval (cross-model drift detection)
+
+Run the same project eval against a different model binding to see whether the prompt is robust:
+
+```bash
+# Swap model in a temp branch:
+git checkout -b experiment/gpt5-comparison foundry/pipeline_recon
+yq -i '.agents[].model_binding.provider = "openai"' projects/pipeline_recon/agents/*/agent.yaml
+yq -i '.agents[].model_binding.model = "gpt-5"' projects/pipeline_recon/agents/*/agent.yaml
+
+foundry eval pipeline_recon evals/q1.yaml --json
+# Compare against the canonical eval result on foundry/pipeline_recon
+```
+
+OR more cleanly, add a CLI flag `--model-override` that doesn't require a branch (proposed enhancement; see open questions). Today: branch + edit + eval + compare manually.
+
+#### Pattern C: production traffic capture + replay
+
+Periodically capture production runs (per `41` § Capturing eval cases from production traffic) into a candidate eval set; review + add to the canonical eval. Two effects:
+
+1. The eval set evolves to track production reality.
+2. Existing eval scores remain comparable; new cases raise the bar over time as the eval grows.
+
+Combined: drift in production distribution surfaces as new failure clusters in the augmented eval.
+
+### What I'd add now (medium scope)
+
+Two enhancements that would substantially improve drift workflows:
+
+#### 1. `foundry eval matrix --models <m1>,<m2>,...`
+
+Runs the same project eval against multiple model bindings; produces a comparison table. Useful for: model selection, drift detection, vendor risk planning.
+
+```
+$ foundry eval matrix --project pipeline_recon \
+    --models anthropic/claude-opus-4-7,openai/gpt-5,bedrock/anthropic.claude-opus-4-7-v1:0 \
+    --eval evals/q1.yaml
+
+Project: pipeline_recon
+Eval: q1.yaml (100 cases, eval_spec_hash: abc123...)
+
+                                         Score   Cost      p95 latency
+anthropic/claude-opus-4-7              0.91    $4.23     8.4s
+openai/gpt-5                           0.87    $2.18     6.2s
+bedrock/anthropic.claude-opus-4-7-v1:0 0.91    $5.40     9.1s
+
+Model-specific failures:
+  openai/gpt-5: confused on FX-amend cases (4 extra failures vs Anthropic)
+                strong on partial-fill (1 fewer failure)
+```
+
+Doesn't require config edits per model — the matrix runner overrides `model_binding` for each run, holds everything else constant. Spec'd as a new section in `40-eval-harness.md` open questions; ~150 lines of work to add now.
+
+#### 2. `eval.scheduled` event type + observability dashboard
+
+When CI-style scheduled evals run, emit `eval.scheduled` events with the eval result. The OTel stream picks them up; observability backends (per `80-observability.md`) can build a "score over time" dashboard per project. Drift trends become visible in standard tooling.
+
+Tiny addition: one new event type, no behavioural change.
+
+### What's deferred to v1.1+
+
+These were considered but explicitly deferred:
+
+- **Automated drift detection daemon** — `foundry drift watch <project>` running as a service; alerts on regressions. Real value but real complexity (background process, alerting integration, threshold tuning). Document the pattern instead; institutions can build a thin daemon over `foundry eval` + their own alerting.
+- **Recommendation engine** — "you're using prompt v3 with claude-opus-4-7 but our matrix shows v2 scores higher with gpt-5; switch?" Requires accumulated cross-model data + a recommendation algorithm + UX for accepting/rejecting suggestions. Meaningful complexity; defer until matrix data is collected for ≥1 quarter.
+- **Drift-aware meta-agent** — when forge starts, the meta-agent reads recent eval trend; if trending down, it diagnoses + iterates without operator prompting. Useful but borders on "autonomous maintenance" which raises governance questions (who authorised this set of changes? how is it audited?). Defer until governance model is clearer.
+- **Scheduled re-eval as a built-in primitive** (rather than CI cron) — `foundry eval schedule "0 6 * * MON" pipeline_recon evals/q1.yaml`. Useful for institutions without CI. Defer; CI cron covers the common case.
+
+All four are tracked in the v1.1+ backlog (memory). The operational patterns (A, B, C above) cover most of the value with v1 primitives.
+
 ## Iteration audit
 
 Every iteration the meta-agent (or a human) does is a commit on the project's branch (`foundry/<project>`). The commit message records:
