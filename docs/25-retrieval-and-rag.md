@@ -408,6 +408,112 @@ Spec'd as a v1 polish item; ship in Phase 5 alongside catalog promotion or Phase
 
 These compound the value of Pattern C but require investment beyond v1 scope.
 
+## Vendor-managed RAG services
+
+Cloud vendors increasingly offer end-to-end managed RAG services that hide the embedder + vector store + reranker behind a single API. Examples as of 2026:
+
+| Vendor | Service | Shape |
+|---|---|---|
+| Google Cloud | Vertex AI Search (Discovery Engine) | Point at a GCS bucket; auto-ingests + indexes; query API returns ranked documents |
+| AWS | Bedrock Knowledge Bases | Point at S3; choose embedder + vector store (managed OpenSearch / Pinecone / pgvector); query via Retrieve / RetrieveAndGenerate API |
+| Azure | Azure AI Search (with vectorization) | Index Azure Blob / Cosmos DB / SQL content; vector + lexical hybrid first-class |
+| Anthropic / OpenAI | Built-in file-search tools (where available) | Provider-side document handling; provider-specific |
+
+These fit cleanly into the foundry as **`Retriever` implementations with `kind: "managed"`** — they return `list[RetrievedDocument]` like any other retriever; the embedder + vector store + reranker are vendor-internal and not configurable separately.
+
+### Wiring as a foundry retriever
+
+The agent's view doesn't change between DIY and managed:
+
+```yaml
+# DIY hybrid retrieval:
+retrievers:
+  - slot: ops_manuals
+    ref: catalog/hybrid_rrf
+    version: v1
+    connection_bindings:
+      dense_store: prod_pgvector
+      sparse_store: prod_elastic
+    reranker:
+      ref: catalog/cohere_rerank
+      version: v1
+      connection_bindings: {cohere: cohere_api}
+    top_k: 10
+
+# vs managed (same agent code; different retriever ref):
+retrievers:
+  - slot: ops_manuals
+    ref: catalog/vertex_ai_search
+    version: v1
+    connection_bindings:
+      gcs_bucket: prod_ops_docs
+      vertex_endpoint: vertex_search_prod
+    top_k: 10
+```
+
+The handler.py for the managed retriever is a thin wrapper around the vendor's API — typically 100–200 lines that translates `Retriever.retrieve(query, top_k, filters)` into the vendor's call shape. Catalog templates ship per vendor.
+
+### When to choose managed vs DIY
+
+| Aspect | Managed (Vertex AI Search etc.) | DIY (pgvector + Cohere etc.) |
+|---|---|---|
+| Setup time | Minutes (point at bucket) | Days (provision DB, embed corpus, wire) |
+| Maintenance burden | Vendor handles | You handle (DB upkeep, re-embedding on model swap, scaling) |
+| Auto-ingestion (bucket changes → indexed) | ✅ Built-in | Build your own pipeline |
+| Embedder + ranker choice | Vendor-defaulted; limited tuning | Full control |
+| Cost model | Per-query + per-document; vendor-set | Per-resource (DB, embedder API); more knobs |
+| Hybrid (dense + sparse) | Often built-in; opaque tuning | Configure RRF / weights yourself |
+| Eval-driven retriever swap | Awkward (different vendor APIs to switch between) | Trivial (swap retriever ref) |
+| Vendor lock-in | Real; mitigated by foundry's `Retriever` abstraction | Minimal |
+| Native security (IAM, encryption, audit) | ✅ Inherits cloud-platform controls | Configure yourself |
+| Best-quality retrieval | Variable; vendor evolves | You can tune to your corpus |
+
+### Recommended posture
+
+For most projects, **start managed; migrate to DIY if you outgrow it**. The foundry's `Retriever` abstraction makes the migration trivial: swap one config block + one catalog ref. The only things that change are the retriever's underlying mechanics; the agent doesn't notice.
+
+**Stay managed when**:
+- Corpus is moderately stable + the vendor's defaults work well.
+- You already use the vendor's cloud (IAM / encryption / audit are aligned).
+- Operational burden of self-hosting a vector store isn't worth the control gain.
+- Cost is acceptable + predictable enough for your scale.
+
+**Move to DIY when**:
+- You need eval-driven embedder selection (managed services hide this).
+- You need a specific reranker (Cohere / Voyage / local cross-encoder) the vendor doesn't expose.
+- You're hitting per-query cost ceilings + want to amortise across self-hosted infra.
+- The vendor's hybrid-fusion strategy isn't right for your corpus.
+- You want to use the same retriever across multiple cloud providers (vendor lock-in matters).
+
+The `Retriever` protocol is the seam. Stay vendor-agnostic at the agent level; pick implementations per project + per environment.
+
+### CMEK + data residency (cloud-vendor concern, not foundry concern)
+
+Customer-managed encryption keys, region constraints, sovereign-cloud isolation are configured at the **cloud platform level** (GCP CMEK on the GCS bucket; AWS KMS on S3; Azure customer-managed keys). The foundry inherits whatever the bucket / index has — its job is to use the configured resources via standard SDK auth (workload identity, IAM roles, managed identity).
+
+For regulated workloads with strict data sovereignty (financial services, healthcare, public sector), the configuration shape is consistent regardless of vendor:
+- Bucket / index in the approved region (e.g. `europe-west2` for UK-resident data).
+- LLM provider in the same region (Vertex Gemini in `europe-west2` OR Anthropic via Bedrock in `eu-west-1`).
+- Foundry deployed in the same region (Cloud Run / GKE / equivalent in `europe-west2`).
+- Audit + observability backends in-region.
+
+The foundry's primitives compose without forcing cross-region traffic; region selection is the operator's call. Capability-required checks (per `11-provider-abstraction.md`) catch attempts to use unavailable features in a constrained region at compile time.
+
+### Catalog templates (queued for v1.1)
+
+Vendor-managed retriever + connection templates not yet shipped in the foundry's `catalog/public/`. Tracked in v1.1 backlog memory. Initial set:
+
+- `catalog/retrievers/vertex_ai_search/v1/`
+- `catalog/retrievers/bedrock_knowledge_base/v1/`
+- `catalog/retrievers/azure_ai_search/v1/`
+- `catalog/connections/gcs_bucket/v1/`
+- `catalog/connections/vertex_endpoint/v1/`
+- `catalog/connections/bigquery/v1/`
+- `catalog/connections/aws_s3/v1/`
+- `catalog/connections/azure_blob/v1/`
+
+Each is a thin wrapper (~100–200 lines per template); no framework changes needed. Operators can build these locally today as `local/` artifacts following the catalog tool / connection / retriever shapes.
+
 ## Schema introspection for tools (a related pattern)
 
 When an agent calls a tool that targets a structured data system (Snowflake, Postgres, REST API with OpenAPI), the agent often needs to know the data schema to construct the right call. Three patterns:
