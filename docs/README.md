@@ -25,6 +25,7 @@ After Tier 0 you can either read top-down (Tier 1 → Tier 8) or jump to a speci
 | 6 | Meta-agent | `60-meta-agent.md` · `61-meta-tools.md` · `62-configurator-sessions.md` |
 | 7 | API & async runtime | `70-api-layer.md` · `71-async-runtime.md` |
 | 8 | Observability, storage, dev UX, security, deploy, batch & throughput, multi-tenancy & IP | `80-observability.md` · `81-storage-and-artifacts.md` · `82-dev-ux.md` · `83-security-guardrails.md` · `84-deployment.md` · `85-batch-and-throughput.md` · `86-multi-tenancy-and-ip.md` |
+| Impl | Phased implementation plan with paste-ready prompts for fresh Claude Code sessions per phase | `90-implementation-plan.md` |
 
 ## Doc conventions
 
