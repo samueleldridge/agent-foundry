@@ -276,74 +276,83 @@ Do NOT implement; review only.
 
 ---
 
-## Phase 2 — Tool system + agent system + state + catalog + connections + caching + retrieval + memory
+## Phase 2 — overview
 
-**Source of truth**: `docs/03-development-phases.md` § Phase 2.
+**Source of truth**: `docs/03-development-phases.md` § Phase 2 — overview.
 
-This is the largest phase by spec scope (~10–13 days estimated). Consider splitting into sub-phases (2a / 2b / 2c) if the implementation session is hitting context limits. The split is at your discretion; the exit-gate checks are atomic.
+Phase 2 is delivered in three sub-phases on a strict dependency DAG: **2a → 2b → 2c**. Each sub-phase is a vertical slice: its own implementation session, AI review session, handoff note, manual smoke test, and demoable hero command. **Do not bundle them into one session** — the original Phase 2 (~13 days, ~35 exit-gate items) is too large to hold without drift, which is why this split exists.
 
-### Implementation prompt for Phase 2
+Cumulative duration matches the monolithic estimate (10–14 days). The split exists for reviewability, not speed.
+
+---
+
+## Phase 2a — Tools + connections + catalog + state visibility
+
+**Source of truth**: `docs/03-development-phases.md` § Phase 2a.
+
+### Implementation prompt for Phase 2a
 
 ```
-You are implementing Phase 2 of agent-foundry. Phase 1 is complete.
+You are implementing Phase 2a of agent-foundry. Phase 1 is complete.
+Phase 2 has been split into three sub-phases: 2a (this one) → 2b → 2c.
 
 Read these docs FIRST (in this order):
-- docs/03-development-phases.md § Phase 2 (full deliverables + exit gate)
-- docs/20-tool-system.md
-- docs/21-agent-system.md (incl. § Function nodes)
-- docs/22-state-management.md
-- docs/23-connections-and-auth.md
-- docs/24-caching-and-optimisation.md
-- docs/25-retrieval-and-rag.md
-- docs/26-memory-and-context.md
+- docs/03-development-phases.md § Phase 2a (deliverables + exit gate)
+- docs/20-tool-system.md (FULL — load-bearing for this sub-phase)
+- docs/21-agent-system.md (skim § Function nodes — that goes in 2c)
+- docs/22-state-management.md (FULL — state visibility lands here)
+- docs/23-connections-and-auth.md (FULL)
 - docs/_phase_handoffs/phase_1.md (what's already built)
 
-DELIVERABLES (per docs/03 § Phase 2):
-1. foundry.core.tool, foundry.core.connection, foundry.core.embedder,
-   foundry.core.retrieval, foundry.core.memory, foundry.core.cache —
-   protocols + types per their respective specs.
-2. foundry.config.schemas — complete ToolSpec (incl. connections_required,
-   cacheable, cache_ttl_s, cache_scope), AgentSpec (incl. semantic_cache,
-   retrievers, memory), FunctionNodeSpec, ConnectionSpec, ConnectionBinding,
-   RetrieverBinding, RerankerBinding, SemanticCacheConfig, MemoryConfig,
-   EmbedderBinding, refresh/pool policies.
-3. foundry.config.refs — ArtifactRef parser + resolver.
-4. foundry.catalog — index loader, version discovery for tools +
-   connections + retrievers.
-5. foundry.auth — 8 scheme helpers (api_key, basic_auth, oauth2_*,
-   jwt_bearer, sigv4, mtls, custom), token cache, redactor.
-6. foundry.connections — ConnectionPool, registry, health runner,
-   ConnectionDescriptor builder.
-7. foundry.providers.embedders — Voyage + OpenAI + Cohere + Bedrock
-   embedder adapters.
-8. foundry.cache — SemanticCache (in_process / redis / pgvector
-   implementations) + ResultCache.
-9. foundry.retrieval — Dense / Sparse / Hybrid retrievers + reranker
-   adapters (Cohere / Voyage / Jina + local stub).
-10. foundry.memory — DefaultMemory coordinator + WorkingMemoryLayer +
-    EpisodicMemoryLayer + SemanticMemoryLayer + prompt-assembly logic.
-11. foundry.orchestration.state_scope — compile-time per-node visibility
-    enforcement.
-12. Per-tool + per-connection directory versioning on disk.
-13. Compile-time wiring validation for connection slots, retriever
-    bindings, cache backends.
-14. Example catalog: 2-3 trivial shared tools + 2 trivial connections
-    (1 catalog vector store like pgvector + 1 reranker).
-15. Updated trivial project: hello_agent uses a tool with a connection
-    slot bound to a catalog connection.
-16. Optional second example project demonstrating semantic cache +
-    hybrid retriever.
+DELIVERABLES (per docs/03 § Phase 2a):
+1. foundry.core.tool — Tool protocol + ToolRegistry.
+2. foundry.core.connection — Connection, ConnectionPool, ConnectionAccessor,
+   ConnectionFactory, ConnectionHealth, ConnectionDescriptor, AuthScheme enum.
+3. foundry.core.state — Pydantic state primitive with reducer annotations
+   (APPEND / MERGE / LWW / REPLACE_IF_SET).
+4. foundry.config.schemas additions:
+   - ToolSpec (incl. connections_required; DO NOT include cacheable,
+     cache_ttl_s, cache_scope — those go in 2b).
+   - AgentSpec extensions: tool allowlist + state-scope declarations.
+     (DO NOT add semantic_cache, retrievers, memory — those are 2b/2c.)
+   - StateSpec.
+   - SystemSpec (tool + connection version pins).
+   - ConnectionSpec + ConnectionBinding + refresh/pool policies.
+5. foundry.config.refs — ArtifactRef parser + resolver for tool and
+   connection kinds. (Retriever + agent_template kinds go in 2b.)
+6. foundry.catalog — index loader, version discovery for tools and
+   connections only. No promotion yet (Phase 5).
+7. foundry.auth — 8 scheme helpers (api_key, basic_auth, oauth2_*,
+   jwt_bearer, sigv4, mtls, custom) + token cache + redactor.
+8. foundry.connections — ConnectionPool concrete impl + registry +
+   health runner + ConnectionDescriptor builder.
+9. foundry.orchestration.state_scope — compile-time per-node visibility
+   enforcement (TypedDict projection per agent).
+10. Per-tool + per-connection directory versioning on disk; versions.json
+    metadata file shape per docs/22.
+11. Compile-time wiring validation: ConnectionSlotNotBoundError,
+    `accepts`-list mismatch error.
+12. Catalog seeds:
+    - catalog/tools/: 2–3 trivial shared tools.
+    - catalog/connections/: postgres + pgvector + cohere_rerank
+      (the latter two are USED by 2b but their connection shape lives
+      here; their consumer types — retrievers + rerankers — come in 2b).
+13. Update projects/hello/: hello_agent uses a catalog tool that declares
+    a connection slot bound to a catalog connection.
 
-EXIT GATE (full list in docs/03 § Phase 2; key checks):
+EXIT GATE (full in docs/03 § Phase 2a):
 - [ ] One-tool agent runs end-to-end: model → tool call (w/ pooled,
       authenticated connection) → tool result → model → final output
-- [ ] Catalog tool + local tool resolve through same code path
-- [ ] Pin v1 → v2 in system.yaml → next run uses v2
+- [ ] Catalog tool ref AND catalog connection ref resolve through
+      same code path
+- [ ] Pin v1 → v2 in system.yaml (tool OR connection) → next run uses v2
 - [ ] Tool output validated against schema → invalid raises structured
 - [ ] Tool not in agent allowlist → ToolNotAllowedError
 - [ ] Tool slot unbound → compile-time ConnectionSlotNotBoundError
+- [ ] Tool slot's `accepts` mismatch → compile-time error
 - [ ] Connection health: foundry connections health runs the eval
-- [ ] Connection pool reuses across tool calls in same run
+- [ ] Connection pool reuses connection across tool calls in same run
+      (verified via pool metrics)
 - [ ] Refresh on_auth_error: simulated 401 evicts + rebuilds
 - [ ] Secret-literal scan catches credential in connection.config →
       ConfigLoadError
@@ -352,57 +361,42 @@ EXIT GATE (full list in docs/03 § Phase 2; key checks):
 - [ ] State reducers correct (APPEND / MERGE / LWW / REPLACE_IF_SET)
 - [ ] Catalog index lists tools + connections with versions; missing
       version raises
-- [ ] Embedder round-trip for Voyage + OpenAI
-- [ ] Semantic cache hit on same input re-run
-- [ ] Semantic cache invalidation on prompt-version bump
-- [ ] Tool-result cache hit on same input within TTL
-- [ ] Tool-cache validator: cacheable: true without ttl_s →
-      ConfigValidationError
-- [ ] Cache failure fails open (warning + LLM path)
-- [ ] Hybrid retriever with RRF + degrade-on-failure
-- [ ] Reranker emits cost event
-- [ ] Dimension mismatch compile check
-- [ ] FunctionNode end-to-end in a sequential flow
-- [ ] FunctionNode state visibility: outside-write fields dropped +
-      warning event
-- [ ] FunctionNode emits started/completed RunEvents
-- [ ] Node namespace collision (agent + function same name) → CompileError
-- [ ] Memory: working layer windowing
-- [ ] Memory: episodic against seeded retriever
-- [ ] Memory: semantic with periodic consolidation
-- [ ] Memory: degrade vs fail-strict
-- [ ] Memory: envelope token cap + truncation
-- [ ] Memory: layer-name uniqueness validator
+- [ ] Per-tool + per-connection version directory layout matches spec
+- [ ] hello_agent updated and runs end-to-end against catalog tool +
+      connection
 
 WHEN COMPLETE:
-1. Handoff note to docs/_phase_handoffs/phase_2.md.
-2. Multiple commits (one per logical chunk; suggested split: tool
-   system / connections + auth / embedders / cache / retrieval /
-   memory / function-node / state visibility / orchestration scope).
-3. STOP at exit gate. Do not start Phase 3.
+1. Handoff to docs/_phase_handoffs/phase_2a.md. Include:
+   - Which catalog tools/connections were seeded.
+   - Any deviations from spec.
+   - Notes for 2b (e.g., interface shapes 2b will consume).
+2. Multiple commits (suggested split: tool system / connections + auth /
+   catalog + refs / state + visibility / hello_agent update).
+3. STOP at exit gate. Do not start Phase 2b.
 
 DO NOT:
-- Implement orchestration patterns (single is OK as it's needed for
-  hello_agent; sequential / parallel / supervisor / graph are Phase 3).
-- Implement eval harness (Phase 4).
-- Implement versioning + rollback (Phase 5).
-- Implement meta-agent or its tools (Phase 6).
-- Add API layer (Phase 8).
+- Implement cache / embedders / retrieval / rerankers (Phase 2b).
+- Implement memory / FunctionNode / namespace-collision check (Phase 2c).
+- Implement orchestration patterns beyond single-agent (Phase 3).
+- Implement eval harness (Phase 4) or versioning (Phase 5).
+- Add cacheable / cache_ttl_s / cache_scope to ToolSpec (Phase 2b).
+- Add semantic_cache / retrievers / memory fields to AgentSpec
+  (Phases 2b / 2c).
 ```
 
-### Review prompt for Phase 2
+### Review prompt for Phase 2a
 
 ```
-You are reviewing Phase 2 of agent-foundry. This is the largest spec
-phase; budget time accordingly.
+You are reviewing Phase 2a of agent-foundry.
 
 Read:
-- docs/03-development-phases.md § Phase 2 (full)
-- docs/20 through docs/26 (the specs Phase 2 implements)
-- docs/_phase_handoffs/phase_2.md
+- docs/03-development-phases.md § Phase 2a (full)
+- docs/20-tool-system.md, docs/22-state-management.md,
+  docs/23-connections-and-auth.md (the specs Phase 2a implements)
+- docs/_phase_handoffs/phase_2a.md
 - Repo state
 
-VERIFY each exit-gate item from docs/03 § Phase 2. For each:
+VERIFY each exit-gate item from docs/03 § Phase 2a. For each:
 - Confirm behaviour matches the spec.
 - Note specific evidence (file paths + relevant code).
 
@@ -412,21 +406,271 @@ CRITICAL spec-compliance checks beyond exit gate:
 - Tool dispatch: 12-step pipeline matches docs/20 § Dispatch?
 - Connection sandbox: ConnectionDescriptor.redacted_config truly
   redacts (no secrets in span attributes via lint or test)?
+- State visibility: TypedDict projection generated per agent (forbidden
+  fields literally absent from agent's view, not just runtime-rejected)?
+- Catalog index: version discovery handles missing LATEST file
+  gracefully per docs/22?
+- AgentSpec scope: confirm NO semantic_cache / retrievers / memory
+  fields were added (those are 2b/2c — leakage is a fail).
+- ToolSpec scope: confirm NO cacheable / cache_ttl_s / cache_scope
+  fields (those are 2b).
+
+Report:
+- Per exit-gate item: PASS / FAIL with evidence.
+- Spec compliance per critical checks.
+- Out-of-scope leakage (2a containing 2b/2c work) — FAIL if any.
+- Verdict: PASS / PARTIAL / FAIL.
+- If PARTIAL: ordered list of specific gaps for the next session.
+
+Do NOT implement; review only.
+```
+
+---
+
+## Phase 2b — Cache + embedders + retrieval
+
+**Source of truth**: `docs/03-development-phases.md` § Phase 2b.
+
+### Implementation prompt for Phase 2b
+
+```
+You are implementing Phase 2b of agent-foundry. Phases 0, 1, 2a complete.
+
+Read these docs FIRST:
+- docs/03-development-phases.md § Phase 2b (deliverables + exit gate)
+- docs/24-caching-and-optimisation.md (FULL)
+- docs/25-retrieval-and-rag.md (FULL)
+- docs/_phase_handoffs/phase_2a.md (what's already built —
+  especially the connection types you'll consume for vector stores
+  and rerankers)
+
+DELIVERABLES (per docs/03 § Phase 2b):
+1. foundry.core.embedder — Embedder protocol, Embedding,
+   EmbedderCapabilities.
+2. foundry.core.retrieval — Retriever, Reranker protocols,
+   RetrievedDocument.
+3. foundry.core.cache — SemanticCache, ResultCache, CacheAccessor
+   protocols, key types (incl. SemanticCacheKey per docs/24 § Key
+   construction).
+4. foundry.config.schemas additions:
+   - ToolSpec: cacheable, cache_ttl_s, cache_scope.
+   - AgentSpec: semantic_cache (SemanticCacheConfig | None),
+     retrievers (list[RetrieverBinding]).
+   - New schemas: RetrieverBinding, RerankerBinding,
+     SemanticCacheConfig, EmbedderBinding.
+5. foundry.config.refs — extend resolver for retriever + agent_template
+   kinds.
+6. foundry.catalog — extend version discovery for retrievers.
+7. foundry.providers.embedders — Voyage + OpenAI + Cohere + Bedrock
+   embedder adapters.
+8. foundry.cache — concrete SemanticCache + ResultCache:
+   in_process (SQLite/FAISS), redis (Redis Stack), pgvector
+   (Postgres pgvector — uses the pgvector connection from 2a).
+9. foundry.retrieval — DenseRetriever, SparseRetriever, HybridRetriever
+   (with RRF) + reranker adapters (Cohere, Voyage, Jina, local
+   cross-encoder stub).
+10. Compile-time wiring validation for retriever bindings and cache
+    backends (dimension match against embedder).
+11. Catalog seeds: catalog/retrievers/pgvector_dense +
+    catalog/retrievers/hybrid_rrf templates.
+12. Second example project (suggest projects/rag_hello/) demonstrating
+    semantic cache + hybrid retriever end-to-end.
+
+EXIT GATE (per docs/03 § Phase 2b):
+- [ ] Embedder round-trip: Voyage voyage-3 + OpenAI text-embedding-3-small
+      both resolve and produce embeddings of advertised dims
+- [ ] Semantic cache hit: in_process backend hits on re-run;
+      cache.semantic.hit event with similarity ≥ threshold;
+      saved_cost_usd populated
+- [ ] Semantic cache invalidation on prompt-version bump; invalidate
+      event emitted
+- [ ] Tool-result cache: cacheable: true + cache_ttl_s: 60 → second
+      call returns cached output; cache.tool.hit emitted
+- [ ] Tool-cache validator: cacheable: true without cache_ttl_s →
+      ConfigValidationError at load
+- [ ] Cache failure fails open: backend raises → run completes via
+      LLM + warning event
+- [ ] Hybrid retriever: dense + sparse in parallel + RRF merge;
+      retrieval event emitted; one-branch-fail-other-branch-return
+      test passes
+- [ ] Reranker: cohere_rerank reorders docs; rerank event with
+      cost_estimate emitted
+- [ ] Dimension mismatch compile check: embedder dim ≠ vector store
+      dim → EmbedderConfigError at load
+- [ ] Second example project runs end-to-end with semantic cache +
+      hybrid retriever
+
+WHEN COMPLETE:
+1. Handoff to docs/_phase_handoffs/phase_2b.md.
+2. Commits per logical chunk (suggested split: embedder protocols +
+   adapters / cache protocols + impls / retrieval protocols + impls /
+   reranker adapters / second example project).
+3. STOP. Do not start Phase 2c.
+
+DO NOT:
+- Implement memory layers / FunctionNode / Node protocol (Phase 2c).
+- Implement orchestration patterns (Phase 3).
+- Add memory field to AgentSpec (Phase 2c).
+```
+
+### Review prompt for Phase 2b
+
+```
+You are reviewing Phase 2b of agent-foundry.
+
+Read:
+- docs/03-development-phases.md § Phase 2b
+- docs/24-caching-and-optimisation.md, docs/25-retrieval-and-rag.md
+- docs/_phase_handoffs/phase_2b.md
+- Repo state
+
+VERIFY each exit-gate item from docs/03 § Phase 2b.
+
+CRITICAL spec-compliance checks beyond exit gate:
 - Cache: SemanticCacheKey shape includes structural hash + embedding
   per docs/24 § Key construction?
-- Cache fail-open: backend down → warning + LLM call (not error)?
-- Memory layer: state-field visibility check at compile?
-- FunctionNode: doesn't have model_binding / tools / iteration_limit
-  fields per docs/21 § Function nodes?
-- State visibility: TypedDict projection generated per agent (forbidden
-  fields literally absent from agent's view)?
+- Cache fail-open: backend down → warning + LLM call (not exception)?
+- Hybrid RRF: implementation matches the formula in docs/25 §
+  Hybrid retrieval (1 / (k + rank), summed)?
+- Reranker: cost_estimate populated even when adapter doesn't return
+  cost (defensive default)?
+- Dimension check happens at load, NOT first call?
+- AgentSpec scope: confirm memory field NOT added (Phase 2c).
 
 Report:
 - Per exit-gate item: PASS / FAIL.
 - Spec compliance per critical checks.
-- Any structural concerns (test coverage, error handling, edge cases).
+- Out-of-scope leakage — FAIL if Phase 2c content snuck in.
 - Verdict: PASS / PARTIAL / FAIL.
-- If PARTIAL: ordered list of specific gaps to address.
+
+Do NOT implement; review only.
+```
+
+---
+
+## Phase 2c — Memory + FunctionNode
+
+**Source of truth**: `docs/03-development-phases.md` § Phase 2c.
+
+### Implementation prompt for Phase 2c
+
+```
+You are implementing Phase 2c of agent-foundry. Phases 0, 1, 2a, 2b
+complete.
+
+Read these docs FIRST:
+- docs/03-development-phases.md § Phase 2c (deliverables + exit gate)
+- docs/21-agent-system.md § Function nodes (FULL)
+- docs/26-memory-and-context.md (FULL)
+- docs/_phase_handoffs/phase_2b.md (the retriever interface you'll
+  consume for episodic memory)
+
+DELIVERABLES (per docs/03 § Phase 2c):
+1. foundry.core.node + foundry.core.function_node:
+   - Node protocol (parent of Agent + FunctionNode).
+   - FunctionNode protocol, BaseFunctionNode, NodeResult.
+   - Deterministic-Python nodes with same state-visibility /
+     observability / retry plumbing as agents but no LLM.
+2. foundry.core.memory — Memory, MemoryLayer protocols;
+   MemoryEnvelope, MemoryContribution, MemoryWrite, MemoryContext.
+3. foundry.config.schemas additions:
+   - AgentSpec: memory (MemoryConfig | None).
+   - FunctionNodeSpec.
+4. foundry.memory:
+   - DefaultMemory coordinator.
+   - WorkingMemoryLayer (windowed state field).
+   - EpisodicMemoryLayer (wraps a Retriever from 2b).
+   - SemanticMemoryLayer (state field + periodic consolidator).
+   - prompt_assembly: envelope → prompt injection (system_prefix /
+     system_suffix / user_prefix placements per docs/26).
+5. Remaining compile-time wiring validation:
+   - Node namespace collision (agent + function same name) →
+     CompileError.
+   - Mixed-flow validation: graph flow's from/to refs resolve to
+     either agents or functions interchangeably.
+6. Third example project demonstrating memory layers + a FunctionNode
+   in a sequential flow.
+
+EXIT GATE (per docs/03 § Phase 2c):
+- [ ] Memory: working layer windowing (max_messages: 5 → last 5 turns
+      in prompt on 10-turn run)
+- [ ] Memory: episodic against seeded retriever; memory.read event
+      lists episodic in layers_read
+- [ ] Memory: semantic with periodic consolidation; memory.consolidate
+      event with token counts
+- [ ] Memory: degrade-gracefully (default) — failed retriever in
+      episodic → empty contribution + warning + run completes
+- [ ] Memory: fail-strict mode — same failure → MemoryLayerError +
+      run aborts
+- [ ] Memory: envelope token cap — max_envelope_tokens triggers
+      truncation of last-listed layer first; truncated: true in event
+- [ ] Memory: layer-name uniqueness → ConfigValidationError at load
+- [ ] FunctionNode end-to-end: sequential flow [normalize_input,
+      hello_agent, format_output] runs; final state reflects full
+      pipeline
+- [ ] FunctionNode state visibility: read: [a, b], write: [c] returning
+      {a, c} → only c written; a dropped + warning event
+- [ ] FunctionNode observability: started/completed events with
+      node_name, node_version, fields_written, bytes_delta, latency_ms
+- [ ] Node namespace collision (agent + function same name) →
+      CompileError
+- [ ] Mixed flow: from/to refs resolve across agents and functions;
+      missing reference → CompileError
+
+WHEN COMPLETE:
+1. Handoff to docs/_phase_handoffs/phase_2c.md.
+2. Commits per logical chunk (suggested split: Node + FunctionNode
+   protocols / memory protocols / memory coordinator + layers /
+   prompt assembly / compile-time validation / third example project).
+3. STOP. Phase 2 complete. Do not start Phase 3.
+
+DO NOT:
+- Implement orchestration patterns beyond what 2a/2b/single already
+  provide (Phase 3 fully covers sequential/parallel/supervisor/graph).
+- Implement eval (Phase 4), versioning (Phase 5), meta-agent (Phase 6),
+  multi-agent + HITL (Phase 7), API (Phase 8), observability hardening
+  (Phase 9).
+```
+
+### Review prompt for Phase 2c
+
+```
+You are reviewing Phase 2c of agent-foundry. This closes out Phase 2.
+
+Read:
+- docs/03-development-phases.md § Phase 2c
+- docs/21-agent-system.md § Function nodes,
+  docs/26-memory-and-context.md
+- docs/_phase_handoffs/phase_2c.md (plus 2a + 2b for full Phase 2
+  context)
+- Repo state
+
+VERIFY each exit-gate item from docs/03 § Phase 2c.
+
+CRITICAL spec-compliance checks beyond exit gate:
+- FunctionNode: does NOT have model_binding / tools / iteration_limit
+  fields per docs/21 § Function nodes?
+- Memory layer: state-field visibility check at compile (memory layers
+  declaring a state field they don't have read access to → CompileError)?
+- Memory envelope: layer order in prompt-assembly follows declaration
+  order per docs/26 § Envelope assembly?
+- Consolidator: uses agent's model_binding, NOT a separate one (cost
+  attribution stays clean)?
+- Mixed-flow: a single graph flow can reference both agents and
+  functions in from/to without quoting / kind prefixes (interchangeable)?
+
+ADDITIONAL Phase 2 cumulative checks:
+- All 2a + 2b + 2c exit-gate items still PASS (no regressions).
+- AgentSpec final shape contains: tool allowlist, state scope,
+  semantic_cache, retrievers, memory — ALL of them.
+- ToolSpec final shape contains: connections_required, cacheable,
+  cache_ttl_s, cache_scope.
+
+Report:
+- Per exit-gate item (Phase 2c): PASS / FAIL.
+- Regression check across 2a + 2b: NO REGRESSIONS / REGRESSIONS FOUND.
+- Verdict: PASS / PARTIAL / FAIL.
+- If PASS: Phase 2 is complete; Phase 3 unblocked.
 
 Do NOT implement; review only.
 ```
@@ -911,7 +1155,9 @@ Per-phase status (mark on completion):
 
 - [ ] Phase 0 — Decisions & skeleton
 - [ ] Phase 1 — Core framework + provider + config
-- [ ] Phase 2 — Tools + agents + state + catalog + connections + caching + retrieval + memory
+- [ ] Phase 2a — Tools + connections + catalog + state visibility
+- [ ] Phase 2b — Cache + embedders + retrieval
+- [ ] Phase 2c — Memory + FunctionNode
 - [ ] Phase 3 — Single-agent orchestration on LangGraph
 - [ ] Phase 4 — Eval harness
 - [ ] Phase 5 — Versioning + git + rollback + catalog promote

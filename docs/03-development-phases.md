@@ -20,8 +20,10 @@ Phases correspond to doc tiers but are not 1:1 with them. Some tiers (e.g. Tier 
 |---|---|---|---|---|
 | 0 | Decisions & skeleton | Repo layout, pinned deps, lint boundaries, empty but importable modules | — | 1–2 days |
 | 1 | Core framework + providers + config | Trivial agent runs against Anthropic AND OpenAI from YAML | 0 | 4–6 days |
-| 2 | Tool system + agent system + state + catalog + connections + caching + retrieval + memory | Adds the previous + Memory coordinator with working/episodic/semantic layers, off-by-default | 1 | 10–13 days |
-| 3 | Single-agent orchestration on LangGraph | `foundry run` compiles a SystemSpec into a StateGraph and runs it | 2 | 3–5 days |
+| 2a | Tools + connections + catalog + state visibility | One-tool agent runs end-to-end with pooled, authenticated connection; pin swap (tool or connection v1→v2) works | 1 | 5–6 days |
+| 2b | Cache + embedders + retrieval | Semantic cache + hybrid retriever (RRF) + tool-result cache + rerankers run end-to-end on a second example project | 2a | 3–4 days |
+| 2c | Memory + FunctionNode | Three memory layers (working/episodic/semantic) + FunctionNode in a flow + namespace and mixed-flow compile checks | 2b | 3–4 days |
+| 3 | Single-agent orchestration on LangGraph | `foundry run` compiles a SystemSpec into a StateGraph and runs it | 2c | 3–5 days |
 | 4 | Eval harness + per-artifact + comparison | `foundry eval` runs tool / agent / project evals; `compare` works across versions and pin-sets | 3 | 4–6 days |
 | 5 | Versioning + git backbone + per-artifact rollback + catalog promote | Per-tool, per-prompt, and per-project rollback all atomic; `foundry catalog promote` gated | 4 | 4–5 days |
 | 6 | Meta-agent | `foundry forge` iterates to threshold end-to-end on a toy task; uses `build_tool` + catalog + compare | 5 | 5–7 days |
@@ -85,32 +87,33 @@ Total calendar estimate (one engineer, focused): roughly 6–10 weeks. This is a
 
 ---
 
-## Phase 2 — Tool system + agent system + state management + catalog + connections + caching + retrieval
+## Phase 2 — overview
+
+Phase 2 is delivered in three sub-phases (**2a → 2b → 2c**) on a strict dependency DAG. Each sub-phase is a vertical slice with its own hero demo, exit gate, AI review session, and manual smoke test. The split exists because the monolithic Phase 2 (~13 days, ~35 exit-gate items, 23 modules) is too large for one Claude Code session to hold without drift.
+
+Cumulative duration matches the original estimate (10–14 days); the split exists for reviewability, not speed.
+
+---
+
+## Phase 2a — Tools + connections + catalog + state visibility
+
+**Hero demo after this sub-phase**: a one-tool agent runs end-to-end — model → tool call (with pooled, authenticated connection) → tool result → model → final output. Catalog tool and catalog connection refs resolve. Pinning v1 → v2 (tool OR connection) in `system.yaml` makes the next run use the new version with no other change.
 
 ### Deliverables
 
 - **`foundry.core.tool`** — `Tool` protocol (async handler returning a typed result), `ToolRegistry`.
 - **`foundry.core.connection`** — `Connection` protocol, `ConnectionPool`, `ConnectionAccessor`, `ConnectionFactory`, `ConnectionHealth`, `ConnectionDescriptor`, `AuthScheme` enum.
-- **`foundry.core.node` + `foundry.core.function_node`** — `Node` protocol (parent of Agent + FunctionNode), `FunctionNode` protocol, `BaseFunctionNode`, `NodeResult`. Deterministic-Python flow nodes with same state-visibility / observability / retry plumbing as agents but no LLM.
-- **`foundry.core.embedder`** — `Embedder` protocol, `Embedding`, `EmbedderCapabilities`.
-- **`foundry.core.retrieval`** — `Retriever`, `Reranker` protocols, `RetrievedDocument`.
-- **`foundry.core.memory`** — `Memory`, `MemoryLayer` protocols, `MemoryEnvelope`, `MemoryContribution`, `MemoryWrite`, `MemoryContext`.
-- **`foundry.core.cache`** — `SemanticCache`, `ResultCache`, `CacheAccessor` protocols, key types.
 - **`foundry.core.state`** — Pydantic-based state primitive with reducer annotations.
-- **`foundry.config.schemas`** — complete `ToolSpec` (incl. `connections_required`, `cacheable`, `cache_ttl_s`, `cache_scope`), `AgentSpec` (incl. `semantic_cache: SemanticCacheConfig | None`, `retrievers: list[RetrieverBinding]`), `StateSpec`, `SystemSpec` (incl. tool + connection version pins), `ConnectionSpec`, `ConnectionBinding`, `RetrieverBinding`, `RerankerBinding`, `SemanticCacheConfig`, `EmbedderBinding`, refresh/pool policies.
-- **`foundry.config.refs`** — `ArtifactRef` parser + resolver handling tool, connection, retriever, and agent_template kinds.
-- **`foundry.catalog`** — catalog index loader, version discovery for tools, connections, retrievers. No promotion yet (Phase 5).
-- **`foundry.auth`** — 8 scheme helpers, token cache, redactor.
+- **`foundry.config.schemas`** — `ToolSpec` (incl. `connections_required`; cache fields deferred to 2b), `AgentSpec` extensions (tool allowlist + state scope declarations; `semantic_cache` / `retrievers` / `memory` deferred to 2b/2c), `StateSpec`, `SystemSpec` (incl. tool + connection version pins), `ConnectionSpec`, `ConnectionBinding`, refresh/pool policies.
+- **`foundry.config.refs`** — `ArtifactRef` parser + resolver handling tool and connection kinds (retriever and agent_template kinds added in 2b).
+- **`foundry.catalog`** — catalog index loader, version discovery for tools and connections. No promotion yet (Phase 5).
+- **`foundry.auth`** — 8 scheme helpers (api_key, basic_auth, oauth2_*, jwt_bearer, sigv4, mtls, custom), token cache, redactor.
 - **`foundry.connections`** — `ConnectionPool` concrete impl, registry, health runner, descriptor builder.
-- **`foundry.providers.embedders`** — concrete embedder adapters for Voyage, OpenAI, Cohere, Bedrock.
-- **`foundry.cache`** — concrete `SemanticCache` + `ResultCache` implementations: `in_process` (SQLite/FAISS), `redis` (Redis Stack), `pgvector` (Postgres pgvector).
-- **`foundry.retrieval`** — concrete retrievers (`DenseRetriever`, `SparseRetriever`, `HybridRetriever` with RRF) and reranker adapters (Cohere, Voyage, Jina, local cross-encoder stub).
-- **`foundry.memory`** — `DefaultMemory` coordinator, three concrete layers (`WorkingMemoryLayer`, `EpisodicMemoryLayer`, `SemanticMemoryLayer`), prompt-assembly logic.
-- **Per-tool and per-connection directory versioning on disk**. Each version immutable once committed.
 - **`foundry.orchestration.state_scope`** — compile-time per-node visibility enforcement.
-- **Compile-time wiring validation** for connection slots, retriever bindings, cache backends (dimension match against embedder).
-- **Example catalog**: seed `catalog/tools/` with 2–3 trivial shared tools, `catalog/connections/` with 2 trivial connections + 1 vector-store (`pgvector`) + 1 reranker (`cohere_rerank`), and `catalog/retrievers/` with `pgvector_dense` + `hybrid_rrf` templates.
-- Updated trivial project: `hello_agent` uses a catalog tool that declares a connection slot; a second example project demonstrates semantic-cache + hybrid retriever in end-to-end use.
+- **Per-tool and per-connection directory versioning on disk**. Each version immutable once committed.
+- **Compile-time wiring validation** for connection slots (slot bound, slot `accepts` list matches bound ref).
+- **Example catalog seeds**: `catalog/tools/` with 2–3 trivial shared tools; `catalog/connections/` with `postgres` + `pgvector` + `cohere_rerank` (the latter two are used by 2b but their connection shape lives here).
+- **Updated `hello_agent`**: uses a catalog tool that declares a connection slot bound to a catalog connection.
 
 ### Exit gate
 
@@ -127,16 +130,61 @@ Total calendar estimate (one engineer, focused): roughly 6–10 weeks. This is a
 - [ ] Secret-literal scan catches a credential accidentally placed inside `SystemSpec.connections.*.config` → `ConfigLoadError`.
 - [ ] State visibility: agent declared `read: [messages]` attempts to access `draft_plan` → compile-time `StateVisibilityError`.
 - [ ] State reducers work: `append` concatenates lists; `merge` merges dicts; unannotated fields last-write-wins.
-- [ ] Catalog index lists available tools, connections, AND retrievers with their versions; missing version raises a structured error at compile time.
+- [ ] Catalog index lists available tools and connections with their versions; missing version raises a structured error at compile time.
+- [ ] Per-tool + per-connection version directory layout matches the spec; `versions.json` metadata present.
+- [ ] Updated `hello_agent` system runs end-to-end against the catalog tool + connection.
+
+---
+
+## Phase 2b — Cache + embedders + retrieval
+
+**Hero demo after this sub-phase**: a second example project (`rag_hello` or similar) — semantic cache hits on a re-run, semantic cache invalidates on a prompt-version bump, hybrid (dense + sparse) retriever runs in parallel and merges via RRF, reranker reorders.
+
+### Deliverables
+
+- **`foundry.core.embedder`** — `Embedder` protocol, `Embedding`, `EmbedderCapabilities`.
+- **`foundry.core.retrieval`** — `Retriever`, `Reranker` protocols, `RetrievedDocument`.
+- **`foundry.core.cache`** — `SemanticCache`, `ResultCache`, `CacheAccessor` protocols, key types.
+- **`foundry.config.schemas`** — `ToolSpec` additions (`cacheable`, `cache_ttl_s`, `cache_scope`); `AgentSpec` additions (`semantic_cache: SemanticCacheConfig | None`, `retrievers: list[RetrieverBinding]`); `RetrieverBinding`, `RerankerBinding`, `SemanticCacheConfig`, `EmbedderBinding`.
+- **`foundry.config.refs`** — extend resolver for retriever and agent_template kinds.
+- **`foundry.catalog`** — extend version discovery for retrievers.
+- **`foundry.providers.embedders`** — concrete adapters for Voyage, OpenAI, Cohere, Bedrock.
+- **`foundry.cache`** — concrete `SemanticCache` + `ResultCache`: `in_process` (SQLite/FAISS), `redis` (Redis Stack), `pgvector` (Postgres pgvector).
+- **`foundry.retrieval`** — concrete retrievers (`DenseRetriever`, `SparseRetriever`, `HybridRetriever` with RRF) and reranker adapters (Cohere, Voyage, Jina, local cross-encoder stub).
+- **Compile-time wiring validation** for retriever bindings and cache backends (dimension match against embedder).
+- **Catalog seeds**: `catalog/retrievers/pgvector_dense` + `catalog/retrievers/hybrid_rrf` templates.
+- **Second example project** (`rag_hello` or similar) demonstrating semantic cache + hybrid retriever end-to-end.
+
+### Exit gate
+
 - [ ] **Embedder round-trip**: `EmbedderBinding` for Voyage `voyage-3` and OpenAI `text-embedding-3-small` both resolve and produce embeddings of advertised dimensions.
 - [ ] **Semantic cache hit**: agent with `semantic_cache.backend: in_process` hits cache on the same input re-run; `cache.semantic.hit` event emitted with `similarity ≥ threshold`; `saved_cost_usd` populated.
 - [ ] **Semantic cache invalidation**: bump a prompt version; same input now misses cache and emits `invalidate` event.
-- [ ] **Tool-result cache**: tool with `cacheable: true` + `cache_ttl_s: 60` returns cached output on the second call in the same run; cache.tool.hit event emitted.
+- [ ] **Tool-result cache**: tool with `cacheable: true` + `cache_ttl_s: 60` returns cached output on the second call in the same run; `cache.tool.hit` event emitted.
 - [ ] **Tool-cache validator**: `cacheable: true` without `cache_ttl_s` → structured `ConfigValidationError` at load.
 - [ ] **Cache failure fails open**: patched backend raises; run completes using LLM path + warning event; never blocks.
 - [ ] **Hybrid retriever**: `hybrid_rrf` retriever calls dense + sparse in parallel, merges via RRF, returns top_k docs; `retrieval` event emitted; one-branch-fail-other-branch-return test passes.
-- [ ] **Reranker**: `cohere_rerank` reorders input docs; `rerank` event emitted with cost_estimate.
+- [ ] **Reranker**: `cohere_rerank` reorders input docs; `rerank` event emitted with `cost_estimate`.
 - [ ] **Dimension mismatch compile check**: configuring a dense retriever whose embedder dimensions don't match the vector store's configured dimensions fails load with `EmbedderConfigError`.
+- [ ] Second example project (`rag_hello` or equivalent) runs end-to-end with semantic cache + hybrid retriever.
+
+---
+
+## Phase 2c — Memory + FunctionNode
+
+**Hero demo after this sub-phase**: a third example project — agent with three memory layers (working / episodic / semantic) runs; episodic layer retrieves top-K past snippets; semantic layer consolidates every N turns; a `FunctionNode` sits in a sequential flow with state visibility enforced.
+
+### Deliverables
+
+- **`foundry.core.node` + `foundry.core.function_node`** — `Node` protocol (parent of Agent + FunctionNode), `FunctionNode` protocol, `BaseFunctionNode`, `NodeResult`. Deterministic-Python flow nodes with same state-visibility / observability / retry plumbing as agents but no LLM.
+- **`foundry.core.memory`** — `Memory`, `MemoryLayer` protocols, `MemoryEnvelope`, `MemoryContribution`, `MemoryWrite`, `MemoryContext`.
+- **`foundry.config.schemas`** — `AgentSpec` addition (`memory: MemoryConfig | None`); `FunctionNodeSpec`.
+- **`foundry.memory`** — `DefaultMemory` coordinator, three concrete layers (`WorkingMemoryLayer`, `EpisodicMemoryLayer`, `SemanticMemoryLayer`), prompt-assembly logic.
+- **Remaining compile-time wiring validation**: namespace collisions (agent + function same name), mixed-flow `from`/`to` references resolve across agents and functions.
+- **Third example project** demonstrating memory layers + a `FunctionNode` in a sequential flow.
+
+### Exit gate
+
 - [ ] **Memory: working layer**: configured with `max_messages: 5`; on a 10-turn run, agent prompt contains exactly the last 5 message turns from state.
 - [ ] **Memory: episodic layer**: configured against a seeded retriever; agent's prompt includes top-K retrieved past snippets in the configured `system_suffix` placement; `memory.read` event lists `episodic` in `layers_read`.
 - [ ] **Memory: semantic layer with periodic consolidation**: every N turns, the consolidator prompt runs and writes synthesised content into the configured state field; `memory.consolidate` event emitted with input/output token counts.
