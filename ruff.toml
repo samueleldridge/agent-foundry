@@ -1,0 +1,68 @@
+# Ruff lint config for agent-foundry (root).
+#
+# Two responsibilities here:
+#   1. Standard lint hygiene (pyflakes + isort + a curated rule set).
+#   2. Import-boundary enforcement for THIRD-PARTY SDKs, matching
+#      docs/01-architecture-overview.md § Module ownership and dependency
+#      rules.
+#
+# Bans defined at this level apply across the whole repo:
+#   - `langgraph` / `langchain_core` — only the LangGraph adapter modules may
+#     import.
+#   - `anthropic` / `langchain_anthropic` — only the Anthropic provider may.
+#   - `openai` / `langchain_openai` — only the OpenAI provider may.
+#
+# Foundry-internal bans (`foundry.providers`, `foundry.runtime`,
+# `foundry.config` are forbidden inside `foundry.core`, per
+# docs/10-core-framework.md § Enforcement) live in the nested config at
+# src/foundry/core/ruff.toml. Ruff replaces (does not merge) nested
+# banned-api tables, so the nested file re-declares the third-party bans
+# alongside the core-only additions.
+
+target-version = "py312"
+src = ["src", "tests"]
+line-length = 100
+extend-exclude = [
+    ".venv",
+    "personal_docs",
+    "docs/_phase_handoffs",
+    "docs/_retros",
+    "docs/_demos",
+    "docs/_manual_tests",
+]
+
+[lint]
+# Curated rule set; keep narrow until real code lands so we don't churn over
+# placeholder stubs.
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "UP",     # pyupgrade
+    "TID",    # flake8-tidy-imports (banned-api + relative-imports)
+    "RUF",    # ruff-specific
+]
+
+[lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[lint.flake8-tidy-imports.banned-api]
+"langgraph".msg = "Only foundry.runtime.langgraph_adapter (and _langgraph_types) may import langgraph."
+"langchain_core".msg = "Only foundry.runtime.langgraph_adapter (and _langgraph_types) may import langchain_core."
+"langchain_anthropic".msg = "Only foundry.providers.anthropic may import langchain_anthropic."
+"langchain_openai".msg = "Only foundry.providers.openai may import langchain_openai."
+"anthropic".msg = "Only foundry.providers.anthropic may import the anthropic SDK."
+"openai".msg = "Only foundry.providers.openai may import the openai SDK."
+
+[lint.per-file-ignores]
+# Sole legal importers of their respective third-party SDKs.
+"src/foundry/runtime/langgraph_adapter.py" = ["TID251"]
+"src/foundry/runtime/_langgraph_types.py" = ["TID251"]
+"src/foundry/providers/anthropic.py" = ["TID251"]
+"src/foundry/providers/openai.py" = ["TID251"]
+# Tests reach into provider SDKs and LangGraph for fixtures.
+"tests/**" = ["TID251"]
+
+[lint.isort]
+known-first-party = ["foundry"]

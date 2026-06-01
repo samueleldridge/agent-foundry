@@ -1,0 +1,26 @@
+# Nested ruff config for `src/foundry/core/`.
+#
+# `foundry.core` is the bottom of the dependency graph (stdlib + pydantic +
+# anyio only) per docs/10-core-framework.md § Enforcement. Ruff resolves the
+# nearest config per file, so this file applies to every module under
+# `src/foundry/core/`.
+#
+# Why we duplicate the third-party bans here: ruff REPLACES (does not merge)
+# the `[lint.flake8-tidy-imports.banned-api]` table when a child config
+# extends a parent. So the full ban list must be repeated. The 3 extra
+# foundry-internal bans at the bottom are the core-only additions.
+
+extend = "../../../ruff.toml"
+
+[lint.flake8-tidy-imports.banned-api]
+# Third-party (re-declared from the root config; do not drift):
+"langgraph".msg = "core must not import langgraph (use foundry.runtime adapter)."
+"langchain_core".msg = "core must not import langchain_core (use foundry.runtime adapter)."
+"langchain_anthropic".msg = "core must not import langchain_anthropic (use foundry.providers)."
+"langchain_openai".msg = "core must not import langchain_openai (use foundry.providers)."
+"anthropic".msg = "core must not import the anthropic SDK (use foundry.providers)."
+"openai".msg = "core must not import the openai SDK (use foundry.providers)."
+# Foundry-internal — core only:
+"foundry.providers".msg = "core must not import foundry.providers (circular layer; see docs/01)."
+"foundry.runtime".msg = "core must not import foundry.runtime (circular layer; see docs/01)."
+"foundry.config".msg = "core must not import foundry.config (circular layer; see docs/01)."

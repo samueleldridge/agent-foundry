@@ -1,7 +1,100 @@
+# agent-foundry — Phase 0 skeleton
+#
+# Pinned dependency rationale (chosen 2026-06-01 via `uv add` against fresh
+# project on Python 3.12; see docs/_phase_handoffs/phase_0.md for full notes):
+#
+#   pydantic >=2.13,<3                  — Pydantic v2 is the validation backbone
+#                                         (CLAUDE.md invariant). 2.13.x is the
+#                                         current stable; cap at <3 to avoid an
+#                                         unannounced major.
+#   langgraph ==1.2.2                   — exact pin (per docs/03 § Phase 0).
+#                                         LangGraph minor releases have broken
+#                                         the adapter contract before; we move
+#                                         deliberately. Risk register item 1.
+#   langchain-core ==1.4.0              — exact pin (per docs/03 § Phase 0).
+#                                         Co-version with langgraph 1.2.x.
+#   langchain-anthropic >=1.4,<2        — provider adapter; tracks langchain-core 1.x.
+#   langchain-openai >=1.2,<2           — provider adapter; tracks langchain-core 1.x.
+#   pyyaml >=6.0                        — YAML config loader. 6.x is stable.
+#   structlog >=25.5                    — structured logs threaded with run_id
+#                                         (CLAUDE.md invariant). Chosen over
+#                                         loguru for typed key/value contexts.
+#   typer >=0.26                        — CLI framework. Chosen over argparse
+#                                         and click: typed signatures + the
+#                                         Phase 0 deliverable list pins typer
+#                                         as the default option.
+#   anyio >=4.13                        — async primitives + cancellation scopes
+#                                         used by Session (see docs/10).
+#   httpx >=0.28                        — async HTTP for provider adapters.
+#   opentelemetry-api ==1.42.1          — OTel always-on (CLAUDE.md invariant).
+#   opentelemetry-sdk ==1.42.1          — All three OTel pkgs MUST move
+#   opentelemetry-exporter-otlp ==1.42.1  together; matching exact pins.
+#
+# Dev deps:
+#   ruff >=0.15.15                      — lint + import-boundary enforcement
+#                                         (flake8-tidy-imports banned-api).
+#   pytest >=9.0                        — test runner.
+#   pytest-asyncio >=1.4                — async test support; asyncio_mode=auto.
+#   mypy >=2.1                          — `mypy --strict src/foundry/` is part
+#                                         of every phase's definition of done.
+
 [project]
 name = "agent-foundry"
 version = "0.1.0"
-description = "Add your description here"
+description = "A developer kit for building, evaluating, versioning, and orchestrating multi-agent LLM systems."
 readme = "README.md"
-requires-python = ">=3.9"
-dependencies = []
+requires-python = ">=3.12,<3.13"
+license = { text = "Proprietary" }
+authors = [{ name = "agent-foundry contributors" }]
+
+dependencies = [
+    "pydantic>=2.13,<3",
+    "langgraph==1.2.2",
+    "langchain-core==1.4.0",
+    "langchain-anthropic>=1.4,<2",
+    "langchain-openai>=1.2,<2",
+    "pyyaml>=6.0",
+    "structlog>=25.5",
+    "typer>=0.26",
+    "anyio>=4.13",
+    "httpx>=0.28",
+    "opentelemetry-api==1.42.1",
+    "opentelemetry-sdk==1.42.1",
+    "opentelemetry-exporter-otlp==1.42.1",
+]
+
+[project.scripts]
+foundry = "foundry.cli.__main__:main"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.15",
+    "pytest>=9.0",
+    "pytest-asyncio>=1.4",
+    "mypy>=2.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/foundry"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "unit: fast, isolated tests; no network, no filesystem outside tmp_path.",
+    "integration: cross-module slice tests; may use a local sqlite or filesystem.",
+    "contract: pinned-behaviour tests against third-party APIs (e.g. LangGraph).",
+]
+filterwarnings = [
+    "error",
+]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["foundry"]
+mypy_path = "src"
