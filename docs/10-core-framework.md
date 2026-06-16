@@ -6,6 +6,10 @@ The core framework is the small, opinionated set of primitives that every other 
 
 This doc is the interface contract for the foundry. If this is wrong, everything downstream is wrong.
 
+## Pinned dependencies
+
+The runtime + dev dependency pins this tier relies on (Pydantic v2, `anyio`, `structlog`, OTel triple, etc.) live in [`pyproject.toml`](../pyproject.toml). Per-pin rationale — version bands, exact-pin reasons (`langgraph`, `langchain-core`, OTel triple), and CLI-framework choice — is documented in the leading comment block of `pyproject.toml` and in [`docs/_phase_handoffs/phase_0.md`](_phase_handoffs/phase_0.md) (Phase 0 chose them; subsequent Tier 1 sub-docs will expand this section as primitives land).
+
 ## Module boundaries
 
 ```

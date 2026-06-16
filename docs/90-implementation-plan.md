@@ -95,7 +95,7 @@ EXIT GATE (you must verify each before declaring done):
 - [ ] `python -m foundry --help` exits 0 and prints help
 - [ ] `ruff check src/` passes (zero violations)
 - [ ] `pytest tests/` runs (with the smoke test) and exits 0
-- [ ] All 18 src/foundry/ subdirectories exist with __init__.py +
+- [ ] All 19 src/foundry/ subdirectories exist with __init__.py +
       module-docstring placeholders
 - [ ] catalog/ and projects/ exist with .gitkeep + README
 
@@ -134,7 +134,7 @@ VERIFY each exit gate:
 2. Run `python -m foundry --help` — does it exit 0 with a help string?
 3. Run `ruff check src/` — zero violations?
 4. Run `pytest tests/` — passes (smoke test only at this phase)?
-5. Are all 18 src/foundry/ subdirectories present with __init__.py?
+5. Are all 19 src/foundry/ subdirectories present with __init__.py?
 6. Are catalog/ + projects/ present with .gitkeep + README?
 7. Does ruff.toml enforce the import-boundary rules from
    docs/10-core-framework.md § Enforcement? Specifically: does it
