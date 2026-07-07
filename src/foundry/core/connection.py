@@ -1,11 +1,9 @@
-"""Connection protocols — Phase 1 type stubs.
+"""Connection protocols + credential value types.
 
-Full implementation lands in Phase 2a (foundry.connections + foundry.auth).
-Phase 1 ships the protocol shapes so config schemas (ConnectionSpec /
-ConnectionBinding) and the public ``core`` re-export are stable.
-
-See docs/10 § Connections and docs/23-connections-and-auth.md for the
-forthcoming concrete pool / scheme helpers.
+The concrete pool / scheme helpers live in ``foundry.connections`` and
+``foundry.auth`` (Phase 2a). This module holds only the cross-layer
+primitives: protocols, the descriptor, and the redact-on-print credential
+wrappers. See docs/10 § Connections and docs/23-connections-and-auth.md.
 """
 
 from __future__ import annotations
@@ -26,6 +24,80 @@ class AuthScheme(StrEnum):
     SIGV4 = "sigv4"
     MTLS = "mtls"
     CUSTOM = "custom"
+
+
+class SecretValue:
+    """Wrapper around a secret string that never prints or serialises its
+    value. Factories and auth-scheme helpers call ``.reveal()`` — the ONLY
+    read path (docs/23 § Credentials resolution)."""
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def reveal(self) -> str:
+        return self._value
+
+    def __str__(self) -> str:
+        return "<redacted>"
+
+    def __repr__(self) -> str:
+        return "<SecretValue redacted>"
+
+    def __eq__(self, other: object) -> bool:
+        # Identity-only equality: comparing secrets by value invites
+        # timing-channel misuse and accidental logging in assertions.
+        return self is other
+
+    def __hash__(self) -> int:
+        return id(self)
+
+
+class ResolvedConnectionCredentials:
+    """Typed, opaque bundle of scheme-specific secret fields handed to a
+    ConnectionFactory (e.g. ``api_key``; ``client_id`` + ``client_secret``;
+    ``username`` + ``password``). Redacted on print.
+
+    Distinct from ``foundry.core.types.ResolvedCredentials`` (the Phase 1
+    single-secret provider credential); connections need multi-field
+    credentials per auth scheme.
+    """
+
+    __slots__ = ("fields", "principal", "scheme")
+
+    def __init__(
+        self,
+        scheme: AuthScheme,
+        fields: dict[str, SecretValue],
+        principal: str | None = None,
+    ) -> None:
+        self.scheme = scheme
+        self.fields = fields
+        self.principal = principal
+
+    def require(self, name: str) -> SecretValue:
+        """Fetch a named credential field; structured error when absent."""
+        value = self.fields.get(name)
+        if value is None:
+            # Import here keeps module-load order simple (errors ← nothing).
+            from foundry.core.errors import ConnectionAuthError
+
+            raise ConnectionAuthError(
+                f"credentials for scheme {self.scheme.value!r} are missing the "
+                f"required field {name!r} (present: {sorted(self.fields)})",
+                context={"scheme": self.scheme.value, "missing_field": name,
+                         "present_fields": sorted(self.fields)},
+            )
+        return value
+
+    def __str__(self) -> str:
+        return (
+            f"ResolvedConnectionCredentials(scheme={self.scheme.value!r}, "
+            f"fields=<redacted:{sorted(self.fields)}>)"
+        )
+
+    __repr__ = __str__
 
 
 class ConnectionHealth(BaseModel):
@@ -56,6 +128,10 @@ class ConnectionContext(BaseModel):
     pool_logger: Any = None
     tracer: Any = None
     cancel_token: Any = None
+    http_transport: Any = None
+    """Optional httpx.AsyncBaseTransport override for factories that build
+    httpx clients. Lets the whole connection stack run against
+    httpx.MockTransport in tests (same pattern as ProviderAdapter)."""
 
 
 @runtime_checkable
@@ -85,6 +161,18 @@ class ConnectionAccessor(Protocol):
     async def health(self, slot: str) -> ConnectionHealth: ...
     def descriptor(self, slot: str) -> ConnectionDescriptor: ...
 
+    async def on_auth_error(self) -> bool:
+        """Handle a ConnectionAuthError raised mid-tool-call: evict pool
+        entries for acquired slots whose refresh policy is ``on_auth_error``.
+        Returns True if anything was evicted (the dispatcher then retries the
+        handler once). See docs/23 § Refresh."""
+        ...
+
+    async def release_all(self) -> None:
+        """Release every connection acquired through this accessor (end of
+        tool call). The pool owns lifecycle; handlers never call this."""
+        ...
+
 
 @runtime_checkable
 class ConnectionPool(Protocol):
@@ -112,4 +200,6 @@ __all__ = [
     "ConnectionFactory",
     "ConnectionHealth",
     "ConnectionPool",
+    "ResolvedConnectionCredentials",
+    "SecretValue",
 ]

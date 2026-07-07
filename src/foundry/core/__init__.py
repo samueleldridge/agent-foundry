@@ -23,6 +23,8 @@ from foundry.core.connection import (
     ConnectionFactory,
     ConnectionHealth,
     ConnectionPool,
+    ResolvedConnectionCredentials,
+    SecretValue,
 )
 from foundry.core.embedder import (
     Embedder,
@@ -59,6 +61,7 @@ from foundry.core.errors import (
     EmbedderTimeoutError,
     EmbedderUnexpectedError,
     FoundryError,
+    IterationLimitError,
     MaxHopsExceededError,
     MemoryConfigError,
     MemoryConsolidateError,
@@ -157,14 +160,17 @@ from foundry.core.session import (
     NoOpCheckpointer,
     Session,
 )
-from foundry.core.state import Reducer, StateBase
+from foundry.core.state import Reducer, StateBase, apply_reducer
 from foundry.core.tool import (
     BackoffStrategy,
     BaseTool,
+    RegisteredTool,
     RetryPolicy,
     RunContext,
     Tool,
+    ToolDescriptor,
     ToolRegistry,
+    validate_handler_signature,
 )
 from foundry.core.types import (
     CacheControl,
@@ -248,6 +254,7 @@ __all__ = [
     "ImageBlock",
     "InboundMessage",
     "InjectInput",
+    "IterationLimitError",
     "LLMCallCompleted",
     "LLMCallStarted",
     "LLMDelta",
@@ -286,8 +293,10 @@ __all__ = [
     "ProviderUnexpectedError",
     "Reducer",
     "RefResolutionError",
+    "RegisteredTool",
     "RerankEvent",
     "Reranker",
+    "ResolvedConnectionCredentials",
     "ResolvedCredentials",
     "ResultCache",
     "ResumeRun",
@@ -305,6 +314,7 @@ __all__ = [
     "RunFailed",
     "RunId",
     "RunStarted",
+    "SecretValue",
     "SemanticCache",
     "SemanticCacheHit",
     "SemanticCacheHitEvent",
@@ -324,6 +334,7 @@ __all__ = [
     "Tool",
     "ToolCacheHit",
     "ToolCompleted",
+    "ToolDescriptor",
     "ToolError",
     "ToolHandlerError",
     "ToolInputValidationError",
@@ -337,4 +348,6 @@ __all__ = [
     "ToolUseBlockDelta",
     "UnknownPatternError",
     "VersioningError",
+    "apply_reducer",
+    "validate_handler_signature",
 ]

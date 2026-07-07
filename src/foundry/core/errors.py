@@ -147,6 +147,11 @@ class MaxHopsExceededError(OrchestrationError):
     pass
 
 
+class IterationLimitError(OrchestrationError):
+    """Agent exceeded its per-invocation LLM-call round budget
+    (AgentSpec.iteration_limit)."""
+
+
 class CostBudgetExceeded(OrchestrationError):
     """Next provider call would breach Guardrails.max_cost_usd."""
 
@@ -321,6 +326,7 @@ __all__ = [
     "EmbedderTimeoutError",
     "EmbedderUnexpectedError",
     "FoundryError",
+    "IterationLimitError",
     "MaxHopsExceededError",
     "MemoryConfigError",
     "MemoryConsolidateError",
