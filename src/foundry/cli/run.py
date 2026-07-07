@@ -107,7 +107,7 @@ def execute_run(
             provider=compiled.provider.name,
             model=compiled.provider.model,
             error=exc.to_dict(),
-            extra=_budget_extra(),
+            extra={"pins": compiled.pins, **_budget_extra()},
         )
         logger.error("run.failed", error_class=type(exc).__name__)
         _print_error(exc)
@@ -118,7 +118,12 @@ def execute_run(
         status="completed",
         provider=compiled.provider.name,
         model=compiled.provider.model,
-        extra={"output": result.output, **_budget_extra()},
+        extra={
+            "output": result.output,
+            "pins": compiled.pins,
+            "connection_pool": result.pool_metrics,
+            **_budget_extra(),
+        },
     )
     logger.info("run.completed", artifact_dir=str(writer.directory))
     print(json.dumps(result.output, indent=2, default=str))

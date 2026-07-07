@@ -1,15 +1,20 @@
 """Run-artifact writer: the audit trail every run leaves on disk.
 
-Layout (Phase 1 subset of the full Phase 9 spec in docs/81):
+Layout (Phase 2a subset of the full Phase 9 spec in docs/81):
 
     ~/.foundry/runs/<run_id>/
-    ├── metadata.json      run_id, project, status, provider/model, budget
-    ├── events.jsonl       every RunEvent, in sequence order
-    └── llm_calls.jsonl    one record per LLM call (token_usage incl.
-                           reasoning_tokens, cost, latency, stop_reason)
+    ├── metadata.json      run_id, project, status, provider/model, budget,
+    │                      pins (tool + connection versions), pool metrics
+    ├── events.jsonl       every RunEvent, in sequence order (incl.
+    │                      connection lifecycle events)
+    ├── llm_calls.jsonl    one record per LLM call (token_usage incl.
+    │                      reasoning_tokens, cost, latency, stop_reason)
+    └── tool_calls.jsonl   one record per tool dispatch (ref, version,
+                           success, latency, retries, error_category)
 
-Never writes secrets: events carry no credentials by construction, and
-metadata is assembled from spec fields only.
+Never writes secrets: events carry no credentials by construction
+(ConnectionDescriptor is redacted at build time), and metadata is assembled
+from spec fields only.
 """
 
 from __future__ import annotations
@@ -21,7 +26,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from foundry.core import LLMCallCompleted, LLMCallStarted, RunId
+from foundry.core import (
+    LLMCallCompleted,
+    LLMCallStarted,
+    RunId,
+    ToolCompleted,
+    ToolStarted,
+)
 from foundry.storage.paths import run_dir
 
 
@@ -40,7 +51,9 @@ class RunArtifactWriter:
         self.directory.mkdir(parents=True, exist_ok=True)
         self._events_path = self.directory / "events.jsonl"
         self._llm_calls_path = self.directory / "llm_calls.jsonl"
+        self._tool_calls_path = self.directory / "tool_calls.jsonl"
         self._last_llm_started: LLMCallStarted | None = None
+        self._last_tool_started: ToolStarted | None = None
 
     def record_event(self, event: BaseModel) -> None:
         with self._events_path.open("a") as fh:
@@ -49,6 +62,10 @@ class RunArtifactWriter:
             self._last_llm_started = event
         elif isinstance(event, LLMCallCompleted):
             self._record_llm_call(event)
+        elif isinstance(event, ToolStarted):
+            self._last_tool_started = event
+        elif isinstance(event, ToolCompleted):
+            self._record_tool_call(event)
 
     def _record_llm_call(self, event: LLMCallCompleted) -> None:
         started = self._last_llm_started
@@ -68,6 +85,27 @@ class RunArtifactWriter:
             "timestamp": event.timestamp.isoformat(),
         }
         with self._llm_calls_path.open("a") as fh:
+            fh.write(json.dumps(record) + "\n")
+
+    def _record_tool_call(self, event: ToolCompleted) -> None:
+        started = self._last_tool_started
+        record: dict[str, Any] = {
+            "run_id": str(event.run_id),
+            "agent_name": event.agent_name,
+            "tool_ref": event.tool_ref,
+            "tool_version": event.tool_version,
+            "input_hash": (
+                started.input_hash
+                if started is not None and started.tool_ref == event.tool_ref
+                else None
+            ),
+            "success": event.success,
+            "latency_ms": event.latency_ms,
+            "retry_count": event.retry_count,
+            "error_category": event.error_category,
+            "timestamp": event.timestamp.isoformat(),
+        }
+        with self._tool_calls_path.open("a") as fh:
             fh.write(json.dumps(record) + "\n")
 
     def write_metadata(

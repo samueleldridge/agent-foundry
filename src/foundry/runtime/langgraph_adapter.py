@@ -1,21 +1,25 @@
-"""LangGraph runtime adapter — compile + run a single-node graph.
+"""LangGraph runtime adapter — compile + run a single-agent graph.
 
 The ONLY module (with ``_langgraph_types``) allowed to import ``langgraph`` /
-``langchain_core`` (import-boundary lint). Phase 1 scope: compile a
-``SystemSpec`` with a ``single`` flow into a one-node ``StateGraph`` whose node
-makes one provider call and validates the response against the agent's output
-schema. Checkpointers, streaming, and multi-node flows land in Phase 3.
+``langchain_core`` (import-boundary lint). Phase 2a scope: compile a
+``SystemSpec`` with a ``single`` flow into a one-node ``StateGraph`` whose
+node runs the agent's LLM ⇄ tool loop — model → tool call (pooled,
+authenticated connection) → tool result → model → final output.
+Checkpointers, streaming, and multi-node flows land in Phase 3; the real
+compiler (``foundry.orchestration.compiler``) also lands there — this module
+deliberately stays a thin adapter.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
 import json
 import subprocess
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,32 +28,69 @@ import httpx
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ValidationError
 
-from foundry.config import EnvSecretsProvider, LoadedAgent, LoadedProject, load_project
+from foundry.catalog.loader import load_tool_version
+from foundry.config import (
+    ArtifactRef,
+    EnvSecretsProvider,
+    FoundryRoots,
+    LoadedAgent,
+    LoadedProject,
+    ToolSpec,
+    load_project,
+)
 from foundry.config.secrets import SecretsProvider
+from foundry.connections import (
+    InProcessConnectionPool,
+    PreparedConnection,
+    SlotConnectionAccessor,
+    prepare_connections,
+    validate_tool_connection_wiring,
+)
 from foundry.core import (
     AgentCompleted,
     AgentStarted,
+    ConnectionContext,
     FoundryMessage,
     LLMCallCompleted,
     LLMCallStarted,
     MessageRole,
     ModelResponse,
+    RegisteredTool,
+    RetryPolicy,
     RunCompleted,
     RunFailed,
     RunStarted,
     Session,
     TextBlock,
+    ToolDescriptor,
+    ToolRegistry,
+    ToolResultBlock,
+    ToolUseBlock,
 )
 from foundry.core.errors import (
     CompileError,
     FoundryError,
+    IterationLimitError,
     OrchestrationError,
     ProviderConfigError,
+    StateVisibilityError,
+    ToolError,
 )
-from foundry.providers import ProviderAdapter, resolve
+from foundry.core.errors import (
+    ConnectionError as FoundryConnectionError,
+)
+from foundry.core.tool import RunContext
+from foundry.orchestration.state_scope import (
+    AgentStateView,
+    CompiledState,
+    compile_state,
+)
+from foundry.providers import ProviderAdapter, ToolSchema, resolve
 from foundry.runtime._langgraph_types import GraphState
 
 EventSink = Callable[[BaseModel], None]
+
+_OVERRIDABLE_SETTINGS = ("timeout_s", "retry_policy")
 
 
 # --- compilation -----------------------------------------------------------------
@@ -57,7 +98,7 @@ EventSink = Callable[[BaseModel], None]
 
 @dataclass(frozen=True)
 class CompiledProject:
-    """A Phase 1 compiled system: one agent, one provider, one output schema."""
+    """A Phase 2a compiled system: one agent, its tools + connections + state."""
 
     project: LoadedProject
     agent_name: str
@@ -66,6 +107,26 @@ class CompiledProject:
     provider: ProviderAdapter
     pin_set_hash: str
     system_version: str
+    roots: FoundryRoots
+    compiled_state: CompiledState
+    tool_registry: ToolRegistry = field(default_factory=ToolRegistry)
+    tool_slots: dict[str, dict[str, PreparedConnection]] = field(default_factory=dict)
+    prepared_connections: dict[str, PreparedConnection] = field(default_factory=dict)
+    transport: httpx.AsyncBaseTransport | None = None
+
+    @property
+    def pins(self) -> dict[str, Any]:
+        """Pinned tool + connection versions — recorded in run metadata."""
+        return {
+            "tools": {
+                name: f"{binding.ref}@{binding.version}"
+                for name, binding in self.project.system.tools.items()
+            },
+            "connections": {
+                name: f"{binding.ref}@{binding.version}"
+                for name, binding in self.project.system.connections.items()
+            },
+        }
 
 
 def compile_project(
@@ -74,18 +135,21 @@ def compile_project(
     secrets: SecretsProvider | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> CompiledProject:
-    """Load + validate a project and resolve its provider.
+    """Load + validate a project; resolve provider, tools, connections, state.
 
-    Raises ConfigError subclasses for bad YAML, CompileError for structural
-    problems, ProviderConfigError / ProviderAuthError for binding problems.
+    Every wiring error below is compile-time by construction: unbound slot →
+    ConnectionSlotNotBoundError; accepts mismatch → CompileError; visibility
+    hole → StateVisibilityError; missing version → RefResolutionError.
     """
+    secrets = secrets or EnvSecretsProvider()
     project = load_project(project_dir)
+    system_file = project.directory / "system.yaml"
     flow = project.system.flow
     if flow.type != "single":
         raise CompileError(
-            f"Phase 1 supports only the 'single' flow pattern; "
+            f"Phase 2a supports only the 'single' flow pattern; "
             f"got {flow.type!r} (multi-node flows land in Phase 3+)",
-            context={"file": str(project.directory / "system.yaml"),
+            context={"file": str(system_file),
                      "pointer": "/flow/type", "received": flow.type},
         )
     agent_name = flow.agent
@@ -93,7 +157,7 @@ def compile_project(
         raise CompileError(
             f"flow.agent {agent_name!r} is not in SystemSpec.agents "
             f"{sorted(project.agents)}",
-            context={"file": str(project.directory / "system.yaml"),
+            context={"file": str(system_file),
                      "pointer": "/flow/agent", "received": agent_name},
         )
     agent = project.agents[agent_name]
@@ -101,10 +165,76 @@ def compile_project(
 
     output_model = _load_output_schema(agent.directory, agent.spec.output.schema_ref)
 
+    # State: compile + validate visibility (docs/22). agent.yaml's
+    # state_visibility must agree with state.yaml's entry for the agent.
+    compiled_state = compile_state(
+        project.state,
+        project.system.agents,
+        where=str(project.directory / project.system.state),
+    )
+    _check_agent_state_visibility(agent, compiled_state, agent_yaml)
+
+    roots = FoundryRoots.for_project(project.directory)
+    prepared_connections = prepare_connections(
+        project.system, roots, secrets, system_file=system_file
+    )
+
+    registry = ToolRegistry()
+    tool_slots: dict[str, dict[str, PreparedConnection]] = {}
+    for name, binding in project.system.tools.items():
+        ref = ArtifactRef.parse(binding.ref, "tool", version=binding.version)
+        loaded = load_tool_version(ref, roots)
+        wired = validate_tool_connection_wiring(
+            name, loaded.spec, binding, prepared_connections,
+            system_file=system_file,
+        )
+        timeout_s, retry_policy = _apply_tool_overrides(
+            name, loaded.spec, binding.settings, system_file
+        )
+        registry.register(
+            RegisteredTool(
+                descriptor=ToolDescriptor(
+                    name=name,
+                    ref=binding.ref,
+                    version=binding.version,
+                    description=loaded.spec.description,
+                    tags=loaded.spec.tags,
+                    connection_slots=sorted(wired),
+                ),
+                input_schema=loaded.input_model,
+                output_schema=loaded.output_model,
+                handler=loaded.handler,
+                timeout_s=timeout_s,
+                retry_policy=retry_policy,
+                auth_error_retry=any(
+                    p.refresh.mode == "on_auth_error" for p in wired.values()
+                ),
+            )
+        )
+        tool_slots[name] = wired
+
+    # Agent allowlists reference logical names from SystemSpec.tools.
+    for loaded_agent in project.agents.values():
+        unknown_tools = sorted(
+            set(loaded_agent.spec.tools) - set(project.system.tools)
+        )
+        if unknown_tools:
+            raise CompileError(
+                f"agent {loaded_agent.spec.name!r} allowlists tool(s) not in "
+                f"system.yaml's `tools:` block: {', '.join(unknown_tools)} "
+                f"(known: {', '.join(sorted(project.system.tools)) or '(none)'})",
+                context={
+                    "file": str(loaded_agent.directory / "agent.yaml"),
+                    "pointer": "/tools",
+                    "unknown_tools": unknown_tools,
+                    "known_tools": sorted(project.system.tools),
+                },
+            )
+
     try:
         provider = resolve(
             agent.spec.model_binding,
-            secrets or EnvSecretsProvider(),
+            secrets,
             transport=transport,
         )
     except ProviderConfigError as exc:
@@ -128,7 +258,73 @@ def compile_project(
         provider=provider,
         pin_set_hash=_pin_set_hash(project),
         system_version=_git_sha(project.directory),
+        roots=roots,
+        compiled_state=compiled_state,
+        tool_registry=registry,
+        tool_slots=tool_slots,
+        prepared_connections=prepared_connections,
+        transport=transport,
     )
+
+
+def _check_agent_state_visibility(
+    agent: LoadedAgent, compiled_state: CompiledState, agent_yaml: Path
+) -> None:
+    view = compiled_state.agent_views[agent.spec.name]
+    declared = agent.spec.state_visibility
+    if set(declared.read) != set(view.read) or set(declared.write) != set(view.write):
+        raise StateVisibilityError(
+            f"agent {agent.spec.name!r} declares state_visibility "
+            f"(read: {sorted(declared.read)}, write: {sorted(declared.write)}) "
+            "that disagrees with state.yaml's visibility entry "
+            f"(read: {sorted(view.read)}, write: {sorted(view.write)}); "
+            "the two declarations must match",
+            context={
+                "file": str(agent_yaml),
+                "pointer": "/state_visibility",
+                "agent_declared": {"read": sorted(declared.read),
+                                   "write": sorted(declared.write)},
+                "state_yaml_declared": {"read": sorted(view.read),
+                                        "write": sorted(view.write)},
+            },
+        )
+
+
+def _apply_tool_overrides(
+    name: str,
+    spec: ToolSpec,
+    settings: dict[str, Any],
+    system_file: Path,
+) -> tuple[float, RetryPolicy]:
+    timeout_s = float(spec.timeout_s)
+    retry_policy = spec.retry_policy
+    for key, value in settings.items():
+        if key not in _OVERRIDABLE_SETTINGS or key not in spec.overridable_settings:
+            raise CompileError(
+                f"tool {name!r} does not allow overriding setting {key!r} "
+                f"(overridable: {', '.join(spec.overridable_settings)})",
+                context={
+                    "file": str(system_file),
+                    "pointer": f"/tools/{name}/settings/{key}",
+                    "overridable": spec.overridable_settings,
+                },
+            )
+        if key == "timeout_s":
+            timeout_s = float(value)
+        elif key == "retry_policy":
+            try:
+                retry_policy = RetryPolicy.model_validate(value)
+            except ValidationError as exc:
+                raise CompileError(
+                    f"tool {name!r} retry_policy override is invalid: "
+                    f"{exc.errors()[0]['msg']}",
+                    context={
+                        "file": str(system_file),
+                        "pointer": f"/tools/{name}/settings/retry_policy",
+                    },
+                    cause=exc,
+                ) from exc
+    return timeout_s, retry_policy
 
 
 def _load_output_schema(agent_dir: Path, ref: str) -> type[BaseModel]:
@@ -205,6 +401,7 @@ def _git_sha(directory: Path) -> str:
 class RunResult:
     output: Any
     response: ModelResponse | None
+    pool_metrics: dict[str, Any] = field(default_factory=dict)
 
 
 class _EventEmitter:
@@ -233,20 +430,29 @@ class _EventEmitter:
 
 
 def _build_messages(
-    compiled: CompiledProject, input_data: dict[str, Any]
+    compiled: CompiledProject,
+    agent_input: dict[str, Any],
+    tool_descriptions: str,
 ) -> list[FoundryMessage]:
     schema_json = json.dumps(compiled.output_model.model_json_schema(), indent=2)
     system_text = (
         compiled.agent.prompt_text.rstrip()
-        + "\n\nRespond ONLY with a single JSON object that validates against "
-        "this JSON Schema — no code fences, no commentary:\n"
+        + (
+            "\n\nYou can call the following tools when they help:\n"
+            + tool_descriptions
+            if tool_descriptions
+            else ""
+        )
+        + "\n\nWhen you give your final answer, respond ONLY with a single "
+        "JSON object that validates against this JSON Schema — no code "
+        "fences, no commentary:\n"
         + schema_json
     )
     return [
         FoundryMessage(role=MessageRole.SYSTEM, content=[TextBlock(text=system_text)]),
         FoundryMessage(
             role=MessageRole.USER,
-            content=[TextBlock(text=json.dumps(input_data))],
+            content=[TextBlock(text=json.dumps(agent_input))],
         ),
     ]
 
@@ -275,20 +481,103 @@ def _parse_output(compiled: CompiledProject, response: ModelResponse) -> BaseMod
         ) from exc
 
 
+def _tool_schemas(compiled: CompiledProject) -> list[ToolSchema]:
+    allow = set(compiled.agent.spec.tools)
+    schemas: list[ToolSchema] = []
+    for descriptor in compiled.tool_registry.list_all():
+        if descriptor.name not in allow:
+            continue
+        registered = compiled.tool_registry.get(descriptor.name)
+        assert registered is not None  # descriptor came from the registry
+        schemas.append(
+            ToolSchema(
+                name=descriptor.name,
+                description=descriptor.description,
+                input_schema=registered.input_schema.model_json_schema(),
+            )
+        )
+    return schemas
+
+
+def _tool_descriptions(schemas: list[ToolSchema]) -> str:
+    return "\n".join(f"- {s.name}: {s.description}" for s in schemas)
+
+
+async def _dispatch_one(
+    compiled: CompiledProject,
+    pool: InProcessConnectionPool,
+    session: Session,
+    emitter: _EventEmitter,
+    block: ToolUseBlock,
+) -> ToolResultBlock:
+    """One tool call → one tool_result block. Tool-layer errors become
+    structured is_error results the LLM can recover from (docs/20 § Error
+    semantics); non-tool errors (cost budget, cancellation) propagate."""
+    registered = compiled.tool_registry.get(block.name)
+    accessor = SlotConnectionAccessor(
+        pool,
+        compiled.project.system.name,
+        compiled.tool_slots.get(block.name, {}),
+        ConnectionContext(http_transport=compiled.transport),
+        agent_name=compiled.agent_name,
+        emit=emitter.emit,
+    )
+    ctx = RunContext(
+        run_id=str(session.run_id),
+        agent_name=compiled.agent_name,
+        session=session,
+        tool_ref=(
+            f"{registered.descriptor.ref}@{registered.descriptor.version}"
+            if registered is not None
+            else block.name
+        ),
+        timeout_s=registered.timeout_s if registered is not None else None,
+        retry_policy=(
+            registered.retry_policy if registered is not None else RetryPolicy()
+        ),
+        connections=accessor,
+    )
+    try:
+        output = await compiled.tool_registry.dispatch(
+            block.name,
+            compiled.agent.spec.tools,
+            block.input,
+            ctx,
+            emit=emitter.emit,
+        )
+    except (ToolError, FoundryConnectionError) as exc:
+        return ToolResultBlock(
+            tool_use_id=block.id,
+            is_error=True,
+            content=[TextBlock(text=f"{type(exc).__name__}: {exc}")],
+        )
+    finally:
+        await accessor.release_all()
+    return ToolResultBlock(
+        tool_use_id=block.id,
+        content=[TextBlock(text=output.model_dump_json())],
+    )
+
+
 async def run_project(
     compiled: CompiledProject,
     input_data: dict[str, Any],
     session: Session,
     event_sink: EventSink | None = None,
+    *,
+    pool: InProcessConnectionPool | None = None,
 ) -> RunResult:
     """Run the compiled single-agent system through a LangGraph StateGraph.
 
-    Emits RunStarted → AgentStarted → LLMCallStarted/Completed →
-    AgentCompleted → RunCompleted (or RunFailed on error, then re-raises).
+    The agent node runs the LLM ⇄ tool loop: tool_use blocks dispatch through
+    the ToolRegistry (with pooled connections), results feed back as
+    tool_result blocks, until a terminal response or iteration_limit.
     """
     emitter = _EventEmitter(session, event_sink)
     started = datetime.now(UTC)
     last_response: ModelResponse | None = None
+    pool = pool or InProcessConnectionPool()
+    view: AgentStateView = compiled.compiled_state.agent_views[compiled.agent_name]
 
     async def agent_node(state: GraphState) -> dict[str, Any]:
         nonlocal last_response
@@ -298,28 +587,65 @@ async def run_project(
             agent_name=compiled.agent_name,
             agent_version=spec.prompt.version,
         )
-        messages = _build_messages(compiled, state.get("input", {}))
-        emitter.emit(
-            LLMCallStarted,
-            agent_name=compiled.agent_name,
-            provider=compiled.provider.name,
-            model=compiled.provider.model,
+        # Structural visibility: the agent sees ONLY its `read` fields —
+        # everything else is absent from its projection, not None-ed.
+        agent_input = view.project_input(state.get("input", {}))
+        schemas = _tool_schemas(compiled)
+        messages = _build_messages(
+            compiled, agent_input, _tool_descriptions(schemas)
         )
-        response = await compiled.provider.generate(
-            messages,
-            [],
-            spec.model_binding.settings,
-            session,
-        )
-        last_response = response
-        emitter.emit(
-            LLMCallCompleted,
-            agent_name=compiled.agent_name,
-            usage=response.usage,
-            cost_estimate_usd=response.cost_estimate_usd,
-            latency_ms=response.latency_ms,
-            stop_reason=response.stop_reason,
-        )
+
+        response: ModelResponse | None = None
+        for _round in range(spec.iteration_limit):
+            emitter.emit(
+                LLMCallStarted,
+                agent_name=compiled.agent_name,
+                provider=compiled.provider.name,
+                model=compiled.provider.model,
+            )
+            response = await compiled.provider.generate(
+                messages,
+                schemas,
+                spec.model_binding.settings,
+                session,
+            )
+            last_response = response
+            emitter.emit(
+                LLMCallCompleted,
+                agent_name=compiled.agent_name,
+                usage=response.usage,
+                cost_estimate_usd=response.cost_estimate_usd,
+                latency_ms=response.latency_ms,
+                stop_reason=response.stop_reason,
+            )
+            tool_uses = [
+                b for b in response.message.content if isinstance(b, ToolUseBlock)
+            ]
+            if not tool_uses:
+                break
+            # Parallel tool calls within one round (docs/21 § Multi-tool-call).
+            results = list(
+                await asyncio.gather(
+                    *(
+                        _dispatch_one(compiled, pool, session, emitter, block)
+                        for block in tool_uses
+                    )
+                )
+            )
+            messages.append(response.message)
+            messages.append(
+                FoundryMessage(role=MessageRole.USER, content=list(results))
+            )
+        else:
+            raise IterationLimitError(
+                f"agent {compiled.agent_name!r} exceeded its iteration_limit "
+                f"of {spec.iteration_limit} LLM rounds without a terminal "
+                "response",
+                context={"agent": compiled.agent_name,
+                         "iteration_limit": spec.iteration_limit},
+            )
+
+        assert response is not None  # loop body ran at least once
         output = _parse_output(compiled, response)
         emitter.emit(
             AgentCompleted,
@@ -348,6 +674,7 @@ async def run_project(
         final_state = await app.ainvoke({"input": input_data})
     except FoundryError as exc:
         emitter.emit(RunFailed, error=exc.to_dict())
+        await pool.close_all()
         raise
     except Exception as exc:  # wrap: no arbitrary exceptions cross the boundary
         wrapped = OrchestrationError(
@@ -356,6 +683,7 @@ async def run_project(
             cause=exc,
         )
         emitter.emit(RunFailed, error=wrapped.to_dict())
+        await pool.close_all()
         raise wrapped from exc
 
     duration_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
@@ -371,7 +699,13 @@ async def run_project(
         ),
         duration_ms=duration_ms,
     )
-    return RunResult(output=final_state.get("output"), response=last_response)
+    metrics = pool.metrics_snapshot()
+    await pool.close_all()
+    return RunResult(
+        output=final_state.get("output"),
+        response=last_response,
+        pool_metrics=metrics,
+    )
 
 
 __all__ = [

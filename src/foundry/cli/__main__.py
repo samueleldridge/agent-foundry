@@ -58,6 +58,32 @@ def run(
     raise typer.Exit(code=execute_run(project_path, input_json))
 
 
+connections_app = typer.Typer(
+    name="connections",
+    help="Inspect and health-check a project's bound connections.",
+    no_args_is_help=True,
+)
+app.add_typer(connections_app)
+
+_HEALTH_TARGET_ARG = typer.Argument(
+    ...,
+    help=(
+        "Project dir, or <project-dir>/<connection-name> for one binding "
+        "(e.g. projects/hello/time_service)."
+    ),
+)
+
+
+@connections_app.command(
+    name="health",
+    help="Run the health.yaml eval for a project's bound connection(s).",
+)
+def connections_health(target: str = _HEALTH_TARGET_ARG) -> None:
+    from foundry.cli.connections import execute_connections_health
+
+    raise typer.Exit(code=execute_connections_health(target))
+
+
 @app.command(help="Drive the meta-agent against a project. Lands in Phase 6.")
 def forge() -> None:
     _not_yet_implemented("forge", "Phase 6")
