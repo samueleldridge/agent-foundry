@@ -1,0 +1,58 @@
+{
+  "anthropic": {
+    "claude-opus-4-7": {
+      "max_context_tokens": 200000,
+      "max_output_tokens": 32000,
+      "cache_control": true,
+      "extended_thinking": true,
+      "vision": true,
+      "tool_use": true,
+      "tool_choice": true,
+      "streaming": true,
+      "prefill": true,
+      "pdf_input": true,
+      "pricing": {
+        "input_per_1m": "15.0",
+        "output_per_1m": "75.0",
+        "cache_read_per_1m": "1.5",
+        "cache_write_per_1m": "18.75"
+      }
+    },
+    "claude-sonnet-4-5": {
+      "max_context_tokens": 200000,
+      "max_output_tokens": 64000,
+      "cache_control": true,
+      "extended_thinking": true,
+      "vision": true,
+      "tool_use": true,
+      "tool_choice": true,
+      "streaming": true,
+      "prefill": true,
+      "pdf_input": true,
+      "pricing": {
+        "input_per_1m": "3.0",
+        "output_per_1m": "15.0",
+        "cache_read_per_1m": "0.3",
+        "cache_write_per_1m": "3.75"
+      }
+    },
+    "claude-haiku-4-5": {
+      "max_context_tokens": 200000,
+      "max_output_tokens": 64000,
+      "cache_control": true,
+      "extended_thinking": true,
+      "vision": true,
+      "tool_use": true,
+      "tool_choice": true,
+      "streaming": true,
+      "prefill": true,
+      "pdf_input": false,
+      "pricing": {
+        "input_per_1m": "1.0",
+        "output_per_1m": "5.0",
+        "cache_read_per_1m": "0.1",
+        "cache_write_per_1m": "1.25"
+      }
+    }
+  }
+}
