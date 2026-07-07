@@ -22,6 +22,13 @@ export OPENAI_API_KEY="sk-..."
 
 # Recommended: use the cheapest model that satisfies the test for each provider
 # (the handoff note documents the models Phase 1 was developed against — match those if possible)
+#
+# IMPORTANT: model names must exist in the shipped manifests
+# (src/foundry/providers/manifests/*.json). Known Phase 1 models:
+#   anthropic: claude-haiku-4-5 (default), claude-sonnet-4-5, claude-opus-4-7
+#   openai:    gpt-4o-mini, gpt-4o, gpt-5, gpt-5-mini, o3-mini (reasoning)
+# An unknown model fails fast with a "known models" list; add a manifest
+# entry if your account uses a different model id.
 ```
 
 Confirm `projects/hello/` exists with `system.yaml`, `state.yaml`, and `agents/hello_agent/{agent.yaml, prompts/v1.md, output_schema.py}`:
@@ -189,7 +196,8 @@ git checkout -- projects/hello/agents/hello_agent/agent.yaml
 ```bash
 uv run python -m foundry run projects/hello --input '{"name": "world"}' 2>&1 | tee /tmp/foundry_run.log
 grep -c 'run_id' /tmp/foundry_run.log
-RUN_ID=$(grep -oE 'run_id[":= ]+[a-f0-9-]+' /tmp/foundry_run.log | head -1 | grep -oE '[a-f0-9-]+$')
+# run_ids are 26-char Crockford-base32 ULIDs (uppercase), not hex
+RUN_ID=$(grep -oE 'run_id=[A-Z0-9]{26}' /tmp/foundry_run.log | head -1 | cut -d= -f2)
 echo "Found run_id: $RUN_ID"
 ls ~/.foundry/runs/$RUN_ID/
 ```
