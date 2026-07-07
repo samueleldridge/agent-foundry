@@ -278,15 +278,17 @@ class ProviderAdapter(ABC):
 
 
 def text_of_message(provider: str, message: FoundryMessage) -> str:
-    """Concatenated text content of a message. Phase 1 adapters accept text
-    blocks only (tool blocks arrive with Phase 2a tool dispatch)."""
+    """Concatenated text content of a text-only message. Used where the wire
+    format is a plain string (e.g. Anthropic's `system`); messages carrying
+    tool blocks go through the adapter's block serialiser instead."""
     parts: list[str] = []
     for block in message.content:
         if isinstance(block, TextBlock):
             parts.append(block.text)
         else:
             raise ProviderConfigError(
-                f"Phase 1 {provider} adapter supports text blocks only",
+                f"{provider} adapter expected a text-only message here; got a "
+                f"{getattr(block, 'type', '?')!r} block",
                 context={"block_type": getattr(block, "type", "?")},
             )
     return "\n".join(parts)

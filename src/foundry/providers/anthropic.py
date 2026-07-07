@@ -11,12 +11,15 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from foundry.core import (
+    ContentBlock,
     FoundryMessage,
     MessageRole,
     ModelResponse,
     StopReason,
     TextBlock,
     TokenUsage,
+    ToolResultBlock,
+    ToolUseBlock,
 )
 from foundry.core.errors import ProviderConfigError
 from foundry.providers._base import HttpRequestSpec, ProviderAdapter, text_of_message
@@ -41,33 +44,51 @@ class AnthropicProvider(ProviderAdapter):
     name: ClassVar[str] = "anthropic"
     default_credentials_env: ClassVar[str] = "ANTHROPIC_API_KEY"
 
+    def _wire_block(self, block: ContentBlock) -> dict[str, Any]:
+        if isinstance(block, TextBlock):
+            return {"type": "text", "text": block.text}
+        if isinstance(block, ToolUseBlock):
+            return {
+                "type": "tool_use",
+                "id": block.id,
+                "name": block.name,
+                "input": block.input,
+            }
+        if isinstance(block, ToolResultBlock):
+            return {
+                "type": "tool_result",
+                "tool_use_id": block.tool_use_id,
+                "content": [self._wire_block(b) for b in block.content],
+                "is_error": block.is_error,
+            }
+        raise ProviderConfigError(
+            f"anthropic adapter cannot serialise content block type "
+            f"{getattr(block, 'type', '?')!r} yet",
+            context={"provider": self.name,
+                     "block_type": getattr(block, "type", "?")},
+        )
+
     def _build_request(
         self,
         messages: list[FoundryMessage],
         tools: list[ToolSchema],
         settings: ResolvedModelSettings,
     ) -> HttpRequestSpec:
-        if tools:
-            raise ProviderConfigError(
-                "tool dispatch lands in Phase 2a; Phase 1 providers accept no tools",
-                context={"provider": self.name},
-            )
         system_parts: list[str] = []
         chat_messages: list[dict[str, Any]] = []
         for message in messages:
-            text = text_of_message(self.name, message)
             if message.role is MessageRole.SYSTEM:
-                system_parts.append(text)
+                system_parts.append(text_of_message(self.name, message))
             elif message.role in (MessageRole.USER, MessageRole.ASSISTANT):
                 chat_messages.append(
                     {
                         "role": message.role.value,
-                        "content": [{"type": "text", "text": text}],
+                        "content": [self._wire_block(b) for b in message.content],
                     }
                 )
             else:
                 raise ProviderConfigError(
-                    f"unsupported role for Phase 1 anthropic adapter: {message.role}",
+                    f"unsupported role for anthropic adapter: {message.role}",
                     context={"provider": self.name, "role": message.role.value},
                 )
 
@@ -79,6 +100,15 @@ class AnthropicProvider(ProviderAdapter):
         }
         if system_parts:
             body["system"] = "\n\n".join(system_parts)
+        if tools:
+            body["tools"] = [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                }
+                for t in tools
+            ]
         if settings.temperature is not None:
             body["temperature"] = settings.temperature
         if settings.top_p is not None:
@@ -103,11 +133,18 @@ class AnthropicProvider(ProviderAdapter):
     def _parse_response(
         self, payload: dict[str, Any], latency_ms: int
     ) -> ModelResponse:
-        blocks = [
-            TextBlock(text=str(b.get("text", "")))
-            for b in payload.get("content", [])
-            if b.get("type") == "text"
-        ]
+        blocks: list[ContentBlock] = []
+        for raw in payload.get("content", []):
+            if raw.get("type") == "text":
+                blocks.append(TextBlock(text=str(raw.get("text", ""))))
+            elif raw.get("type") == "tool_use":
+                blocks.append(
+                    ToolUseBlock(
+                        id=str(raw.get("id", "")),
+                        name=str(raw.get("name", "")),
+                        input=dict(raw.get("input") or {}),
+                    )
+                )
         usage_raw = payload.get("usage", {})
         usage = TokenUsage(
             input_tokens=int(usage_raw.get("input_tokens", 0)),

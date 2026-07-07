@@ -12,22 +12,26 @@ normalises into ``TokenUsage.reasoning_tokens``.
 
 from __future__ import annotations
 
+import json
 from typing import Any, ClassVar
 
 from foundry.core import (
+    ContentBlock,
     FoundryMessage,
     MessageRole,
     ModelResponse,
     StopReason,
     TextBlock,
     TokenUsage,
+    ToolResultBlock,
+    ToolUseBlock,
 )
 from foundry.core.errors import (
     ProviderConfigError,
     ProviderContentPolicyError,
     ProviderError,
 )
-from foundry.providers._base import HttpRequestSpec, ProviderAdapter, text_of_message
+from foundry.providers._base import HttpRequestSpec, ProviderAdapter
 from foundry.providers._registry import register_provider
 from foundry.providers._types import ResolvedModelSettings, ToolSchema
 
@@ -53,30 +57,95 @@ class OpenAIProvider(ProviderAdapter):
     name: ClassVar[str] = "openai"
     default_credentials_env: ClassVar[str] = "OPENAI_API_KEY"
 
+    def _wire_messages(
+        self, messages: list[FoundryMessage]
+    ) -> list[dict[str, Any]]:
+        """FoundryMessage list → Chat Completions message list.
+
+        Tool-use blocks become the assistant message's ``tool_calls`` array;
+        each tool-result block becomes its own ``role: tool`` message (the
+        OpenAI wire format is one message per result)."""
+        chat_messages: list[dict[str, Any]] = []
+        for message in messages:
+            role = _ROLE_MAP.get(message.role)
+            if role is None and message.role is not MessageRole.TOOL:
+                raise ProviderConfigError(
+                    f"unsupported role for openai adapter: {message.role}",
+                    context={"provider": self.name, "role": message.role.value},
+                )
+            text_parts: list[str] = []
+            tool_calls: list[dict[str, Any]] = []
+            tool_results: list[ToolResultBlock] = []
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    text_parts.append(block.text)
+                elif isinstance(block, ToolUseBlock):
+                    tool_calls.append(
+                        {
+                            "id": block.id,
+                            "type": "function",
+                            "function": {
+                                "name": block.name,
+                                "arguments": json.dumps(block.input),
+                            },
+                        }
+                    )
+                elif isinstance(block, ToolResultBlock):
+                    tool_results.append(block)
+                else:
+                    raise ProviderConfigError(
+                        f"openai adapter cannot serialise content block type "
+                        f"{getattr(block, 'type', '?')!r} yet",
+                        context={"provider": self.name,
+                                 "block_type": getattr(block, "type", "?")},
+                    )
+            if tool_calls:
+                entry: dict[str, Any] = {"role": "assistant",
+                                         "tool_calls": tool_calls}
+                if text_parts:
+                    entry["content"] = "\n".join(text_parts)
+                chat_messages.append(entry)
+            elif tool_results:
+                for result in tool_results:
+                    chat_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": result.tool_use_id,
+                            "content": "\n".join(
+                                b.text
+                                for b in result.content
+                                if isinstance(b, TextBlock)
+                            ),
+                        }
+                    )
+            else:
+                chat_messages.append(
+                    {"role": role or "user", "content": "\n".join(text_parts)}
+                )
+        return chat_messages
+
     def _build_request(
         self,
         messages: list[FoundryMessage],
         tools: list[ToolSchema],
         settings: ResolvedModelSettings,
     ) -> HttpRequestSpec:
+        body: dict[str, Any] = {
+            "model": self.model,
+            "messages": self._wire_messages(messages),
+        }
         if tools:
-            raise ProviderConfigError(
-                "tool dispatch lands in Phase 2a; Phase 1 providers accept no tools",
-                context={"provider": self.name},
-            )
-        chat_messages: list[dict[str, Any]] = []
-        for message in messages:
-            role = _ROLE_MAP.get(message.role)
-            if role is None:
-                raise ProviderConfigError(
-                    f"unsupported role for Phase 1 openai adapter: {message.role}",
-                    context={"provider": self.name, "role": message.role.value},
-                )
-            chat_messages.append(
-                {"role": role, "content": text_of_message(self.name, message)}
-            )
-
-        body: dict[str, Any] = {"model": self.model, "messages": chat_messages}
+            body["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    },
+                }
+                for t in tools
+            ]
         if settings.max_tokens is not None:
             # Reasoning models reject `max_tokens`; they budget completion +
             # hidden reasoning together via `max_completion_tokens`.
@@ -120,7 +189,24 @@ class OpenAIProvider(ProviderAdapter):
     ) -> ModelResponse:
         choices = payload.get("choices") or []
         first = choices[0] if choices else {}
-        content = (first.get("message") or {}).get("content") or ""
+        message_raw = first.get("message") or {}
+        content = message_raw.get("content") or ""
+        blocks: list[ContentBlock] = []
+        if content:
+            blocks.append(TextBlock(text=str(content)))
+        for call in message_raw.get("tool_calls") or []:
+            function = call.get("function") or {}
+            try:
+                arguments = json.loads(function.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                arguments = {"_raw_arguments": function.get("arguments")}
+            blocks.append(
+                ToolUseBlock(
+                    id=str(call.get("id", "")),
+                    name=str(function.get("name", "")),
+                    input=arguments if isinstance(arguments, dict) else {},
+                )
+            )
         usage_raw = payload.get("usage", {})
         completion_details = usage_raw.get("completion_tokens_details") or {}
         prompt_details = usage_raw.get("prompt_tokens_details") or {}
@@ -142,9 +228,7 @@ class OpenAIProvider(ProviderAdapter):
             str(first.get("finish_reason")), StopReason.END_TURN
         )
         return ModelResponse(
-            message=FoundryMessage(
-                role=MessageRole.ASSISTANT, content=[TextBlock(text=str(content))]
-            ),
+            message=FoundryMessage(role=MessageRole.ASSISTANT, content=blocks),
             stop_reason=stop_reason,
             usage=usage,
             model=str(payload.get("model", self.model)),
