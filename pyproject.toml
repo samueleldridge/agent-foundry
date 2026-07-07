@@ -72,6 +72,7 @@ dev = [
     "pytest>=9.0",
     "pytest-asyncio>=1.4",
     "mypy>=2.1",
+    "types-pyyaml>=6.0.12.20260518",
 ]
 
 [build-system]
