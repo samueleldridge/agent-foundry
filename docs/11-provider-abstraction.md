@@ -11,37 +11,41 @@ These two properties are in tension. The resolution: a lowest-common-denominator
 
 ## Module layout
 
+> **Erratum (Phase 1, 2026-07-07).** The implemented design calls vendor HTTP
+> APIs **directly via httpx** — there is no `_langchain_bridge.py` and no
+> LangChain dependency inside `foundry.providers`. The langchain surface stays
+> confined to `foundry.runtime.langgraph_adapter`. Native streaming (SSE
+> assembly, `streaming.py`) is deferred to Phase 3; `stream()` is a
+> synthesised single-delta wrapper over `generate()` until then.
+> `rate_limit.py` is deferred alongside it. Sections below are amended to
+> match; the original LangChain-bridge sketch is kept out of the layout to
+> avoid drift.
+
 ```
 src/foundry/providers/
 ├── __init__.py              Provider, ProviderCapabilities, ModelBinding, ModelSettings
-├── _base.py                 abstract ProviderAdapter base class
-├── _registry.py             name → ProviderAdapter lookup
-├── _langchain_bridge.py     wraps init_chat_model; the only place langchain_* is imported
+├── _base.py                 abstract ProviderAdapter base class (httpx transport,
+│                            retries, budget check/record, error classification)
+├── _registry.py             name → ProviderAdapter lookup + resolve()
+├── _types.py                ModelBinding, ModelSettings, capabilities, ToolSchema
+├── _manifests.py            manifest loading (JSON → ProviderCapabilities)
+├── manifests/               per-vendor model manifests (limits, pricing)
 ├── anthropic.py             AnthropicProvider — cache_control, extended thinking
 ├── openai.py                OpenAIProvider — structured outputs, reasoning effort
-├── bedrock.py               BedrockProvider — Anthropic-on-Bedrock + others
-├── azure.py                 AzureOpenAIProvider — OpenAI-on-Azure
-├── vertex.py                VertexProvider — Gemini + Anthropic-on-Vertex (deferred if risky)
+├── bedrock.py               BedrockProvider — stub (registered in a later phase)
+├── azure.py                 AzureOpenAIProvider — stub (later phase)
+├── vertex.py                VertexProvider — stub (later phase)
 ├── pricing.py               per-model cost estimation
-├── errors.py                maps provider exceptions → FoundryError subclasses
-├── streaming.py             ModelDelta assembly for each provider's streaming format
-├── rate_limit.py            RateLimiter protocol + InProcessTokenBucket + RedisTokenBucket
-└── embedders/
-    ├── __init__.py          EmbedderAdapter, EmbedderBinding, registry lookup
-    ├── _base.py             abstract EmbedderAdapter base class
-    ├── voyage.py            VoyageEmbedder — voyage-3, voyage-large (asymmetric q/d)
-    ├── openai.py            OpenAIEmbedder — text-embedding-3-small / -large
-    ├── cohere.py            CohereEmbedder — embed-v3 (asymmetric q/d, multilingual)
-    ├── bedrock.py           BedrockEmbedder — titan-embed, cohere-on-bedrock
-    └── manifests/           per-vendor embedder manifests (dims, max tokens, pricing)
+└── embedders/               (Phase 2b) EmbedderAdapter + vendor adapters
 ```
 
 ## What `providers` imports
 
 - `foundry.core` (types only).
-- `pydantic`, `anyio`, stdlib.
-- `langchain_core` and `langchain_*` (via `_langchain_bridge.py` only).
-- Provider SDKs only where necessary for error typing (e.g. `anthropic.BadRequestError`) — not for generation calls, which go via LangChain.
+- `pydantic`, `httpx`, stdlib.
+- No `langchain_*` imports — provider calls go over httpx directly (erratum
+  above). Provider SDKs are likewise not imported; error classification uses
+  HTTP status codes + provider error payloads.
 
 ## What imports `providers`
 
@@ -262,18 +266,28 @@ Manifests are part of the foundry source. Adding a new model means adding a mani
 
 ## Concrete providers
 
-Each concrete provider subclasses `ProviderAdapter` and implements:
-- `_build_chat_model()` — returns the LangChain `BaseChatModel` via `init_chat_model` (or a custom client where necessary).
-- `_to_provider_messages()` — `list[FoundryMessage]` → provider-native messages.
-- `_from_provider_response()` — provider response → `ModelResponse`.
-- `_stream_deltas()` — streaming chunk → `ModelDelta` translator.
-- `_classify_error()` — provider exception → `ProviderError` subclass.
+Each concrete provider subclasses `ProviderAdapter` and implements (amended
+per the Phase 1 erratum — direct httpx, three hooks):
+- `_build_request()` — `(messages, tools, settings)` → `HttpRequestSpec`
+  (url, headers, JSON body) in the vendor's native wire format.
+- `_parse_response()` — vendor JSON payload → `ModelResponse` (including
+  `TokenUsage` normalisation, e.g. splitting OpenAI reasoning tokens out of
+  `completion_tokens`).
+- `_classify_http_error()` — HTTP status + error payload → `ProviderError`
+  subclass. The base provides status-code defaults (401/403 → auth, 429 →
+  rate limit, 408/504 → timeout); concrete adapters extend for
+  vendor-specific cases (e.g. OpenAI `content_filter`).
+- `_stream_deltas()` — SSE chunk → `ModelDelta` translator. **Deferred to
+  Phase 3**; until then `stream()` synthesises a single delta from
+  `generate()`.
 
-The base class does the heavy lifting (spans, timing, cost, retries, logging) and calls into these hooks. Concrete providers stay small — ~150–250 lines each.
+The base class does the heavy lifting (budget pre-check/post-record, timing,
+cost, retries with backoff+jitter, cancellation, logging) and calls into
+these hooks. Concrete providers stay small — ~150–250 lines each.
 
 ### Anthropic
 
-- Uses `langchain_anthropic` under the hood.
+- Calls the Messages API directly over httpx (erratum; no `langchain_anthropic`).
 - `cache_control` → marks blocks with `{"type": "text", "text": ..., "cache_control": {"type": "ephemeral"}}`. Foundry's `TextBlock.cache_control: CacheControl | None` is the typed wrapper.
 - `extended_thinking` → adds `thinking={"type": "enabled", "budget_tokens": N}` when `settings.thinking_budget_tokens` is set.
 - `prefill` → trailing assistant message is treated as a prefill.
@@ -289,7 +303,7 @@ The base class does the heavy lifting (spans, timing, cost, retries, logging) an
 
 ### OpenAI
 
-- Uses `langchain_openai`.
+- Calls the Chat Completions API directly over httpx (erratum; no `langchain_openai`).
 - `structured_outputs` → `response_format={"type":"json_schema", "json_schema":...}` path when `settings.response_format.type == "json_schema"`.
 - `reasoning_effort` → `reasoning={"effort":"..."}` for reasoning models (o-series and newer). Capability-gated.
 - Tool use: function-calling format; translate foundry `ToolSchema` to `{"type":"function","function":{"name","description","parameters"}}`.
@@ -549,71 +563,86 @@ class RetryPolicy(BaseModel):
 
 Default policy is applied to every `generate`/`stream` call. Override via `ModelBinding.settings.retry_policy` (not yet on `ModelSettings` — proposed for Phase 1).
 
-Retry happens inside the adapter, wraps `_build_chat_model().ainvoke(...)`, and honours `anyio.fail_after` on each attempt. Timeouts are per-attempt, not across all attempts — this is intentional (users want a single slow call to be retried, not count against a global budget).
+Retry happens inside the adapter's `generate()` loop around each HTTP
+attempt. Timeouts are per-attempt, not across all attempts — this is
+intentional (users want a single slow call to be retried, not count against
+a global budget).
 
 ## `ProviderAdapter` base
 
+(As implemented in Phase 1 — direct httpx; see the erratum under § Module
+layout.)
+
 ```python
+@dataclass(frozen=True)
+class HttpRequestSpec:
+    """What a concrete adapter's _build_request returns."""
+    url: str
+    headers: dict[str, str]
+    body: dict[str, Any]
+
+
 class ProviderAdapter(ABC):
     name: ClassVar[str]
-    capabilities: ProviderCapabilities
+    default_credentials_env: ClassVar[str]
 
     def __init__(
         self,
         model: str,
-        settings: ModelSettings,
+        settings: ResolvedModelSettings,
         credentials: ResolvedCredentials,
         manifest: ProviderCapabilities,
-    ) -> None:
-        self.model = model
-        self.capabilities = manifest
-        self._settings = settings
-        self._credentials = credentials
-        self._chat_model = self._build_chat_model()
+        *,
+        retry_policy: RetryPolicy | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None: ...
+    # `transport` lets tests substitute httpx.MockTransport — the entire
+    # adapter stack runs unmodified against a fake HTTP layer.
 
     @abstractmethod
-    def _build_chat_model(self) -> BaseChatModel: ...
+    def _build_request(
+        self,
+        messages: list[FoundryMessage],
+        tools: list[ToolSchema],
+        settings: ResolvedModelSettings,
+    ) -> HttpRequestSpec: ...
 
     @abstractmethod
-    def _to_provider_messages(
-        self, messages: list[FoundryMessage]
-    ) -> list[BaseMessage]: ...
-
-    @abstractmethod
-    def _from_provider_response(
-        self, response: AIMessage, usage_dict: dict, latency_ms: int
+    def _parse_response(
+        self, payload: dict[str, Any], latency_ms: int
     ) -> ModelResponse: ...
 
-    @abstractmethod
-    async def _stream_deltas(
-        self, stream: AsyncIterator[BaseMessageChunk]
-    ) -> AsyncIterator[ModelDelta]: ...
-
-    @abstractmethod
-    def _classify_error(self, exc: Exception) -> ProviderError | None:
-        """Return classified error, or None to bubble unchanged."""
+    def _classify_http_error(
+        self, status: int, payload: dict[str, Any]
+    ) -> ProviderError:
+        """Status-code defaults; concrete adapters extend."""
 
     async def generate(
         self,
         messages: list[FoundryMessage],
         tools: list[ToolSchema],
-        settings: ResolvedModelSettings,
+        settings: ResolvedModelSettings | None = None,
+        session: Session | None = None,
     ) -> ModelResponse:
-        """Default impl: accumulate from stream."""
-        ...
+        """Budget pre-check → retry loop over one HTTP attempt →
+        budget record. `session` carries the CostBudget + CancelToken;
+        it is an addition to the original sketch (documented Phase 1
+        deviation)."""
 
     async def stream(
         self,
         messages: list[FoundryMessage],
         tools: list[ToolSchema],
-        settings: ResolvedModelSettings,
+        settings: ResolvedModelSettings | None = None,
+        session: Session | None = None,
     ) -> AsyncIterator[ModelDelta]:
-        """Implements retries + timeouts + error translation around
-        _stream_deltas."""
-        ...
+        """Phase 1–2: synthesised single-delta wrapper over generate().
+        Native SSE assembly lands in Phase 3."""
 ```
 
-The `_build_chat_model` hook is the ONLY place that references `langchain_*` types. Everything else works with foundry-native types or provider-native types within the adapter.
+No `langchain_*` types appear anywhere in `foundry.providers`. Everything
+works with foundry-native types plus the vendor's raw JSON wire format
+inside the adapter.
 
 ## Registry and factory
 
@@ -656,7 +685,11 @@ Registration happens at import time in each concrete provider module; `providers
 
 The orchestration layer calls `resolve(binding, secrets) → ProviderAdapter` once per agent at compile time. The resulting adapter is held by the compiled agent node. When the node runs, it calls `adapter.generate(...)` or `adapter.stream(...)`.
 
-LangGraph's `init_chat_model` is used internally by `_build_chat_model` for most adapters because it handles a lot of provider plumbing we don't want to rewrite (auth, retries, streaming adapters). The key discipline: LangGraph's model object stays *inside* the adapter. Foundry-native types come in, foundry-native types go out.
+(Amended per the Phase 1 erratum.) The adapters do NOT use LangChain's
+`init_chat_model` — provider calls go over httpx directly, and the adapter
+owns auth headers, retries, and (from Phase 3) streaming assembly itself.
+The key discipline stands: provider wire formats stay *inside* the adapter.
+Foundry-native types come in, foundry-native types go out.
 
 ## Invariants
 
@@ -705,8 +738,12 @@ LangGraph's `init_chat_model` is used internally by `_build_chat_model` for most
 
 ## Implementation notes (non-normative)
 
-- **`init_chat_model` bridge.** Wrap once in `_langchain_bridge.py`. Do not scatter `init_chat_model` calls through per-provider modules.
-- **Keep `_classify_error` simple.** Prefer exception-type identity checks (`isinstance(exc, anthropic.RateLimitError)`) over string matching. HTTP status codes and error codes are a fallback.
+- **No LangChain bridge.** (Erratum: `_langchain_bridge.py` was never created;
+  adapters call vendor HTTP APIs directly via httpx. Revisit only if Phase 3
+  streaming makes the trade worthwhile.)
+- **Keep `_classify_http_error` simple.** Status-code identity first;
+  provider error-payload codes (e.g. `content_filter`) as the refinement.
+  Avoid string matching on messages.
 - **Pricing manifests are user-extensible.** Ship sensible defaults; document the override file at `~/.foundry/model_overrides.json`. Meta-agent does not modify pricing files.
 - **Reasoning models' output handling.** OpenAI o-series models return `reasoning_tokens` in usage; Anthropic extended thinking returns thinking blocks in content. Adapters normalise both into `TokenUsage` fields (adding `reasoning_tokens` if needed — see open question 2).
 - **Timeout hygiene.** `anyio.fail_after` around each attempt, NOT around the retry loop. Each attempt gets its own budget.

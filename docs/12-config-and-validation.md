@@ -23,8 +23,15 @@ src/foundry/config/
 ## What `config` imports
 
 - `foundry.core` (for types).
+- `foundry.providers` — for `ModelBinding` ONLY, which docs/11 places in
+  `foundry.providers` and which appears inside `AgentSpec.model_binding`.
+  This is legal per the docs/01 dependency diagram (`config/` sits above
+  `providers/`) and creates no cycle: providers imports only core.
+  *(Erratum 2026-07-07: this line previously claimed config imports core
+  only; the implemented and intended design is as stated here.)*
 - `pydantic`, `pyyaml`, `anyio`, stdlib.
-- No other foundry module. Providers, orchestration, eval etc. consume config — not the other way around.
+- No other foundry module. Orchestration, eval etc. consume config — not the
+  other way around.
 
 ## File → schema map
 
