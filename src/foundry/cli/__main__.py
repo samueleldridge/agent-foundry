@@ -11,6 +11,7 @@ for the lighter decorator surface; documented in pyproject.toml).
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from typing import NoReturn
 
 import typer
@@ -20,8 +21,8 @@ app = typer.Typer(
     help=(
         "agent-foundry — build, evaluate, version, and orchestrate "
         "multi-agent LLM systems from declarative configs.\n\n"
-        "Phase 0 ships only `--help`. Subcommands land in later phases; "
-        "see docs/03-development-phases.md."
+        "`foundry run` is live (Phase 1). Remaining subcommands land in "
+        "later phases; see docs/03-development-phases.md."
     ),
     no_args_is_help=True,
     add_completion=False,
@@ -37,9 +38,24 @@ def _not_yet_implemented(command: str, phase: str) -> NoReturn:
     raise typer.Exit(code=2)
 
 
-@app.command(help="Run a configured system end-to-end. Lands in Phase 1.")
-def run() -> None:
-    _not_yet_implemented("run", "Phase 1")
+_PROJECT_PATH_ARG = typer.Argument(
+    ..., help="Path to the project directory (containing system.yaml)."
+)
+_INPUT_OPTION = typer.Option(
+    "{}",
+    "--input",
+    help='JSON object of run inputs, e.g. \'{"name": "world"}\'.',
+)
+
+
+@app.command(help="Run a configured system end-to-end.")
+def run(
+    project_path: Path = _PROJECT_PATH_ARG,
+    input_json: str = _INPUT_OPTION,
+) -> None:
+    from foundry.cli.run import execute_run
+
+    raise typer.Exit(code=execute_run(project_path, input_json))
 
 
 @app.command(help="Drive the meta-agent against a project. Lands in Phase 6.")
