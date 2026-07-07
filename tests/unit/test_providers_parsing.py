@@ -77,9 +77,14 @@ def test_anthropic_stop_reason_mapping() -> None:
 
 
 def _openai_payload(
-    reasoning_tokens: int | None, finish_reason: str = "stop"
+    reasoning_tokens: int | None,
+    finish_reason: str = "stop",
+    completion_tokens: int = 8,
 ) -> dict[str, object]:
-    usage: dict[str, object] = {"prompt_tokens": 15, "completion_tokens": 8}
+    usage: dict[str, object] = {
+        "prompt_tokens": 15,
+        "completion_tokens": completion_tokens,
+    }
     if reasoning_tokens is not None:
         usage["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
     return {
@@ -98,10 +103,31 @@ def _openai_payload(
 @pytest.mark.unit
 def test_openai_reasoning_tokens_populated_for_reasoning_model() -> None:
     adapter = _adapter("openai", "o3-mini")
-    response = adapter._parse_response(_openai_payload(reasoning_tokens=128), 10)
+    # completion_tokens INCLUDES reasoning per the OpenAI API; the adapter
+    # must split them so downstream cost math doesn't double-bill.
+    response = adapter._parse_response(
+        _openai_payload(reasoning_tokens=128, completion_tokens=150), 10
+    )
     assert response.usage.reasoning_tokens == 128
     assert response.usage.input_tokens == 15
-    assert response.usage.output_tokens == 8
+    assert response.usage.output_tokens == 22  # 150 - 128, not 150
+
+
+@pytest.mark.unit
+def test_openai_reasoning_tokens_not_double_billed() -> None:
+    """Regression (Phase 1 review): actual-cost estimate for an o-series call
+    must bill completion_tokens once at the output rate."""
+    adapter = _adapter("openai", "o3-mini")
+    caps = load_capabilities("openai", "o3-mini")
+    response = adapter._parse_response(
+        _openai_payload(reasoning_tokens=900, completion_tokens=1000), 10
+    )
+    billed = estimate_cost(caps, response.usage)
+    expected = (
+        Decimal(15) * caps.pricing.input_per_1m
+        + Decimal(1000) * caps.pricing.output_per_1m
+    ) / Decimal(1_000_000)
+    assert billed == expected
 
 
 @pytest.mark.unit

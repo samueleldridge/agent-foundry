@@ -124,12 +124,19 @@ class OpenAIProvider(ProviderAdapter):
         usage_raw = payload.get("usage", {})
         completion_details = usage_raw.get("completion_tokens_details") or {}
         prompt_details = usage_raw.get("prompt_tokens_details") or {}
+        # OpenAI's `completion_tokens` INCLUDES hidden reasoning tokens.
+        # TokenUsage keeps them distinct (docs/10 § TokenUsage), so subtract:
+        # output_tokens = visible completion, reasoning_tokens = hidden.
+        # pricing.estimate_cost bills output + reasoning at the output rate,
+        # which then equals completion_tokens exactly (no double-billing).
+        completion_tokens = int(usage_raw.get("completion_tokens", 0))
+        reasoning_tokens = int(completion_details.get("reasoning_tokens") or 0)
         usage = TokenUsage(
             input_tokens=int(usage_raw.get("prompt_tokens", 0)),
-            output_tokens=int(usage_raw.get("completion_tokens", 0)),
+            output_tokens=max(0, completion_tokens - reasoning_tokens),
             cached_read_tokens=int(prompt_details.get("cached_tokens") or 0),
             cached_write_tokens=0,
-            reasoning_tokens=int(completion_details.get("reasoning_tokens") or 0),
+            reasoning_tokens=reasoning_tokens,
         )
         stop_reason = _FINISH_REASON_MAP.get(
             str(first.get("finish_reason")), StopReason.END_TURN
