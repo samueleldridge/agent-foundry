@@ -10,6 +10,7 @@ from foundry.config.loader import (
     LoadedAgent,
     LoadedProject,
     load_agent_spec,
+    load_config_model,
     load_connection_spec,
     load_eval_spec,
     load_function_node_spec,
@@ -17,6 +18,13 @@ from foundry.config.loader import (
     load_state_spec,
     load_system_spec,
     load_tool_spec,
+)
+from foundry.config.refs import (
+    ArtifactKind,
+    ArtifactRef,
+    FoundryRoots,
+    list_versions,
+    ref_matches_accept,
 )
 from foundry.config.schemas import (
     AgentSpec,
@@ -57,6 +65,8 @@ from foundry.config.secrets import (
 
 __all__ = [
     "AgentSpec",
+    "ArtifactKind",
+    "ArtifactRef",
     "ConnectionBinding",
     "ConnectionSlot",
     "ConnectionSpec",
@@ -65,6 +75,7 @@ __all__ = [
     "EvalSpec",
     "FieldSpec",
     "FlowSpec",
+    "FoundryRoots",
     "FunctionNodeSpec",
     "GraphEdge",
     "GraphFlow",
@@ -89,7 +100,9 @@ __all__ = [
     "TerminationRule",
     "ToolBinding",
     "ToolSpec",
+    "list_versions",
     "load_agent_spec",
+    "load_config_model",
     "load_connection_spec",
     "load_eval_spec",
     "load_function_node_spec",
@@ -97,5 +110,6 @@ __all__ = [
     "load_state_spec",
     "load_system_spec",
     "load_tool_spec",
+    "ref_matches_accept",
     "scan_for_secret_literals",
 ]

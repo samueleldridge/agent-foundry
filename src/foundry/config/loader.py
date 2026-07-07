@@ -246,6 +246,13 @@ def _load[ModelT: BaseModel](model_cls: type[ModelT], path: Path) -> ModelT:
         raise _format_error(model_cls, exc, path, positions) from exc
 
 
+def load_config_model[ModelT: BaseModel](model_cls: type[ModelT], path: Path) -> ModelT:
+    """Public generic entry point for consumers with their own schemas
+    (e.g. foundry.catalog's CatalogIndex). Same pipeline + error reporting
+    as the typed load_* helpers."""
+    return _load(model_cls, path)
+
+
 def load_system_spec(path: Path) -> SystemSpec:
     return _load(SystemSpec, path)
 
@@ -331,6 +338,7 @@ __all__ = [
     "LoadedAgent",
     "LoadedProject",
     "load_agent_spec",
+    "load_config_model",
     "load_connection_spec",
     "load_eval_spec",
     "load_function_node_spec",
