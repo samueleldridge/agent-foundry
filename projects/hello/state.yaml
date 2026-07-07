@@ -1,0 +1,12 @@
+# State schema for the hello system.
+schema:
+  name:
+    type: str
+    description: Who to greet (from run input).
+  greeting:
+    type: str
+    description: The generated greeting (agent output).
+visibility:
+  hello_agent:
+    read: [name]
+    write: [greeting]

@@ -1,0 +1,12 @@
+# hello — the trivial Phase 1 example system.
+# One agent, one provider call, typed Greeting output.
+name: hello
+description: Trivial single-agent system that greets the caller by name.
+agents: [hello_agent]
+state: state.yaml
+flow:
+  type: single
+  agent: hello_agent
+guardrails:
+  max_iterations: 5
+  # max_cost_usd: "0.01"   # uncomment to exercise CostBudget enforcement

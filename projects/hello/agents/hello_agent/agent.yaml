@@ -1,0 +1,16 @@
+name: hello_agent
+description: Greets the caller by name, warmly and briefly.
+model_binding:
+  provider: anthropic
+  model: claude-haiku-4-5
+  settings:
+    max_tokens: 256
+    temperature: 0.7
+prompt:
+  version: v1
+  path: prompts/v1.md
+output:
+  schema: output_schema.py::Greeting
+state_visibility:
+  read: [name]
+  write: [greeting]
