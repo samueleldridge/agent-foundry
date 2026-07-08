@@ -113,7 +113,7 @@ async def test_hybrid_runs_branches_in_parallel_and_merges() -> None:
     out = await hybrid.retrieve("q", top_k=2)
     elapsed = asyncio.get_event_loop().time() - started
     # Parallel fan-out: ~one 0.05s delay, not two sequential ones. The bound
-    # is deliberately generous (10× one delay) so a loaded machine can't
+    # is deliberately generous (10x one delay) so a loaded machine can't
     # flake it while still catching sequential execution regressions by a
     # wide margin relative to the asserted behaviour.
     assert elapsed < 0.5
