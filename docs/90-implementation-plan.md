@@ -31,7 +31,7 @@ Each phase has three prompts:
 These apply across every implementation session:
 
 - **Conventional commits with no Claude co-author line** (per memory; `feat:` / `fix:` / `chore:` / `docs:` / `refactor:` / `test:` / `ci:` / `build:` / `perf:` / `style:`).
-- **No institution-name leakage in repo content** (no Citadel / specific firm names; generic placeholders).
+- **No institution-name leakage in repo content** (no specific firm names; generic placeholders like `example_corp` / `firm_x`).
 - **Persona is "AI engineer", not "Lead AI engineer"** in any repo docs.
 - **Branch model**: implementation work happens on `main` for the framework code (consistent with the existing repo pattern); per-project work happens on `foundry/<project>` branches once projects exist.
 - **Test discipline**: every phase ends with passing CI gates per `03-development-phases.md`'s exit criteria.

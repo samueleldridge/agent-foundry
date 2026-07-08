@@ -259,7 +259,8 @@ git checkout -- src/foundry/providers/__init__.py
 ```bash
 git log --format="%h %s" main..HEAD  # or against the Phase 0 commit
 git log --format="%b" main..HEAD | grep -i "co-authored-by" || echo "Clean — no co-author lines"
-git log --format="%H%n%s%n%b%n---" $(git log --format="%H" -1 main..HEAD | tail -1)^..HEAD | grep -iE "citadel|client_x|firm_name_redacted" || echo "Clean — no leakage"
+git log --format="%H%n%s%n%b%n---" $(git log --format="%H" -1 main..HEAD | tail -1)^..HEAD | grep -iE -f personal_docs/leakage_patterns.txt || echo "Clean — no leakage"
+# (leakage_patterns.txt lives under personal_docs/, which is gitignored — keep firm-name patterns out of the repo itself)
 ```
 
 **Expected**:
