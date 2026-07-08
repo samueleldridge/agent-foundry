@@ -122,6 +122,7 @@ def execute_run(
             "output": result.output,
             "pins": compiled.pins,
             "connection_pool": result.pool_metrics,
+            "llm_call_count": result.llm_call_count,
             **_budget_extra(),
         },
     )

@@ -28,6 +28,15 @@ import httpx
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ValidationError
 
+from foundry.cache import (
+    InProcessResultCache,
+    PreparedSemanticCache,
+    default_result_cache_path,
+    ensure_version_marker,
+    prepare_semantic_cache,
+    semantic_lookup,
+    semantic_store,
+)
 from foundry.catalog.loader import load_tool_version
 from foundry.config import (
     ArtifactRef,
@@ -49,6 +58,7 @@ from foundry.connections import (
 from foundry.core import (
     AgentCompleted,
     AgentStarted,
+    CacheBundle,
     ConnectionContext,
     FoundryMessage,
     LLMCallCompleted,
@@ -56,6 +66,7 @@ from foundry.core import (
     MessageRole,
     ModelResponse,
     RegisteredTool,
+    ResultCache,
     RetryPolicy,
     RunCompleted,
     RunFailed,
@@ -86,6 +97,12 @@ from foundry.orchestration.state_scope import (
     compile_state,
 )
 from foundry.providers import ProviderAdapter, ToolSchema, resolve
+from foundry.retrieval import (
+    MappingRetrieverAccessor,
+    PreparedRetriever,
+    build_retriever_accessor,
+    prepare_retrievers,
+)
 from foundry.runtime._langgraph_types import GraphState
 
 EventSink = Callable[[BaseModel], None]
@@ -113,6 +130,12 @@ class CompiledProject:
     tool_slots: dict[str, dict[str, PreparedConnection]] = field(default_factory=dict)
     prepared_connections: dict[str, PreparedConnection] = field(default_factory=dict)
     transport: httpx.AsyncBaseTransport | None = None
+    secrets: SecretsProvider = field(default_factory=EnvSecretsProvider)
+    retrievers: dict[str, PreparedRetriever] = field(default_factory=dict)
+    """Prepared retriever bindings for the single agent (Phase 2b)."""
+    semantic_cache: PreparedSemanticCache | None = None
+    uses_tool_cache: bool = False
+    """True when any registered tool opted into result caching."""
 
     @property
     def pins(self) -> dict[str, Any]:
@@ -181,6 +204,7 @@ def compile_project(
 
     registry = ToolRegistry()
     tool_slots: dict[str, dict[str, PreparedConnection]] = {}
+    uses_tool_cache = False
     for name, binding in project.system.tools.items():
         ref = ArtifactRef.parse(binding.ref, "tool", version=binding.version)
         loaded = load_tool_version(ref, roots)
@@ -209,9 +233,13 @@ def compile_project(
                 auth_error_retry=any(
                     p.refresh.mode == "on_auth_error" for p in wired.values()
                 ),
+                cacheable=loaded.spec.cacheable,
+                cache_ttl_s=loaded.spec.cache_ttl_s,
+                cache_scope=loaded.spec.cache_scope,
             )
         )
         tool_slots[name] = wired
+        uses_tool_cache = uses_tool_cache or loaded.spec.cacheable
 
     # Agent allowlists reference logical names from SystemSpec.tools.
     for loaded_agent in project.agents.values():
@@ -230,6 +258,23 @@ def compile_project(
                     "known_tools": sorted(project.system.tools),
                 },
             )
+
+    # Phase 2b compile-time wiring: retriever bindings (slot wiring, config
+    # validation, embedder dimension check) + semantic cache preparation.
+    # Every failure below is a load-time error — nothing has been called yet.
+    prepared_retrievers = prepare_retrievers(
+        agent.spec.retrievers,
+        roots,
+        prepared_connections,
+        config_file=agent_yaml,
+    )
+    prepared_semantic_cache = prepare_semantic_cache(
+        agent.spec,
+        agent.prompt_text,
+        project=project.system.name,
+        secrets=secrets,
+        transport=transport,
+    )
 
     try:
         provider = resolve(
@@ -264,6 +309,10 @@ def compile_project(
         tool_slots=tool_slots,
         prepared_connections=prepared_connections,
         transport=transport,
+        secrets=secrets,
+        retrievers=prepared_retrievers,
+        semantic_cache=prepared_semantic_cache,
+        uses_tool_cache=uses_tool_cache,
     )
 
 
@@ -402,6 +451,8 @@ class RunResult:
     output: Any
     response: ModelResponse | None
     pool_metrics: dict[str, Any] = field(default_factory=dict)
+    llm_call_count: int = 0
+    """Actual provider calls made — 0 on a semantic-cache hit."""
 
 
 class _EventEmitter:
@@ -509,6 +560,7 @@ async def _dispatch_one(
     session: Session,
     emitter: _EventEmitter,
     block: ToolUseBlock,
+    retrievers: MappingRetrieverAccessor | None = None,
 ) -> ToolResultBlock:
     """One tool call → one tool_result block. Tool-layer errors become
     structured is_error results the LLM can recover from (docs/20 § Error
@@ -536,6 +588,7 @@ async def _dispatch_one(
             registered.retry_policy if registered is not None else RetryPolicy()
         ),
         connections=accessor,
+        retrievers=retrievers,
     )
     try:
         output = await compiled.tool_registry.dispatch(
@@ -576,11 +629,33 @@ async def run_project(
     emitter = _EventEmitter(session, event_sink)
     started = datetime.now(UTC)
     last_response: ModelResponse | None = None
+    llm_call_count = 0
     pool = pool or InProcessConnectionPool()
     view: AgentStateView = compiled.compiled_state.agent_views[compiled.agent_name]
+    retriever_accessor: MappingRetrieverAccessor | None = None
+    retriever_conn_accessors: list[SlotConnectionAccessor] = []
+
+    # Session-scoped cache bundle (docs/10 § CacheAccessor on Session): the
+    # dispatcher reads tool_result; the semantic side is driven below.
+    result_cache: ResultCache | None = None
+    if compiled.uses_tool_cache:
+        result_cache = InProcessResultCache(default_result_cache_path())
+    if result_cache is not None or compiled.semantic_cache is not None:
+        session = session.model_copy(
+            update={
+                "cache": CacheBundle(
+                    semantic=(
+                        compiled.semantic_cache.backend
+                        if compiled.semantic_cache is not None
+                        else None
+                    ),
+                    tool_result=result_cache,
+                )
+            }
+        )
 
     async def agent_node(state: GraphState) -> dict[str, Any]:
-        nonlocal last_response
+        nonlocal last_response, llm_call_count
         spec = compiled.agent.spec
         emitter.emit(
             AgentStarted,
@@ -595,57 +670,92 @@ async def run_project(
             compiled, agent_input, _tool_descriptions(schemas)
         )
 
+        # Semantic cache (docs/24 § Layer 2): keyed by the agent's INITIAL
+        # input; a hit short-circuits the whole LLM ⇄ tool loop and replays
+        # the cached terminal response. Every failure inside fails open.
+        semantic = compiled.semantic_cache
+        cache_key = None
         response: ModelResponse | None = None
-        for _round in range(spec.iteration_limit):
-            emitter.emit(
-                LLMCallStarted,
+        if semantic is not None:
+            await ensure_version_marker(
+                semantic, compiled.agent_name, emitter.emit
+            )
+            response, cache_key = await semantic_lookup(
+                semantic,
                 agent_name=compiled.agent_name,
-                provider=compiled.provider.name,
-                model=compiled.provider.model,
-            )
-            response = await compiled.provider.generate(
-                messages,
-                schemas,
-                spec.model_binding.settings,
-                session,
-            )
-            last_response = response
-            emitter.emit(
-                LLMCallCompleted,
-                agent_name=compiled.agent_name,
-                usage=response.usage,
-                cost_estimate_usd=response.cost_estimate_usd,
-                latency_ms=response.latency_ms,
-                stop_reason=response.stop_reason,
-            )
-            tool_uses = [
-                b for b in response.message.content if isinstance(b, ToolUseBlock)
-            ]
-            if not tool_uses:
-                break
-            # Parallel tool calls within one round (docs/21 § Multi-tool-call).
-            results = list(
-                await asyncio.gather(
-                    *(
-                        _dispatch_one(compiled, pool, session, emitter, block)
-                        for block in tool_uses
-                    )
-                )
-            )
-            messages.append(response.message)
-            messages.append(
-                FoundryMessage(role=MessageRole.USER, content=list(results))
-            )
-        else:
-            raise IterationLimitError(
-                f"agent {compiled.agent_name!r} exceeded its iteration_limit "
-                f"of {spec.iteration_limit} LLM rounds without a terminal "
-                "response",
-                context={"agent": compiled.agent_name,
-                         "iteration_limit": spec.iteration_limit},
+                model_binding=spec.model_binding,
+                tools=schemas,
+                messages=messages,
+                emit=emitter.emit,
             )
 
-        assert response is not None  # loop body ran at least once
+        cache_hit = response is not None
+        if not cache_hit:
+            for _round in range(spec.iteration_limit):
+                emitter.emit(
+                    LLMCallStarted,
+                    agent_name=compiled.agent_name,
+                    provider=compiled.provider.name,
+                    model=compiled.provider.model,
+                )
+                response = await compiled.provider.generate(
+                    messages,
+                    schemas,
+                    spec.model_binding.settings,
+                    session,
+                )
+                llm_call_count += 1
+                last_response = response
+                emitter.emit(
+                    LLMCallCompleted,
+                    agent_name=compiled.agent_name,
+                    usage=response.usage,
+                    cost_estimate_usd=response.cost_estimate_usd,
+                    latency_ms=response.latency_ms,
+                    stop_reason=response.stop_reason,
+                )
+                tool_uses = [
+                    b for b in response.message.content
+                    if isinstance(b, ToolUseBlock)
+                ]
+                if not tool_uses:
+                    break
+                # Parallel tool calls within one round (docs/21).
+                results = list(
+                    await asyncio.gather(
+                        *(
+                            _dispatch_one(
+                                compiled, pool, session, emitter, block,
+                                retriever_accessor,
+                            )
+                            for block in tool_uses
+                        )
+                    )
+                )
+                messages.append(response.message)
+                messages.append(
+                    FoundryMessage(role=MessageRole.USER, content=list(results))
+                )
+            else:
+                raise IterationLimitError(
+                    f"agent {compiled.agent_name!r} exceeded its "
+                    f"iteration_limit of {spec.iteration_limit} LLM rounds "
+                    "without a terminal response",
+                    context={"agent": compiled.agent_name,
+                             "iteration_limit": spec.iteration_limit},
+                )
+
+        # NOTE: last_response tracks ACTUAL provider calls only — on a cache
+        # hit it stays None so run totals report zero spend (the saving is on
+        # the cache.semantic.hit event instead).
+        assert response is not None  # cache hit or the loop ran at least once
+        if semantic is not None and cache_key is not None and not cache_hit:
+            # Store the TERMINAL response keyed by the initial input — a
+            # future hit replays the final answer without the tool loop.
+            await semantic_store(
+                semantic, cache_key, response,
+                agent_name=compiled.agent_name, emit=emitter.emit,
+            )
         output = _parse_output(compiled, response)
         emitter.emit(
             AgentCompleted,
@@ -671,9 +781,23 @@ async def run_project(
         inputs_hash=inputs_hash,
     )
     try:
+        if compiled.retrievers:
+            retriever_accessor, retriever_conn_accessors = (
+                await build_retriever_accessor(
+                    compiled.retrievers,
+                    pool=pool,
+                    project=compiled.project.system.name,
+                    project_dir=compiled.project.directory,
+                    agent_name=compiled.agent_name,
+                    secrets=compiled.secrets,
+                    transport=compiled.transport,
+                    emit=emitter.emit,
+                )
+            )
         final_state = await app.ainvoke({"input": input_data})
     except FoundryError as exc:
         emitter.emit(RunFailed, error=exc.to_dict())
+        await _release_retrievers(retriever_conn_accessors)
         await pool.close_all()
         raise
     except Exception as exc:  # wrap: no arbitrary exceptions cross the boundary
@@ -683,6 +807,7 @@ async def run_project(
             cause=exc,
         )
         emitter.emit(RunFailed, error=wrapped.to_dict())
+        await _release_retrievers(retriever_conn_accessors)
         await pool.close_all()
         raise wrapped from exc
 
@@ -700,12 +825,19 @@ async def run_project(
         duration_ms=duration_ms,
     )
     metrics = pool.metrics_snapshot()
+    await _release_retrievers(retriever_conn_accessors)
     await pool.close_all()
     return RunResult(
         output=final_state.get("output"),
         response=last_response,
         pool_metrics=metrics,
+        llm_call_count=llm_call_count,
     )
+
+
+async def _release_retrievers(accessors: list[SlotConnectionAccessor]) -> None:
+    for accessor in accessors:
+        await accessor.release_all()
 
 
 __all__ = [
