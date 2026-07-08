@@ -60,6 +60,7 @@ from foundry.core import (
     Session,
     ToolDescriptor,
     ToolRegistry,
+    WarningEvent,
 )
 from foundry.core.errors import (
     CompileError,
@@ -80,6 +81,7 @@ from foundry.runtime._langgraph_types import GraphState
 from foundry.runtime.compiled import (
     CompiledFunction,
     CompiledProject,
+    CompileWarning,
     FunctionHandler,
     RunResult,
 )
@@ -356,6 +358,27 @@ def compile_project(
     # Phase 2c: memory config validation — state-field existence + type
     # (MemoryConfigError), read/write scope + retriever-slot binding
     # (CompileError), consolidator prompt on disk (MemoryConfigError).
+    # An agent configuring BOTH memory and a semantic cache gets the cache
+    # BYPASSED at runtime (its key covers the step's initial input, not the
+    # evolving memory envelope — a hit could replay a response that ignores
+    # state). Make the bypass visible at compile time (Phase 2c deviation 4).
+    compile_warnings: list[CompileWarning] = []
+    if agent.spec.memory is not None and prepared_semantic_cache is not None:
+        compile_warnings.append(
+            CompileWarning(
+                agent_name=agent_name,
+                category="cache.semantic.bypassed_by_memory",
+                message=(
+                    f"agent {agent_name!r} configures BOTH memory and "
+                    "semantic_cache; the semantic cache is bypassed for "
+                    "memory-enabled agents (its key covers the step's initial "
+                    "input, not the evolving memory envelope). Remove "
+                    "`semantic_cache:` from agent.yaml or drop `memory:` to "
+                    "silence this warning."
+                ),
+            )
+        )
+
     agent_view = compiled_state.agent_views[agent_name]
     prepared_memory = prepare_memory(
         agent.spec,
@@ -408,6 +431,7 @@ def compile_project(
         functions=functions,
         flow_steps=flow_steps,
         memory=prepared_memory,
+        compile_warnings=tuple(compile_warnings),
     )
 
 
@@ -706,6 +730,14 @@ async def run_project(
         pin_set_hash=compiled.pin_set_hash,
         inputs_hash=inputs_hash,
     )
+    for compile_warning in compiled.compile_warnings:
+        emitter.emit(
+            WarningEvent,
+            agent_name=compile_warning.agent_name,
+            category=compile_warning.category,
+            message=compile_warning.message,
+            error_class=None,
+        )
     try:
         if compiled.retrievers:
             retriever_accessor, retriever_conn_accessors = (

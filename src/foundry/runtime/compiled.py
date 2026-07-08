@@ -35,6 +35,16 @@ FunctionHandler = Callable[[dict[str, Any], RunContext], Awaitable[dict[str, Any
 
 
 @dataclass(frozen=True)
+class CompileWarning:
+    """A non-fatal compile-time finding. Printed by the CLI at compile and
+    re-emitted as a WarningEvent at run start so the audit trail records it."""
+
+    agent_name: str
+    category: str
+    message: str
+
+
+@dataclass(frozen=True)
 class CompiledFunction:
     """A fully-resolved function node: spec + imported handler + content-
     hashed node_version (over function source + config, docs/21)."""
@@ -76,6 +86,8 @@ class CompiledProject:
     """Execution order for a sequential flow; () for single flows."""
     memory: PreparedMemory | None = None
     """The flow agent's validated memory config (None = memory off)."""
+    compile_warnings: tuple[CompileWarning, ...] = ()
+    """Non-fatal compile-time findings (e.g. semantic-cache bypass)."""
 
     @property
     def pins(self) -> dict[str, Any]:
@@ -104,6 +116,7 @@ class RunResult:
 
 
 __all__ = [
+    "CompileWarning",
     "CompiledFunction",
     "CompiledProject",
     "FunctionHandler",

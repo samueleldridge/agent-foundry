@@ -59,6 +59,12 @@ def execute_run(
     except FoundryError as exc:
         _print_error(exc)
         return 2
+    for compile_warning in compiled.compile_warnings:
+        print(
+            f"warning [{compile_warning.category}] "
+            f"{compile_warning.message}",
+            file=sys.stderr,
+        )
 
     guardrails = compiled.project.system.guardrails
     cost_budget = (

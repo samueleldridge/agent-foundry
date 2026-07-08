@@ -501,6 +501,48 @@ def test_graph_flow_refs_resolve_across_agents_and_functions(
     assert "/flow/edges/1/to" in str(dangling.value)
 
 
+_SEMANTIC_CACHE_YAML = """
+semantic_cache:
+  embedder_binding:
+    provider: voyage
+    model: voyage-3
+  similarity_threshold: 0.95
+  ttl_s: 3600
+  scope: agent
+  backend: in_process
+"""
+
+
+@pytest.mark.integration
+def test_memory_plus_semantic_cache_warns_about_bypass(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent configuring BOTH memory and semantic_cache gets the cache
+    bypassed at runtime (2c deviation 4); the bypass must be VISIBLE — a
+    compile warning on stderr + a WarningEvent in the audit trail."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake-voyage-key-for-tests")
+    project = _copy_project(tmp_path, "memory_cached")
+    agent_yaml = project / "agents" / "hello_agent" / "agent.yaml"
+    agent_yaml.write_text(agent_yaml.read_text() + _SEMANTIC_CACHE_YAML)
+
+    transport = MemoryTransport()
+    # MemoryTransport asserts every request hits api.anthropic.com — a
+    # consulted semantic cache would embed via voyage and fail the run, so
+    # exit 0 also proves the bypass itself.
+    assert execute_run(project, _turns(2), transport=transport.build()) == 0
+    err = capsys.readouterr().err
+    assert "cache.semantic.bypassed_by_memory" in err
+    assert "'hello_agent'" in err
+
+    warnings = _by_event(_events(_run_dirs(tmp_path)[-1]), "warning")
+    bypass = [w for w in warnings
+              if w["category"] == "cache.semantic.bypassed_by_memory"]
+    assert len(bypass) == 1
+    assert bypass[0]["agent_name"] == "hello_agent"
+
+
 # --- artifact hygiene ---------------------------------------------------------------------
 
 
