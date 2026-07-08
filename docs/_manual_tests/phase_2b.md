@@ -1,19 +1,22 @@
 # Phase 2b — Manual Smoke Tests
 
-**Phase scope**: `foundry.core.embedder` + `foundry.core.retrieval` + `foundry.core.cache` + cache/retriever config schemas + `foundry.providers.embedders` (Voyage + OpenAI + Cohere + Bedrock) + `foundry.cache` (in_process / redis / pgvector) + `foundry.retrieval` (dense / sparse / hybrid + rerankers) + catalog retriever templates + a second example project demonstrating cache + hybrid retriever end-to-end.
+**Phase scope**: `foundry.core.embedder` + `foundry.core.retrieval` + `foundry.core.cache` + cache/retriever config schemas + `foundry.providers.embedders` (Voyage + OpenAI + Cohere; Bedrock registered stub) + `foundry.cache` (in_process for real; redis/pgvector shapes) + `foundry.retrieval` (dense / sparse / hybrid + rerankers) + catalog retriever templates + `projects/rag_hello` demonstrating cache + hybrid retriever end-to-end.
 
-**Reference**: [docs/03-development-phases.md § Phase 2b](../03-development-phases.md) exit gate; [docs/_phase_handoffs/phase_2b.md](../_phase_handoffs/phase_2b.md) for implementation notes (especially which example project name was used and which embedder + vector store were seeded).
+**Reference**: [docs/03-development-phases.md § Phase 2b](../03-development-phases.md) exit gate; [docs/_phase_handoffs/phase_2b.md](../_phase_handoffs/phase_2b.md) for implementation notes and deviations (the example project is **rag_hello**; all backends are **in_process** — no Postgres/Redis needed; the embedder is **voyage-3**, the reranker **Cohere**).
 
 ## Preconditions
 
 - Phase 2a manual smoke test fully signed off.
 - Claude Code review session for Phase 2b has reported **PASS**.
 - Working tree clean.
-- API keys needed (export the ones the example project uses):
-  - `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` (LLM)
-  - `VOYAGE_API_KEY` and/or `OPENAI_API_KEY` (embedders)
-  - `COHERE_API_KEY` (reranker — skip-with-note if you don't have it)
-- A running `pgvector`-enabled Postgres if the example project uses it (or use the `in_process` backend for the cache test if not). The handoff note should specify which.
+- API keys:
+  - `ANTHROPIC_API_KEY` (LLM)
+  - `VOYAGE_API_KEY` (embedder — semantic cache + dense retriever)
+  - `COHERE_API_KEY` (reranker — skip-with-note if you don't have it; without it Test 11 still runs but the rerank stage falls through with a warning)
+  - `OPENAI_API_KEY` only for Test 1's second embedder.
+- No infra needed: caches are SQLite files under `~/.foundry/cache/`
+  (`semantic.db`, `tool_results.db`). **Delete them between test attempts
+  to reset cache state**: `rm -f ~/.foundry/cache/*.db`
 
 ## Setup
 
@@ -21,24 +24,22 @@
 cd /Users/sam/projects/agent-foundry
 export ANTHROPIC_API_KEY="sk-ant-..."
 export VOYAGE_API_KEY="..."
-# etc.
+export COHERE_API_KEY="..."
 
-# Confirm second example project exists
-ls projects/  # should now include rag_hello/ or similar
-ls catalog/retrievers/  # should include pgvector_dense + hybrid_rrf
+ls projects/            # includes rag_hello/
+ls catalog/retrievers/  # pgvector_dense, hybrid_rrf, cohere_rerank
+INPUT='{"query": "what is the capital of France?"}'
 ```
 
 ## Tests
 
 ### Test 1 — Embedder round-trip (Voyage + OpenAI)
 
-**What we're verifying**: live calls to two embedder providers produce embeddings of the correct dimensionality.
+**What we're verifying**: live calls to two embedder providers produce embeddings of the advertised dimensionality.
 
 **Run**:
 
 ```bash
-# Use a small helper script or the CLI if one was added
-# Suggested approach: short Python REPL or one-shot using foundry's embedder API
 uv run python - <<'PY'
 import asyncio
 from foundry.providers.embedders import load_embedder
@@ -50,299 +51,257 @@ async def main():
         EmbedderBinding(provider="openai", model="text-embedding-3-small"),
     ]:
         e = load_embedder(cfg)
-        out = await e.embed(["hello world"])
-        print(f"{cfg.provider}/{cfg.model}: dim={len(out[0].vector)} capabilities={e.capabilities}")
+        out = await e.embed(["hello world"], "query")
+        print(f"{cfg.provider}/{cfg.model}: dim={len(out[0].vector)} "
+              f"advertised={e.capabilities.dimensions} "
+              f"tokens={out[0].input_tokens} cost={out[0].cost_estimate_usd}")
 
 asyncio.run(main())
 PY
 ```
 
 **Expected**:
-- Both calls succeed.
-- The dim printed matches the model's advertised dimensionality (e.g., voyage-3 → 1024, text-embedding-3-small → 1536).
-- No traceback.
+- Both succeed; voyage-3 → 1024, text-embedding-3-small → 1536; `dim == advertised`.
+- (The adapter hard-fails with `EmbedderUnexpectedError` if the provider's dims ever drift from the manifest — so success here IS the dim check.)
 
-**If it fails**:
-- HTTP error → API key not set.
-- Dim mismatch → adapter not exposing the right `EmbedderCapabilities`; fix session.
+**If it fails**: HTTP 401 → key not exported. `EmbedderConfigError` → registry/manifest problem; fix session.
 
 - [ ] Pass
 
 ### Test 2 — Semantic cache hit on re-run
 
-**What we're verifying**: with `semantic_cache.backend: in_process`, running the same input twice causes the second to hit cache (no LLM call) and emit a `cache.semantic.hit` event with similarity ≥ threshold.
+**What we're verifying**: with `semantic_cache.backend: in_process`, the same input re-run hits cache (no LLM call) and emits `cache.semantic.hit` with `similarity ≥ threshold` and savings populated.
 
 **Run**:
 
 ```bash
-# Edit projects/<rag_example>/agents/<agent>/agent.yaml: ensure
-# semantic_cache is configured with backend: in_process
-INPUT='{"query": "what is the capital of France?"}'
-
-# First run (populates cache)
-uv run python -m foundry run projects/<rag_example> --input "$INPUT"
+rm -f ~/.foundry/cache/*.db
+uv run python -m foundry run projects/rag_hello --input "$INPUT"
 RUN1=$(ls -t ~/.foundry/runs/ | head -1)
-
-# Second run (should hit cache)
-uv run python -m foundry run projects/<rag_example> --input "$INPUT"
+uv run python -m foundry run projects/rag_hello --input "$INPUT"
 RUN2=$(ls -t ~/.foundry/runs/ | head -1)
 
-# Confirm
-jq 'select(.event_type | startswith("cache.semantic"))' ~/.foundry/runs/$RUN2/events.jsonl
-diff <(jq -r .llm_call_count ~/.foundry/runs/$RUN1/metadata.json) \
-     <(jq -r .llm_call_count ~/.foundry/runs/$RUN2/metadata.json)
+jq 'select(.event | startswith("cache.semantic"))' ~/.foundry/runs/$RUN2/events.jsonl
+jq '.llm_call_count' ~/.foundry/runs/$RUN1/metadata.json ~/.foundry/runs/$RUN2/metadata.json
 ```
 
 **Expected**:
-- Run 2 emits `cache.semantic.hit` with `similarity ≥ threshold` and a non-zero `saved_cost_usd`.
-- `llm_call_count` for Run 2 is lower than Run 1.
+- Run 2 emits `cache.semantic.hit` with `similarity ≥ 0.95` (identical input → ~1.0), non-zero `saved_cost_estimate_usd` and `saved_tokens_estimate`.
+- `llm_call_count`: run 1 = 2, run 2 = 0.
 
-**If it fails**:
-- No hit → similarity threshold may be too strict; tune in the agent config or fix session.
-- Hit but `saved_cost_usd` is 0 or missing → cost-attribution wiring incomplete.
+**If it fails**: no hit → embedder returned different vectors for identical text (provider-side nondeterminism; retry or tune threshold) or the cache file was wiped between runs. Hit with zero savings → cost-attribution wiring incomplete; fix session.
 
 - [ ] Pass
 
 ### Test 3 — Semantic cache invalidates on prompt-version bump
 
-**What we're verifying**: cache keys include the prompt version; bumping the version invalidates prior entries.
+**What we're verifying**: the agent-version content hash covers the prompt; bumping it emits `cache.semantic.invalidate` and misses.
 
-**Run**:
+**Run** (immediately after Test 2, same cache files):
 
 ```bash
-# Add v2 of the agent's prompt (copy v1, edit slightly)
-cp projects/<rag_example>/agents/<agent>/prompts/v1.md \
-   projects/<rag_example>/agents/<agent>/prompts/v2.md
-# (Edit v2 to differ from v1 — e.g., add a system instruction)
+AGENT=projects/rag_hello/agents/rag_agent
+cp $AGENT/prompts/v1.md $AGENT/prompts/v2.md
+echo "Always answer in exactly one sentence." >> $AGENT/prompts/v2.md
+# pin v2 in agent.yaml — ONLY the prompt block (the retriever bindings
+# also say `version: v1`; the prompt's line is the only 2-space-indented one):
+sed -i '' 's|^  version: v1$|  version: v2|; s|prompts/v1.md|prompts/v2.md|' $AGENT/agent.yaml
 
-# Update agent.yaml to pin v2
-# Run with same input as Test 2
-uv run python -m foundry run projects/<rag_example> --input "$INPUT"
+uv run python -m foundry run projects/rag_hello --input "$INPUT"
 RUN3=$(ls -t ~/.foundry/runs/ | head -1)
+jq 'select(.event | contains("cache.semantic"))' ~/.foundry/runs/$RUN3/events.jsonl
+jq '.llm_call_count' ~/.foundry/runs/$RUN3/metadata.json
 
-# Inspect
-jq 'select(.event_type | contains("cache"))' ~/.foundry/runs/$RUN3/events.jsonl
-
-# Revert
-git checkout -- projects/<rag_example>/
-rm projects/<rag_example>/agents/<agent>/prompts/v2.md
+git checkout -- projects/rag_hello/ && rm $AGENT/prompts/v2.md
 ```
 
 **Expected**:
-- Run 3 emits a `cache.semantic.invalidate` (or `miss`) event.
-- An actual LLM call happens (`llm_call_count > 0`).
+- One `cache.semantic.invalidate` with `reason: agent_version_changed` and differing previous/current versions, then `cache.semantic.miss`, then a store.
+- `llm_call_count > 0` (the LLM really ran).
 
-**If it fails**: prompt version not in cache key → SemanticCacheKey shape is wrong; fix session referencing `docs/24 § Key construction`.
+**If it fails**: prompt not reflected in the version hash → fix session referencing docs/24 § Key construction + correctness rule 1.
 
 - [ ] Pass
 
 ### Test 4 — Tool-result cache hit within TTL
 
-**What we're verifying**: a tool with `cacheable: true` + `cache_ttl_s: 60` returns cached output on a second call within the TTL.
+**What we're verifying**: `search_docs` (`cacheable: true`, `cache_ttl_s: 300`) returns cached output on a second identical call. NOTE: on a same-input re-run the SEMANTIC cache hits first (no tool call at all), so disable it for this test.
 
 **Run**:
 
 ```bash
-# Use a tool that has cacheable: true + cache_ttl_s set
-# (Either the seeded catalog tool with these fields added, or a
-# project-local tool the impl session created for this test.)
-# Trigger the agent to call the tool twice in one run (or two runs
-# within 60s).
-uv run python -m foundry run projects/<example_with_cacheable_tool> --input '...'
-jq 'select(.event_type == "cache.tool.hit")' ~/.foundry/runs/<latest>/events.jsonl
+rm -f ~/.foundry/cache/*.db
+# temporarily disable the semantic cache (keep the block, flip the switch):
+#   semantic_cache:
+#     enabled: false
+perl -pi -e 's|^semantic_cache:|semantic_cache:\n  enabled: false|' \
+  projects/rag_hello/agents/rag_agent/agent.yaml
+
+uv run python -m foundry run projects/rag_hello --input "$INPUT"
+uv run python -m foundry run projects/rag_hello --input "$INPUT"   # within 300s
+RUN=$(ls -t ~/.foundry/runs/ | head -1)
+jq 'select(.event | startswith("cache.tool"))' ~/.foundry/runs/$RUN/events.jsonl
+wc -l ~/.foundry/runs/$RUN/tool_calls.jsonl 2>/dev/null || echo "no tool_calls.jsonl"
+
+git checkout -- projects/rag_hello/
 ```
 
-**Expected**: `cache.tool.hit` event on the second call; only one actual tool invocation in `tool_calls.jsonl`.
-
-**If it fails**: result cache not wired into dispatcher; fix session.
+**Expected**: run 2 emits `cache.tool.hit` for `local/search_docs`; it has NO `tool_calls.jsonl` entries (cache hits short-circuit before `tool.started` — the handler never ran) and no `retrieval` events. (If the LLM phrased the tool input differently across runs the exact-match key changes — retry; the deterministic version of this gate is pinned by the integration suite.)
 
 - [ ] Pass
 
 ### Test 5 — Tool-cache validator (adversarial)
 
-**What we're verifying**: setting `cacheable: true` WITHOUT `cache_ttl_s` is rejected at config load.
+**What we're verifying**: `cacheable: true` WITHOUT `cache_ttl_s` is rejected at load.
 
 **Run**:
 
 ```bash
-# Pick a tool's tool.yaml and add cacheable: true with NO cache_ttl_s
-# Try to load the project
-uv run python -m foundry run projects/<example> --input '{}' ; echo "exit=$?"
-# Revert
-git checkout -- <path>/tool.yaml
+sed -i '' '/cache_ttl_s: 300/d' projects/rag_hello/tools/search_docs/v1/tool.yaml
+uv run python -m foundry run projects/rag_hello --input "$INPUT" ; echo "exit=$?"
+git checkout -- projects/rag_hello/
 ```
 
-**Expected**: non-zero exit; `ConfigValidationError` (or similar) names the file, the field, and explains that `cacheable: true` requires `cache_ttl_s`.
-
-**If it fails**: validator missing → fix session.
+**Expected**: exit=2; `ConfigValidationError` naming the tool.yaml file and explaining that cacheable tools must set `cache_ttl_s`; no new run directory under `~/.foundry/runs/`.
 
 - [ ] Pass
 
 ### Test 6 — Cache failure fails open (fault injection)
 
-**What we're verifying**: when the cache backend raises (e.g., Redis down), the run completes via the LLM path and emits a warning event — never blocks.
+**What we're verifying**: a broken cache backend degrades to the LLM path with warnings — never blocks.
 
-**Run**:
+**Run** (point the sqlite backend at a directory, which can't open as a DB):
 
 ```bash
-# Option A (cleanest): the impl session ships a test-only "always raises"
-# semantic cache backend. Configure agent.yaml to use it.
-# Option B: if you have Redis and the example uses it, stop redis briefly:
-#   docker stop <redis-container> (or similar)
+mkdir -p /tmp/not_a_db
+# add under the semantic_cache block in agent.yaml:
+#   backend_config:
+#     path: /tmp/not_a_db
+perl -pi -e 's|^  backend: in_process|  backend: in_process\n  backend_config:\n    path: /tmp/not_a_db|' \
+  projects/rag_hello/agents/rag_agent/agent.yaml
 
-uv run python -m foundry run projects/<rag_example> --input '...'
-jq 'select(.event_type | contains("cache") and contains("error"))' ~/.foundry/runs/<latest>/events.jsonl
+uv run python -m foundry run projects/rag_hello --input "$INPUT" ; echo "exit=$?"
+RUN=$(ls -t ~/.foundry/runs/ | head -1)
+jq 'select(.event == "warning")' ~/.foundry/runs/$RUN/events.jsonl
+jq '.llm_call_count' ~/.foundry/runs/$RUN/metadata.json
+
+git checkout -- projects/rag_hello/
 ```
 
-**Expected**:
-- Exit code 0 (NOT an exception).
-- A `cache.error` (or warning) event captured the backend failure.
-- The LLM was actually called (`llm_call_count > 0`).
-
-**If it fails**: cache failure killed the run → fail-open is broken; this is a P0 reliability bug. Fix session.
+**Expected**: exit=0 (NOT an exception); `warning` events with `category: cache.semantic.error` (version-marker, lookup, and store all fail open — up to 3); `llm_call_count > 0`. A non-zero exit here is a P0 reliability bug — fix session.
 
 - [ ] Pass
 
 ### Test 7 — Hybrid retriever runs dense + sparse in parallel + RRF merge
 
-**What we're verifying**: `hybrid_rrf` retriever fans out dense + sparse, merges via RRF, returns top_k. A `retrieval` event names both branches.
-
-**Run**:
+**Run** (inspect any run that actually called the tool, e.g. Test 4's first run):
 
 ```bash
-uv run python -m foundry run projects/<rag_example> --input '...'
-jq 'select(.event_type == "retrieval")' ~/.foundry/runs/<latest>/events.jsonl
+jq 'select(.event == "retrieval")' ~/.foundry/runs/<run_with_tool_call>/events.jsonl
 ```
 
 **Expected**:
-- A `retrieval` event with `kind: hybrid_rrf` (or similar) containing per-branch latencies and the merged top_k.
-- Both branches show non-zero latency in roughly the same time window (proves parallel, not sequential).
-
-**If it fails**: branches ran sequentially → fix session to use `asyncio.gather` or equivalent.
+- Three events: `kind: dense`, `kind: sparse`, and `kind: hybrid` (the branches emit their own events; the hybrid event is the merged one).
+- The hybrid event carries `branch_latency_ms` with BOTH `dense` and `sparse` keys and `branches_failed: []`; overall latency tracks the slower branch, not the sum (wall-clock parallelism is also pinned by a unit test).
 
 - [ ] Pass
 
 ### Test 8 — Hybrid retriever degrades on one-branch failure
 
-**What we're verifying**: if dense or sparse fails, the other returns + a warning is emitted; the run does not abort.
-
-**Run**:
+**Run** (break the sparse branch's corpus):
 
 ```bash
-# Cause one branch to fail. Easiest: misconfigure the sparse retriever
-# (e.g., point it at a non-existent Elasticsearch host) while leaving
-# dense functional.
-uv run python -m foundry run projects/<rag_example> --input '...'
-jq 'select(.event_type | contains("retrieval"))' ~/.foundry/runs/<latest>/events.jsonl
-git checkout -- projects/<rag_example>/
+# Edit projects/rag_hello/agents/rag_agent/agent.yaml by hand: under the
+# retriever config's `sparse:` block change
+#   corpus_path: corpus.json  ->  corpus_path: missing.json
+uv run python -m foundry run projects/rag_hello --input "$INPUT" ; echo "exit=$?"
+RUN=$(ls -t ~/.foundry/runs/ | head -1)
+jq 'select(.event == "warning" or .event == "retrieval")' ~/.foundry/runs/$RUN/events.jsonl
+git checkout -- projects/rag_hello/
 ```
 
-**Expected**: warning event names the failed branch; the other branch's results made it into the merged output; run completed.
-
-**If it fails**: one failure aborted the retrieval → fix session.
+**Expected**: exit=0; a `warning` with `category: retrieval.branch_failed` naming the sparse branch; the hybrid `retrieval` event shows `branches_failed: ["sparse"]` and `returned > 0` (dense results flowed through).
 
 - [ ] Pass
 
 ### Test 9 — Reranker emits cost event
 
-**What we're verifying**: `cohere_rerank` reorders docs and emits a `rerank` event with `cost_estimate` populated.
-
 **Run** (skip with note if no Cohere key):
 
 ```bash
-uv run python -m foundry run projects/<rag_example_with_reranker> --input '...'
-jq 'select(.event_type == "rerank")' ~/.foundry/runs/<latest>/events.jsonl
+jq 'select(.event == "rerank")' ~/.foundry/runs/<run_with_tool_call>/events.jsonl
 ```
 
 **Expected**:
-- `rerank` event with `before_order` ≠ `after_order` (some reordering happened).
-- `cost_estimate` field present and > 0.
-
-**If it fails**: cost_estimate missing → adapter not populating it; fix session (the spec is strict that this must default to 0 if the adapter can't compute, never None).
+- `before_ids` (up to 8 candidates) ≠ `after_ids` (3, reordered by relevance) — some reordering happened.
+- `cost_estimate_usd` present and > 0. It is NEVER null: the adapter defaults defensively when the provider reports no billing units.
 
 - [ ] Pass (or [ ] Skipped: no Cohere key)
 
 ### Test 10 — Dimension mismatch compile check (adversarial)
 
-**What we're verifying**: configuring a dense retriever whose embedder dim ≠ vector-store configured dim fails at load with `EmbedderConfigError`.
-
 **Run**:
 
 ```bash
-# Edit a retriever's binding so the embedder produces e.g. 1024-d
-# vectors but the vector store is configured for 1536-d.
-uv run python -m foundry run projects/<rag_example> --input '...' ; echo "exit=$?"
-git checkout -- projects/<rag_example>/
+sed -i '' 's|dimensions: 1024|dimensions: 1536|' \
+  projects/rag_hello/agents/rag_agent/agent.yaml
+uv run python -m foundry run projects/rag_hello --input "$INPUT" ; echo "exit=$?"
+git checkout -- projects/rag_hello/
 ```
 
-**Expected**:
-- Non-zero exit AT LOAD (no LLM call, no embedding call made).
-- `EmbedderConfigError` names both dims and the artifacts that disagree.
-
-**If it fails**:
-- Error at first call instead of load → dim check is in the wrong stage; fix session.
+**Expected**: exit=2 AT LOAD — `EmbedderConfigError` naming both dims (1024 vs 1536) and the disagreeing artifacts (voyage/voyage-3 vs the retriever config); no embedding or LLM call made; no run directory created.
 
 - [ ] Pass
 
 ### Test 11 — Second example project end-to-end (hero demo)
 
-**What we're verifying**: the rag_hello (or equivalent) project demonstrates cache + hybrid retriever in one cohesive demo.
-
 **Run**:
 
 ```bash
-uv run python -m foundry run projects/<rag_example> --input '{"query": "your query"}'
+rm -f ~/.foundry/cache/*.db
+uv run python -m foundry run projects/rag_hello --input "$INPUT"
+uv run python -m foundry run projects/rag_hello --input "$INPUT"
 ```
 
 **Expected**:
-- Output is a coherent answer drawing on the retrieved + reranked context.
-- First run: cache miss → retrieval → rerank → LLM → answer.
-- Second run with same input: cache hit (probably) → answer (cheaper).
-- The run artifact tells a clean story: events for retrieval, rerank, cache, llm — all tagged with the same `run_id`.
-
-**If it fails**: the project as configured doesn't actually exercise the new primitives; ask the impl session to harden the demo.
+- Run 1: coherent answer citing corpus ids (e.g. `FR-001`); the artifact tells the story miss → retrieval (dense + sparse + hybrid) → rerank → LLM → stores — all events tagged with the same `run_id`.
+- Run 2: `cache.semantic.hit`, same answer, `llm_call_count: 0`.
 
 - [ ] Pass
 
 ### Test 12 — Scope leakage check (Phase 2c content NOT here)
 
-**What we're verifying**: no memory layer or FunctionNode code snuck in.
+**What we're verifying**: no memory/FunctionNode RUNTIME snuck in. (Note: `core/memory.py`, `core/node.py`, `core/function_node.py`, and the `FunctionNodeSpec` schema are Phase 1 protocol stubs and are SUPPOSED to exist; what must not exist is a `memory` field on AgentSpec or concrete memory/function-node implementations.)
 
 **Run**:
 
 ```bash
-ls src/foundry/memory/ src/foundry/core/memory.py \
-   src/foundry/core/function_node.py src/foundry/core/node.py \
-   2>&1 | grep -v 'No such'
-
-grep -nE 'memory:|FunctionNodeSpec' src/foundry/config/schemas.py || echo "Clean — no memory or FunctionNode in schemas yet"
+uv run python - <<'PY'
+from foundry.config import AgentSpec
+assert "memory" not in AgentSpec.model_fields, "2c leakage: AgentSpec.memory"
+print("Clean — no memory field on AgentSpec")
+PY
+head -3 src/foundry/memory/coordinator.py   # still a one-line stub docstring
 ```
 
-**Expected**: only "No such file" errors (file checks come back empty); grep returns "Clean".
-
-**If it fails**: out-of-scope leakage; fresh review session to confirm.
+**Expected**: "Clean"; `foundry/memory/*` unchanged stubs.
 
 - [ ] Pass
 
 ### Test 13 — Phase 2a regression check
 
-**What we're verifying**: Phase 2b changes didn't break Phase 2a's hello_agent demo.
-
-**Run**:
-
 ```bash
+export HELLO_SERVICE_API_KEY=dummy
 uv run python -m foundry run projects/hello --input '{"name": "world"}'
 ```
 
-**Expected**: same behavior as at end of Phase 2a. Greeting produced. No errors.
-
-**If it fails**: regression — fix before moving on.
+**Expected**: same behaviour as at end of Phase 2a. Greeting produced; no errors.
 
 - [ ] Pass
 
 ### Test 14 — Commit hygiene
 
-Same as prior phases.
+Same as prior phases: conventional commits, no co-author lines, no secrets in the diff, logical chunks.
 
 - [ ] Pass
 
