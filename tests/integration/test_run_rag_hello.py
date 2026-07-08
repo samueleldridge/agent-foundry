@@ -383,7 +383,13 @@ def test_dimension_mismatch_fails_at_load_before_any_call(
 
 
 @pytest.mark.integration
-def test_no_phase_2c_fields_leaked_into_agent_spec() -> None:
-    from foundry.config import AgentSpec
+def test_agent_and_tool_specs_have_full_cumulative_phase_2_shape() -> None:
+    """Phase 2 is closed by 2c: every 2a/2b/2c field is present."""
+    from foundry.config import AgentSpec, ToolSpec
 
-    assert "memory" not in AgentSpec.model_fields  # 2c, not 2b
+    for field in ("tools", "state_visibility", "semantic_cache",
+                  "retrievers", "memory"):
+        assert field in AgentSpec.model_fields
+    for field in ("connections_required", "cacheable", "cache_ttl_s",
+                  "cache_scope"):
+        assert field in ToolSpec.model_fields

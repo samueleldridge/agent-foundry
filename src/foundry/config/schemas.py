@@ -267,6 +267,142 @@ class RetrieverBinding(BaseModel):
     """Default top_k for retrieval; agent code can override per call."""
 
 
+# --- Memory (docs/12 § MemoryConfig, docs/26; Phase 2c) ------------------------------
+
+
+class MemoryWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_messages: int | None = Field(default=None, ge=1, le=10000)
+    max_tokens: int | None = Field(default=None, ge=1, le=200000)
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> MemoryWindow:
+        if (self.max_messages is None) == (self.max_tokens is None):
+            raise ValueError(
+                "exactly one of max_messages or max_tokens must be set"
+            )
+        return self
+
+
+class WorkingMemoryLayerConfig(BaseModel):
+    """Recency window over a conversation state field (docs/26 § Working)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["working"] = "working"
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    source_field: str = "messages"
+    """State field the layer reads from. Must be a list of FoundryMessage
+    or a string; validated at compile against StateSpec.schema."""
+    window: MemoryWindow
+
+
+class EpisodicMemoryLayerConfig(BaseModel):
+    """Vector/lexical retrieval over past episodes (docs/26 § Episodic)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["episodic"] = "episodic"
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    retriever_slot: str
+    """Must be a slot defined in AgentSpec.retrievers (compile-checked)."""
+    top_k: int = Field(default=5, ge=1, le=200)
+    relevance_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    purpose: Literal["query", "document"] = "query"
+
+
+class SemanticMemoryLayerConfig(BaseModel):
+    """Synthesised content in a state field, periodically refreshed by an
+    LLM consolidator (docs/26 § Semantic). The consolidator runs on the
+    AGENT'S model_binding in v1 — a separate consolidator_model_binding
+    override is deferred (Phase 2c handoff)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["semantic"] = "semantic"
+    name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    state_field: str
+    """State field holding the synthesised content (typically Markdown).
+    Validated at compile against StateSpec.schema + the agent's read AND
+    write scope."""
+    consolidate_every_n_turns: int | None = Field(default=None, ge=1, le=1000)
+    consolidate_on_session_end: bool = False
+    consolidator_prompt: str | None = None
+    """Prompt file path relative to the agent dir. Required when a
+    consolidation trigger is set; existence checked at compile."""
+    max_size_tokens: int = Field(default=2000, ge=100, le=50000)
+
+    @model_validator(mode="after")
+    def _trigger_needs_prompt(self) -> SemanticMemoryLayerConfig:
+        has_trigger = (
+            self.consolidate_every_n_turns is not None
+            or self.consolidate_on_session_end
+        )
+        if has_trigger and self.consolidator_prompt is None:
+            raise ValueError(
+                "a consolidation trigger is set but consolidator_prompt is "
+                "missing — the consolidator needs a prompt file (docs/26)"
+            )
+        return self
+
+
+MemoryLayerConfig = Annotated[
+    WorkingMemoryLayerConfig | EpisodicMemoryLayerConfig | SemanticMemoryLayerConfig,
+    Field(discriminator="kind"),
+]
+
+MemoryPlacement = Literal[
+    "system_prefix", "system_suffix", "messages", "user_message_prefix"
+]
+
+
+class MemoryInjectionRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer: str
+    """Must match a name in MemoryConfig.layers (validated below)."""
+    placement: MemoryPlacement
+    template: str | None = None
+    """Formatting template; variables {content} / {docs} / {messages} match
+    the layer's contribution type. None uses per-kind defaults."""
+    max_tokens: int | None = Field(default=None, ge=1, le=200000)
+    """Per-rule truncation ceiling."""
+
+
+class MemoryConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layers: list[MemoryLayerConfig] = Field(min_length=1)
+    """Declared order is the prompt-injection order when no explicit
+    inject_into_prompt rules are given, and the truncation priority order
+    (last-listed truncates first)."""
+    inject_into_prompt: list[MemoryInjectionRule] = Field(default_factory=list)
+    max_envelope_tokens: int | None = Field(default=None, ge=100, le=200000)
+    fail_strict: bool = False
+    """False (default): a failed layer contributes empty + warning event.
+    True: a failed layer raises MemoryLayerError and aborts the run."""
+
+    @model_validator(mode="after")
+    def _names_unique_and_rules_resolve(self) -> MemoryConfig:
+        names = [layer.name for layer in self.layers]
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
+            raise ValueError(
+                f"memory layer names must be unique; duplicated: "
+                f"{', '.join(duplicates)}"
+            )
+        unknown = sorted(
+            {rule.layer for rule in self.inject_into_prompt} - set(names)
+        )
+        if unknown:
+            raise ValueError(
+                f"inject_into_prompt references unknown layer(s): "
+                f"{', '.join(unknown)} (declared: {', '.join(names)})"
+            )
+        return self
+
+
 # --- AgentSpec ---------------------------------------------------------------------
 
 
@@ -295,7 +431,7 @@ class OutputSchemaRef(BaseModel):
 
 
 class AgentSpec(BaseModel):
-    """docs/12 § AgentSpec, minus the 2c field (memory)."""
+    """docs/12 § AgentSpec — full cumulative Phase 2 shape."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -314,6 +450,10 @@ class AgentSpec(BaseModel):
     retrievers: list[RetrieverBinding] = Field(default_factory=list)
     """Retrievers available to this agent (tool-style via ctx.retrievers or
     pre-agent retrieval). See docs/25."""
+    memory: MemoryConfig | None = None
+    """Opt-in multi-layer memory (working / episodic / semantic).
+    None = no memory subsystem; the agent's prompt is built directly from
+    state. Default for batch / one-shot agents. See docs/26."""
     metadata: dict[str, Any] = Field(default_factory=dict)
     schema_version: Literal[1] = 1
 
@@ -514,6 +654,7 @@ __all__ = [
     "ConnectionSlot",
     "ConnectionSpec",
     "EmbedderBinding",
+    "EpisodicMemoryLayerConfig",
     "EvalCase",
     "EvalSpec",
     "FieldSpec",
@@ -523,6 +664,11 @@ __all__ = [
     "GraphFlow",
     "Guardrails",
     "HandoffPolicy",
+    "MemoryConfig",
+    "MemoryInjectionRule",
+    "MemoryLayerConfig",
+    "MemoryPlacement",
+    "MemoryWindow",
     "ObservabilityConfig",
     "OutputSchemaRef",
     "ParallelFlow",
@@ -534,6 +680,7 @@ __all__ = [
     "RetrieverSpec",
     "ScorerConfig",
     "SemanticCacheConfig",
+    "SemanticMemoryLayerConfig",
     "SequentialFlow",
     "SingleFlow",
     "StateSpec",
@@ -543,4 +690,5 @@ __all__ = [
     "TerminationRule",
     "ToolBinding",
     "ToolSpec",
+    "WorkingMemoryLayerConfig",
 ]

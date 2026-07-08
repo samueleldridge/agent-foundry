@@ -297,16 +297,31 @@ class LoadedAgent:
 
 
 @dataclass(frozen=True)
+class LoadedFunction:
+    """A function node's spec + source (docs/21 § Function nodes).
+
+    The Python handler is imported at compile time by the runtime, not here —
+    the loader stays pure config. ``source_text`` feeds the content-hashed
+    ``node_version`` (function source + config)."""
+
+    spec: FunctionNodeSpec
+    directory: Path
+    source_text: str
+
+
+@dataclass(frozen=True)
 class LoadedProject:
     directory: Path
     system: SystemSpec
     state: StateSpec
     agents: dict[str, LoadedAgent] = field(default_factory=dict)
+    functions: dict[str, LoadedFunction] = field(default_factory=dict)
 
 
 def load_project(project_dir: Path) -> LoadedProject:
     """Load a whole project: system.yaml + state spec + every agent's
-    agent.yaml and pinned prompt file."""
+    agent.yaml and pinned prompt file + every function node's function.yaml
+    and source file."""
     project_dir = project_dir.resolve()
     if not project_dir.is_dir():
         raise ConfigLoadError(
@@ -334,13 +349,40 @@ def load_project(project_dir: Path) -> LoadedProject:
         agents[agent_name] = LoadedAgent(
             spec=spec, directory=agent_dir, prompt_text=prompt_path.read_text()
         )
+
+    functions: dict[str, LoadedFunction] = {}
+    for function_name in system.functions:
+        function_dir = project_dir / "functions" / function_name
+        function_spec = load_function_node_spec(function_dir / "function.yaml")
+        file_part = function_spec.function.split("::", 1)[0]
+        source_path = function_dir / file_part
+        if not source_path.exists():
+            raise ConfigLoadError(
+                f"function source file not found: {source_path} "
+                f"(referenced by {function_dir / 'function.yaml'} → function)",
+                context={
+                    "file": str(function_dir / "function.yaml"),
+                    "pointer": "/function",
+                    "source_path": str(source_path),
+                },
+            )
+        functions[function_name] = LoadedFunction(
+            spec=function_spec,
+            directory=function_dir,
+            source_text=source_path.read_text(),
+        )
     return LoadedProject(
-        directory=project_dir, system=system, state=state, agents=agents
+        directory=project_dir,
+        system=system,
+        state=state,
+        agents=agents,
+        functions=functions,
     )
 
 
 __all__ = [
     "LoadedAgent",
+    "LoadedFunction",
     "LoadedProject",
     "load_agent_spec",
     "load_config_model",
