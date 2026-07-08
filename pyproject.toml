@@ -99,3 +99,9 @@ python_version = "3.12"
 strict = true
 packages = ["foundry"]
 mypy_path = "src"
+
+# Optional heavy backends (docs/24): imported lazily inside foundry.cache with
+# structured errors when absent. Not pinned dependencies, so no stubs exist.
+[[tool.mypy.overrides]]
+module = ["redis", "redis.asyncio", "asyncpg"]
+ignore_missing_imports = true

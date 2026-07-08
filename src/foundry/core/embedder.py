@@ -48,9 +48,18 @@ class Embedding(BaseModel):
 
 @runtime_checkable
 class Embedder(Protocol):
-    name: str
-    model: str
-    capabilities: EmbedderCapabilities
+    """Property-style members so implementations may use attributes OR
+    read-only properties (EmbedderAdapter derives ``name`` from
+    provider+model)."""
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def model(self) -> str: ...
+
+    @property
+    def capabilities(self) -> EmbedderCapabilities: ...
 
     async def embed(
         self,
