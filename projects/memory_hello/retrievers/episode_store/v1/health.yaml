@@ -1,0 +1,15 @@
+name: episode_store_v1_health
+description: A seeded-episode query must return at least one snippet.
+scope: retriever
+target: local/episode_store@v1
+cases:
+  - id: seeded_episode_lookup
+    input: {query: "Paris", top_k: 1}
+    expected:
+      min_documents: 1
+scorers:
+  - kind: exact
+    name: min_documents_check
+threshold: 1.0
+deterministic: false
+schema_version: 1

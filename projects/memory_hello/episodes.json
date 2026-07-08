@@ -1,0 +1,17 @@
+[
+  {
+    "id": "EP-001",
+    "text": "Previous session: the user said their favourite city is Paris and they enjoy planning trips there.",
+    "source": "session-2026-06-30"
+  },
+  {
+    "id": "EP-002",
+    "text": "Previous session: the user mentioned they work as a data engineer and prefer short answers.",
+    "source": "session-2026-06-30"
+  },
+  {
+    "id": "EP-003",
+    "text": "Previous session: the user asked about jazz clubs and good coffee near the river.",
+    "source": "session-2026-07-02"
+  }
+]

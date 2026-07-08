@@ -1,0 +1,33 @@
+# State schema for the memory_hello system.
+schema:
+  raw_turns:
+    type: list[str]
+    description: Unnormalised user turns (from run input).
+  turns:
+    type: list[str]
+    description: Cleaned user turns the agent converses over (one LLM turn each).
+  messages:
+    type: list[FoundryMessage]
+    default: []
+    description: Conversation history — the working memory layer's source field.
+  user_facts:
+    type: str | None
+    description: Synthesised facts about the user — the semantic memory layer's state field.
+  reply:
+    type: str | None
+    description: The agent's final-turn reply.
+  formatted_reply:
+    type: str | None
+    description: The post-agent function's formatted output.
+reducers:
+  messages: append
+visibility:
+  normalize_input:
+    read: [raw_turns]
+    write: [turns]
+  hello_agent:
+    read: [turns, messages, user_facts]
+    write: [messages, reply, user_facts]
+  format_output:
+    read: [reply]
+    write: [formatted_reply]

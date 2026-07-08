@@ -1,0 +1,12 @@
+name: normalize_input
+description: |
+  Normalise the raw user turns into the canonical shape the agent
+  consumes: trim whitespace, drop empty turns. Deterministic — no LLM
+  judgement adds value here (docs/21 § When to choose FunctionNode).
+function: function.py::normalize
+state_visibility:
+  read: [raw_turns]
+  write: [turns]
+retry_policy:
+  max_attempts: 1   # deterministic; retries pointless
+timeout_s: 2.0

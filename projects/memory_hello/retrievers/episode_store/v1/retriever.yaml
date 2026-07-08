@@ -1,0 +1,15 @@
+name: episode_store
+version: v1
+description: |
+  In-process BM25 retriever over the project's seeded past-session
+  episodes (episodes.json). Backs the agent's episodic memory layer and
+  supports ingest() so completed turns join the corpus within a run.
+kind: sparse
+config_schema: schemas.py::EpisodeStoreConfig
+factory: factory.py::build_retriever
+connections_required: []
+health_check: health.yaml
+tags: [retrieval, sparse, bm25, in-process, memory]
+author: foundry-team
+created_at: 2026-07-08T00:00:00Z
+schema_version: 1

@@ -1,0 +1,16 @@
+# memory_hello — the Phase 2c example system.
+# A sequential flow [normalize_input, hello_agent, format_output]:
+# deterministic function nodes bracket a conversational agent that runs
+# all three memory layers (working window / episodic retrieval over seeded
+# past sessions / semantic consolidation every 3 turns).
+# Zero infra: in-process everything; the only external API is the LLM.
+name: memory_hello
+description: Conversational greeter demonstrating three-layer memory (working, episodic, semantic) plus deterministic FunctionNodes in a sequential flow.
+agents: [hello_agent]
+functions: [normalize_input, format_output]
+state: state.yaml
+flow:
+  type: sequential
+  steps: [normalize_input, hello_agent, format_output]
+guardrails:
+  max_iterations: 5

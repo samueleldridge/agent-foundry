@@ -1,0 +1,57 @@
+name: hello_agent
+description: Friendly conversational assistant that remembers the user via three memory layers.
+model_binding:
+  provider: anthropic
+  model: claude-haiku-4-5
+  settings:
+    max_tokens: 512
+    temperature: 0.2
+prompt:
+  version: v1
+  path: prompts/v1.md
+output:
+  schema: output_schema.py::Reply
+iteration_limit: 3
+state_visibility:
+  read: [turns, messages, user_facts]
+  write: [messages, reply, user_facts]
+retrievers:
+  - slot: episode_store
+    ref: local/episode_store
+    version: v1
+    top_k: 5
+    config:
+      corpus_path: episodes.json
+memory:
+  layers:
+    - kind: working
+      name: short_term
+      source_field: messages
+      window:
+        max_messages: 5
+    - kind: semantic
+      name: user_facts
+      state_field: user_facts
+      consolidate_every_n_turns: 3
+      consolidator_prompt: prompts/consolidate_v1.md
+      max_size_tokens: 300
+    - kind: episodic
+      name: past_sessions
+      retriever_slot: episode_store
+      top_k: 3
+      relevance_threshold: 0.0   # BM25 scores are unbounded; keep all hits
+  inject_into_prompt:
+    - layer: user_facts
+      placement: system_prefix
+      template: |
+        What you have learned about this user so far:
+        {content}
+    - layer: past_sessions
+      placement: system_suffix
+      template: |
+        Relevant past context:
+        {docs}
+    - layer: short_term
+      placement: messages
+  max_envelope_tokens: 4000
+  fail_strict: false

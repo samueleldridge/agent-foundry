@@ -1,0 +1,12 @@
+name: format_output
+description: |
+  Post-agent output formatting: wraps the agent's final reply in the
+  project's presentation shape. Deterministic string work — a
+  FunctionNode, not an agent (docs/21 § When to choose FunctionNode).
+function: function.py::format_reply
+state_visibility:
+  read: [reply]
+  write: [formatted_reply]
+retry_policy:
+  max_attempts: 1
+timeout_s: 2.0
