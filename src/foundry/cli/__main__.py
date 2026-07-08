@@ -46,16 +46,45 @@ _INPUT_OPTION = typer.Option(
     "--input",
     help='JSON object of run inputs, e.g. \'{"name": "world"}\'.',
 )
+_STREAM_OPTION = typer.Option(
+    False,
+    "--stream",
+    help="Stream RunEvents incrementally to stdout as JSONL while the run "
+    "executes (the final output prints last).",
+)
+_CHECKPOINT_OPTION = typer.Option(
+    "memory",
+    "--checkpoint",
+    help="Checkpointer: 'memory' (per-process, default), 'sqlite' "
+    "(survives the process; enables kill+resume), or 'none'.",
+)
+_RUN_ID_OPTION = typer.Option(
+    None,
+    "--run-id",
+    help="Reuse an existing run id. With --checkpoint sqlite, an "
+    "interrupted run with this id RESUMES from its last checkpoint.",
+)
 
 
 @app.command(help="Run a configured system end-to-end.")
 def run(
     project_path: Path = _PROJECT_PATH_ARG,
     input_json: str = _INPUT_OPTION,
+    stream: bool = _STREAM_OPTION,
+    checkpoint: str = _CHECKPOINT_OPTION,
+    run_id: str | None = _RUN_ID_OPTION,
 ) -> None:
     from foundry.cli.run import execute_run
 
-    raise typer.Exit(code=execute_run(project_path, input_json))
+    raise typer.Exit(
+        code=execute_run(
+            project_path,
+            input_json,
+            stream=stream,
+            checkpoint=checkpoint,
+            run_id=run_id,
+        )
+    )
 
 
 connections_app = typer.Typer(

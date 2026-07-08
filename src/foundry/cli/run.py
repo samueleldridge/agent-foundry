@@ -1,7 +1,12 @@
 """`foundry run <project-path> --input '...'` — execute a configured system.
 
-Phase 1: compiles a single-agent project, runs it once, prints the typed
-output as JSON, and writes the run artifact to ~/.foundry/runs/<run_id>/.
+Phase 3: runs through a real LangGraph StateGraph with a checkpointer
+attached (`--checkpoint memory|sqlite|none`, default memory). `--stream`
+prints every RunEvent to stdout as JSONL the moment it is emitted; the
+typed output prints last. `--run-id` reuses a run id — with a sqlite
+checkpointer, an interrupted run with that id RESUMES from its last
+checkpoint and completes (docs/03 § Phase 3 exit gate).
+
 Structured FoundryErrors print without tracebacks; exit codes: 0 success,
 1 run failure, 2 compile/config failure.
 """
@@ -15,11 +20,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from pydantic import BaseModel
 
 from foundry.core import CostBudget, RunId, Session
 from foundry.core.errors import FoundryError
 from foundry.observability.artifacts import RunArtifactWriter
 from foundry.observability.logging import configure_logging, run_logger
+from foundry.runtime.checkpointers import CHECKPOINTER_CHOICES
 from foundry.runtime.langgraph_adapter import compile_project, run_project
 
 
@@ -40,6 +47,9 @@ def execute_run(
     input_json: str,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
+    stream: bool = False,
+    checkpoint: str = "memory",
+    run_id: str | None = None,
 ) -> int:
     """The `foundry run` implementation. Returns the process exit code."""
     configure_logging()
@@ -53,6 +63,21 @@ def execute_run(
         print("--input must be a JSON object, e.g. '{\"name\": \"world\"}'",
               file=sys.stderr)
         return 2
+    if checkpoint not in CHECKPOINTER_CHOICES:
+        print(
+            f"--checkpoint must be one of: {', '.join(CHECKPOINTER_CHOICES)} "
+            f"(got {checkpoint!r})",
+            file=sys.stderr,
+        )
+        return 2
+    if run_id is not None:
+        try:
+            resolved_run_id = RunId.validate(run_id)
+        except ValueError as exc:
+            print(f"--run-id is not a valid run id: {exc}", file=sys.stderr)
+            return 2
+    else:
+        resolved_run_id = RunId.new()
 
     try:
         compiled = compile_project(project_path, transport=transport)
@@ -72,24 +97,29 @@ def execute_run(
         if guardrails.max_cost_usd is not None
         else None
     )
-    run_id = RunId.new()
-    logger = run_logger(str(run_id))
+    logger = run_logger(str(resolved_run_id))
     session = Session.new(
         project=compiled.project.system.name,
-        run_id=run_id,
+        run_id=resolved_run_id,
         cost_budget=cost_budget,
         logger=logger,
         system_version=compiled.system_version,
         pin_set_hash=compiled.pin_set_hash,
     )
-    writer = RunArtifactWriter(run_id)
+    writer = RunArtifactWriter(resolved_run_id)
     logger.info(
         "run.starting",
         project=compiled.project.system.name,
         provider=compiled.provider.name,
         model=compiled.provider.model,
+        checkpointer=checkpoint,
         artifact_dir=str(writer.directory),
     )
+
+    def event_sink(event: BaseModel) -> None:
+        writer.record_event(event)
+        if stream:
+            print(event.model_dump_json(), flush=True)
 
     def _budget_extra() -> dict[str, Any]:
         if cost_budget is None:
@@ -104,7 +134,14 @@ def execute_run(
 
     try:
         result = asyncio.run(
-            run_project(compiled, input_data, session, writer.record_event)
+            run_project(
+                compiled,
+                input_data,
+                session,
+                event_sink,
+                checkpointer=checkpoint,
+                start_sequence=writer.next_sequence(),
+            )
         )
     except FoundryError as exc:
         writer.write_metadata(
@@ -113,7 +150,11 @@ def execute_run(
             provider=compiled.provider.name,
             model=compiled.provider.model,
             error=exc.to_dict(),
-            extra={"pins": compiled.pins, **_budget_extra()},
+            extra={
+                "pins": compiled.pins,
+                "checkpointer": checkpoint,
+                **_budget_extra(),
+            },
         )
         logger.error("run.failed", error_class=type(exc).__name__)
         _print_error(exc)
@@ -131,6 +172,8 @@ def execute_run(
             "pins": compiled.pins,
             "connection_pool": result.pool_metrics,
             "llm_call_count": result.llm_call_count,
+            "checkpointer": checkpoint,
+            "resumed": result.resumed,
             **_budget_extra(),
         },
     )
