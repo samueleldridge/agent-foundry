@@ -5,10 +5,12 @@
 project is a directory containing a `SystemSpec`, agent configs, prompts,
 local tools, local connections, and evals.
 
-## Phase 0 status
+## Status
 
-Empty placeholder. The first sample project (`hello`) is scaffolded in
-Phase 1; `pipeline_recon` and `rag_hello` follow in Phase 2a / 2b.
+Three example projects ship with Phase 2: `hello` (Phase 1/2a — one agent,
+one catalog tool through one catalog connection), `rag_hello` (Phase 2b —
+hybrid retrieval + rerank + semantic cache), and `memory_hello` (Phase 2c —
+three-layer memory + FunctionNodes in a sequential flow).
 
 ## What lives here
 
