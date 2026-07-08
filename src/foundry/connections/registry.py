@@ -19,6 +19,7 @@ from foundry.catalog.loader import LoadedConnectionVersion, load_connection_vers
 from foundry.config import (
     ArtifactRef,
     ConnectionBinding,
+    ConnectionSlot,
     FoundryRoots,
     PoolPolicy,
     RefreshPolicy,
@@ -208,29 +209,33 @@ def prepare_connections(
     }
 
 
-def validate_tool_connection_wiring(
-    tool_name: str,
-    spec: ToolSpec,
-    binding: ToolBinding,
-    prepared: dict[str, PreparedConnection],
+def validate_connection_slot_wiring(
     *,
-    system_file: Path | None = None,
+    owner_kind: str,
+    owner_name: str,
+    declared_slots: list[ConnectionSlot],
+    connection_bindings: dict[str, str],
+    prepared: dict[str, PreparedConnection],
+    pointer_prefix: str,
+    config_file: Path | None = None,
 ) -> dict[str, PreparedConnection]:
-    """Compile-time slot wiring checks (docs/23 § Slot binding). Returns the
-    slot → PreparedConnection map the runtime hands to the accessor."""
-    declared = {slot.slot: slot for slot in spec.connections_required}
-    file_line = f"  file: {system_file}\n" if system_file else ""
+    """Generic compile-time slot wiring checks (docs/23 § Slot binding) —
+    shared by tools (Phase 2a) and retrievers/rerankers (Phase 2b). Returns
+    the slot → PreparedConnection map the runtime hands to the accessor."""
+    owner = f"{owner_kind} {owner_name!r}"
+    declared = {slot.slot: slot for slot in declared_slots}
+    file_line = f"  file: {config_file}\n" if config_file else ""
 
-    unknown = sorted(set(binding.connection_bindings) - set(declared))
+    unknown = sorted(set(connection_bindings) - set(declared))
     if unknown:
         raise CompileError(
-            f"Tool {tool_name!r} binds unknown connection slot(s): "
+            f"{owner} binds unknown connection slot(s): "
             f"{', '.join(unknown)}.\n"
             + file_line
-            + f"  pointer: /tools/{tool_name}/connection_bindings\n"
+            + f"  pointer: {pointer_prefix}/connection_bindings\n"
             f"  declared slots: {', '.join(sorted(declared)) or '(none)'}",
             context={
-                "tool": tool_name,
+                owner_kind.lower(): owner_name,
                 "unknown_slots": unknown,
                 "declared_slots": sorted(declared),
             },
@@ -238,38 +243,38 @@ def validate_tool_connection_wiring(
 
     wired: dict[str, PreparedConnection] = {}
     for slot_name, slot in declared.items():
-        bound_name = binding.connection_bindings.get(slot_name)
+        bound_name = connection_bindings.get(slot_name)
         if bound_name is None:
             if slot.optional:
                 continue
             raise ConnectionSlotNotBoundError(
-                f"Tool {tool_name!r} slot {slot_name!r} is not bound.\n"
+                f"{owner} slot {slot_name!r} is not bound.\n"
                 + file_line
-                + f"  pointer: /tools/{tool_name}/connection_bindings\n"
+                + f"  pointer: {pointer_prefix}/connection_bindings\n"
                 f"  declared slots: {', '.join(sorted(declared))}\n"
                 f"  bound slots: "
-                f"{', '.join(sorted(binding.connection_bindings)) or '(none)'}\n"
+                f"{', '.join(sorted(connection_bindings)) or '(none)'}\n"
                 f"  hint: Add `connection_bindings: {{{slot_name}: "
                 f"<connection_name>}}` and ensure `<connection_name>` appears "
                 "in system.yaml's `connections:` block.",
                 context={
-                    "tool": tool_name,
+                    owner_kind.lower(): owner_name,
                     "slot": slot_name,
                     "declared_slots": sorted(declared),
-                    "bound_slots": sorted(binding.connection_bindings),
+                    "bound_slots": sorted(connection_bindings),
                 },
             )
         prepared_conn = prepared.get(bound_name)
         if prepared_conn is None:
             raise CompileError(
-                f"Tool {tool_name!r} slot {slot_name!r} is bound to "
+                f"{owner} slot {slot_name!r} is bound to "
                 f"{bound_name!r}, which is not in system.yaml's "
                 f"`connections:` block (known: "
                 f"{', '.join(sorted(prepared)) or '(none)'}).\n"
                 + file_line
-                + f"  pointer: /tools/{tool_name}/connection_bindings/{slot_name}",
+                + f"  pointer: {pointer_prefix}/connection_bindings/{slot_name}",
                 context={
-                    "tool": tool_name,
+                    owner_kind.lower(): owner_name,
                     "slot": slot_name,
                     "bound_name": bound_name,
                     "known_connections": sorted(prepared),
@@ -279,14 +284,14 @@ def validate_tool_connection_wiring(
             ref_matches_accept(prepared_conn.ref, accept) for accept in slot.accepts
         ):
             raise CompileError(
-                f"Tool {tool_name!r} slot {slot_name!r} does not accept the "
+                f"{owner} slot {slot_name!r} does not accept the "
                 f"bound connection {prepared_conn.canonical_ref!r}.\n"
                 + file_line
-                + f"  pointer: /tools/{tool_name}/connection_bindings/{slot_name}\n"
+                + f"  pointer: {pointer_prefix}/connection_bindings/{slot_name}\n"
                 f"  accepts: {', '.join(slot.accepts)}\n"
                 f"  bound: {bound_name} → {prepared_conn.canonical_ref}",
                 context={
-                    "tool": tool_name,
+                    owner_kind.lower(): owner_name,
                     "slot": slot_name,
                     "accepts": slot.accepts,
                     "rejected_ref": prepared_conn.canonical_ref,
@@ -296,10 +301,32 @@ def validate_tool_connection_wiring(
     return wired
 
 
+def validate_tool_connection_wiring(
+    tool_name: str,
+    spec: ToolSpec,
+    binding: ToolBinding,
+    prepared: dict[str, PreparedConnection],
+    *,
+    system_file: Path | None = None,
+) -> dict[str, PreparedConnection]:
+    """Tool-shaped wrapper over the generic slot wiring (kept for the Phase 2a
+    call sites and their exact error text)."""
+    return validate_connection_slot_wiring(
+        owner_kind="Tool",
+        owner_name=tool_name,
+        declared_slots=spec.connections_required,
+        connection_bindings=binding.connection_bindings,
+        prepared=prepared,
+        pointer_prefix=f"/tools/{tool_name}",
+        config_file=system_file,
+    )
+
+
 __all__ = [
     "PreparedConnection",
     "prepare_connection",
     "prepare_connections",
     "resolve_connection_credentials",
+    "validate_connection_slot_wiring",
     "validate_tool_connection_wiring",
 ]

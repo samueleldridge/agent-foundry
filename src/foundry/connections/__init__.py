@@ -18,6 +18,7 @@ from foundry.connections.registry import (
     prepare_connection,
     prepare_connections,
     resolve_connection_credentials,
+    validate_connection_slot_wiring,
     validate_tool_connection_wiring,
 )
 
@@ -34,5 +35,6 @@ __all__ = [
     "prepare_connections",
     "resolve_connection_credentials",
     "run_connection_health",
+    "validate_connection_slot_wiring",
     "validate_tool_connection_wiring",
 ]
