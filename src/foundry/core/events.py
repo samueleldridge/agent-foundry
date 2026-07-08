@@ -60,6 +60,7 @@ class FunctionNodeStarted(_RunEventBase):
 class FunctionNodeCompleted(_RunEventBase):
     event: Literal["function_node.completed"] = "function_node.completed"
     node_name: str
+    node_version: str = ""
     fields_written: list[str] = Field(default_factory=list)
     bytes_delta: int = 0
     latency_ms: int = 0
@@ -71,6 +72,10 @@ class LLMCallStarted(_RunEventBase):
     provider: str
     model: str
     prompt_tokens_estimate: int | None = None
+    prompt_messages: list[FoundryMessage] | None = None
+    """The assembled prompt, captured ONLY when
+    ObservabilityConfig.capture_inputs is true (docs/26 § Observability:
+    'with capture_inputs: true, the assembled prompt that followed')."""
 
 
 class LLMDelta(_RunEventBase):
@@ -235,6 +240,9 @@ class MemoryRead(_RunEventBase):
     layers_failed: list[str] = Field(default_factory=list)
     total_tokens_estimate: int = 0
     truncated: bool = False
+    layers_truncated: list[str] = Field(default_factory=list)
+    """Which layers lost content to the max_envelope_tokens cap —
+    last-listed truncates first (docs/26 § Prompt assembly rule 6)."""
 
 
 class MemoryWriteEvent(_RunEventBase):

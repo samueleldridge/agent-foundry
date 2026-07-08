@@ -138,12 +138,14 @@ from foundry.core.events import (
 )
 from foundry.core.function_node import BaseFunctionNode, FunctionNode
 from foundry.core.memory import (
+    LayerKind,
     Memory,
     MemoryContext,
     MemoryContribution,
     MemoryEnvelope,
     MemoryLayer,
     MemoryWrite,
+    StateWriter,
 )
 from foundry.core.messages import (
     ContentBlock,
@@ -276,6 +278,7 @@ __all__ = [
     "LLMCallCompleted",
     "LLMCallStarted",
     "LLMDelta",
+    "LayerKind",
     "LifecycleHooks",
     "MaxHopsExceededError",
     "Memory",
@@ -349,6 +352,7 @@ __all__ = [
     "StateBase",
     "StateTransition",
     "StateVisibilityError",
+    "StateWriter",
     "StopReason",
     "TextBlock",
     "TokenUsage",

@@ -1,31 +1,48 @@
-"""Memory protocols — Phase 1 type stubs.
+"""Memory protocols (docs/10 § Memory, docs/26).
 
-Concrete memory coordinator + three standard layers land in Phase 2c. Phase 1
-ships the protocol shapes + envelope/contribution/write so config schemas
-(MemoryConfig) and the public ``core`` re-export are stable.
+The concrete coordinator (``DefaultMemory``) and the three standard layers
+live in ``foundry.memory``; this module holds only the protocol shapes and
+the envelope/contribution/write value types so config schemas and consumers
+depend on stable core types.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from foundry.core.messages import FoundryMessage
 from foundry.core.retrieval import RetrievedDocument
+from foundry.core.session import Session
 from foundry.core.types import RunId
 
 LayerKind = Literal["working", "episodic", "semantic", "custom"]
 
+StateWriter = Callable[[str, Any], None]
+"""Write one state field on the agent's behalf. The runtime supplies a
+writer that enforces the agent's write scope + reducers; layers never touch
+state directly."""
+
 
 class MemoryContext(BaseModel):
+    """What every memory operation receives (docs/26 § Lifecycle)."""
+
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
     run_id: RunId
     agent_name: str
-    session: Any  # avoid circular import; concrete typing in Phase 2c
+    session: Session
     state_view: dict[str, Any] = Field(default_factory=dict)
-    state_writer: Any = None
+    """The agent's read-scope projection of state at this turn."""
+    state_writer: StateWriter | None = None
+    """None when the agent has no writable memory fields."""
+    turn_count: int = 0
+    """Completed turns so far in this run (consolidation cadence input)."""
+    recent_messages: list[FoundryMessage] = Field(default_factory=list)
+    """Turn messages since the last consolidation — the consolidator's
+    {recent_messages} carrier."""
 
 
 class MemoryContribution(BaseModel):
@@ -44,6 +61,11 @@ class MemoryEnvelope(BaseModel):
     contributions: list[MemoryContribution] = Field(default_factory=list)
     total_tokens_estimate: int = 0
     truncated: bool = False
+    layers_truncated: list[str] = Field(default_factory=list)
+    """Layers whose contribution was cut by max_envelope_tokens —
+    last-listed first (docs/26 § Prompt assembly rule 6)."""
+    layers_failed: list[str] = Field(default_factory=list)
+    """Layers that degraded to an empty contribution (fail-open default)."""
 
 
 class MemoryWrite(BaseModel):
@@ -75,10 +97,12 @@ class Memory(Protocol):
 
 
 __all__ = [
+    "LayerKind",
     "Memory",
     "MemoryContext",
     "MemoryContribution",
     "MemoryEnvelope",
     "MemoryLayer",
     "MemoryWrite",
+    "StateWriter",
 ]
