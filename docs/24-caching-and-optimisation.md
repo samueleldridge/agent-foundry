@@ -15,25 +15,34 @@ Caching correctly is one of the highest-leverage levers for agent pipelines in p
    ┌──────────────────────────────────────────────────────────┐
    │  Agent step                                              │
    │                                                          │
-   │  1. Build SemanticCacheKey (structural hash + embed)     │
+   │  1. Build SemanticCacheKey from the step's INITIAL       │
+   │     messages (structural hash + embed)                   │
    │  2. SemanticCache.lookup(key, threshold)                 │   ← Layer 2
-   │     HIT → return cached ModelResponse (emit cache.hit)   │
+   │     HIT → replay cached TERMINAL ModelResponse           │
+   │           (emit cache.hit; the whole LLM ⇄ tool loop     │
+   │           below is skipped)                              │
    │     MISS → continue                                      │
    │                                                          │
-   │  3. Provider.generate(messages, tools, settings)         │
-   │     ├── Prompt-cache markers on eligible blocks           │   ← Layer 1
-   │     └── Actual LLM call                                  │
+   │  3. LLM ⇄ tool loop (repeats until terminal response):   │
+   │     a. Provider.generate(messages, tools, settings)      │
+   │        ├── Prompt-cache markers on eligible blocks        │   ← Layer 1
+   │        └── Actual LLM call                               │
+   │     b. Tool-call dispatch per tool_use block:            │
+   │        i.  hash(validated_input) → input_hash            │
+   │        ii. if cacheable: ResultCache.lookup(...)         │   ← Layer 3
+   │            HIT → return cached output (cache.tool.hit)   │
+   │            MISS → run handler → ResultCache.store(...)   │
+   │        iii. else: always run handler                     │
    │                                                          │
-   │  4. SemanticCache.store(key, response, ttl_s)            │
-   │                                                          │
-   │  5. Tool-call dispatch:                                  │
-   │     a. hash(validated_input) → input_hash                │
-   │     b. if cacheable: ResultCache.lookup(...)             │   ← Layer 3
-   │        HIT → return cached output (emit cache.tool.hit)  │
-   │        MISS → run handler → ResultCache.store(...)       │
-   │     c. else: always run handler                          │
+   │  4. SemanticCache.store(key, terminal_response, ttl_s)   │
    └──────────────────────────────────────────────────────────┘
 ```
+
+The semantic cache's unit matches the granularity table below: **one entry per
+agent step**, keyed by the step's *initial* input messages and storing the
+step's *terminal* response. Intermediate `tool_use` responses are never cached
+— replaying one would re-run tools for marginal savings. A hit therefore
+short-circuits the entire LLM ⇄ tool loop, not just one call.
 
 | Layer | Granularity | Opt-in | Correctness risk | Typical savings |
 |---|---|---|---|---|
@@ -121,7 +130,7 @@ Structural hash catches changes that shouldn't share cache entries (a new tool-u
 
 ### Correctness rules
 
-1. **`agent_version` change invalidates everything.** Any prompt, tool-binding, or model-binding edit to the agent config (reflected in `agent_version` content hash) calls `SemanticCache.invalidate(agent_name)` at compile time before the new version serves. Cached responses against the old prompt don't leak into the new one.
+1. **`agent_version` change invalidates everything.** Any prompt, tool-binding, or model-binding edit to the agent config (reflected in `agent_version` content hash) calls `SemanticCache.invalidate(agent_name)` before the new version serves. Cached responses against the old prompt don't leak into the new one. Implementation note: because `agent_version` is part of the lookup bucket, stale entries can never hit even before the sweep runs — the version-marker invalidation executes at **run start** (the first moment the runtime touches the backend) as hygiene that evicts the dead entries and emits `cache.semantic.invalidate` for the audit trail.
 2. **`model_binding_hash` separation is exact, not similar.** Two agents with nearly-identical settings but different temperatures get different cache entries. No accidental cross-temperature sharing.
 3. **`tools_hash` is exact.** Adding or removing a tool changes the hash; the LLM's available affordances change, so cache separation must be strict.
 4. **Threshold is per-agent, not global.** A triage agent might tolerate `0.92`. A compliance-report writer won't tolerate anything under `0.99`. Default `0.95`; operator tunes based on eval evidence.

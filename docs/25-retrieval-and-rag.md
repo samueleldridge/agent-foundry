@@ -656,6 +656,15 @@ Detailed schemas and factory implementations are catalog-side. Each retriever te
 
 Same shape as tool and connection catalog entries. Discoverable via `foundry catalog list retrievers`.
 
+**Reranker artifacts resolve under the `retriever` artifact kind.** A reranker
+template lives under `<root>/retrievers/<name>/v<N>/`, shares the same 5-file
+shape, and declares `kind: reranker` in its `retriever.yaml`. There is no
+separate `reranker` `ArtifactRef` kind — `RerankerBinding.ref` resolves through
+the retriever resolution path. The `kind` field is enforced in **both
+directions** at compile time: binding a non-`reranker` artifact under a
+`reranker:` block is a `CompileError`, and binding a `kind: reranker` artifact
+as the retriever itself is equally rejected.
+
 ## Open questions
 
 1. **Corpus ingestion workflow.** RESOLVED 2026-04-25: NO ingestion primitive in v1. Document the pattern (chunk → embed → upsert) per backing store; promote to a primitive only if 3+ projects ask. Ingestion is bespoke per corpus.
