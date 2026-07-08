@@ -214,6 +214,37 @@ async def test_retry_loop_retries_configured_errors_then_succeeds() -> None:
     assert emitted.events[-1][1]["retry_count"] == 2
 
 
+@pytest.mark.unit
+async def test_failure_after_retries_reports_real_retry_count() -> None:
+    """Regression (Phase 2a review): when _run_with_retries exhausts its
+    attempts and raises, the failure-path tool.completed event must report
+    the retries that actually ran — not 0."""
+
+    async def handler(inputs: BaseModel, ctx: RunContext) -> EchoOut:
+        raise ConnectionTimeoutError("always down")
+
+    registry = _registry(handler)
+    ctx = RunContext(
+        run_id="R" * 26,
+        agent_name="tester",
+        session=Session.new(project="unit"),
+        tool_ref="local/echo@v1",
+        retry_policy=RetryPolicy(
+            max_attempts=3,
+            initial_delay_s=0.01,
+            max_delay_s=0.02,
+            retryable_errors=["ConnectionTimeoutError"],
+        ),
+    )
+    emitted = _Emitted()
+    with pytest.raises(ConnectionTimeoutError):
+        await registry.dispatch("echo", ["echo"], {"text": "x"}, ctx, emitted)
+    completed = emitted.events[-1][1]
+    assert completed["success"] is False
+    assert completed["error_category"] == "ConnectionTimeoutError"
+    assert completed["retry_count"] == 2  # 3 attempts = 2 retries
+
+
 class _FakeAccessor:
     """Minimal ConnectionAccessor double for the on_auth_error path."""
 

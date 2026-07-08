@@ -210,6 +210,14 @@ def input_hash(data: dict[str, Any]) -> str:
     ).hexdigest()[:16]
 
 
+@dataclass
+class _RetryTracker:
+    """Mutable retry counter shared between dispatch and the retry loop, so
+    tool.completed reports the real retry_count on BOTH success and failure."""
+
+    count: int = 0
+
+
 class ToolRegistry:
     """Loaded once at compile time; keyed by logical name AND (ref, version).
 
@@ -299,9 +307,9 @@ class ToolRegistry:
             )
 
         started = time.monotonic()
-        retry_count = 0
+        retries = _RetryTracker()
         try:
-            raw_output, retry_count = await self._run_with_retries(tool, inputs, ctx)
+            raw_output = await self._run_with_retries(tool, inputs, ctx, retries)
             output = self._validate_output(tool, raw_output)
         except FoundryError as exc:
             if emit is not None:
@@ -312,7 +320,7 @@ class ToolRegistry:
                     tool_version=tool.descriptor.version,
                     success=False,
                     latency_ms=int((time.monotonic() - started) * 1000),
-                    retry_count=retry_count,
+                    retry_count=retries.count,
                     error_category=type(exc).__name__,
                 )
             raise
@@ -325,22 +333,29 @@ class ToolRegistry:
                 tool_version=tool.descriptor.version,
                 success=True,
                 latency_ms=int((time.monotonic() - started) * 1000),
-                retry_count=retry_count,
+                retry_count=retries.count,
                 output_preview=_preview(output.model_dump(mode="json")),
             )
         return output
 
     async def _run_with_retries(
-        self, tool: RegisteredTool, inputs: BaseModel, ctx: RunContext
-    ) -> tuple[BaseModel, int]:
+        self,
+        tool: RegisteredTool,
+        inputs: BaseModel,
+        ctx: RunContext,
+        retries: _RetryTracker,
+    ) -> BaseModel:
         policy = ctx.retry_policy
         timeout_s = ctx.timeout_s if ctx.timeout_s is not None else tool.timeout_s
         attempt = 0
         auth_retry_used = False
         while True:
             attempt += 1
+            # Recorded BEFORE the attempt so the failure path reports how many
+            # retries actually ran (a raise after N retries must not report 0).
+            retries.count = attempt - 1
             try:
-                return await self._one_attempt(tool, inputs, ctx, timeout_s), attempt - 1
+                return await self._one_attempt(tool, inputs, ctx, timeout_s)
             except ConnectionAuthError:
                 # on_auth_error refresh: evict + rebuild via the accessor,
                 # retry the handler ONCE. A second 401 propagates.
