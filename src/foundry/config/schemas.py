@@ -494,9 +494,10 @@ class EvalSpec(BaseModel):
 
     name: str
     description: str = ""
-    scope: Literal["tool", "agent", "project", "connection"]
+    scope: Literal["tool", "agent", "project", "connection", "retriever"]
     """'connection' scope is the shape of a connection's health.yaml
-    (docs/23 § Health checks)."""
+    (docs/23 § Health checks); 'retriever' the shape of a retriever
+    template's health.yaml (docs/25 § Catalog template details)."""
     target: str
     cases: list[EvalCase] = Field(min_length=1)
     scorers: list[ScorerConfig] = Field(min_length=1)

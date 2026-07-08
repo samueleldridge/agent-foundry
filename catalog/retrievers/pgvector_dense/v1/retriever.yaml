@@ -1,0 +1,19 @@
+name: pgvector_dense
+version: v1
+description: |
+  Dense retrieval over a Postgres+pgvector table: embed the query with the
+  configured embedder_binding, then ANN-search the bound pgvector connection
+  (`embedding <=> $query` cosine ordering). The compile-time dimension check
+  validates the embedder against the connection's embedding_dimensions.
+kind: dense
+config_schema: schemas.py::PgVectorDenseConfig
+factory: factory.py::build_retriever
+connections_required:
+  - slot: dense_store
+    accepts: [catalog/pgvector]
+    description: pgvector-enabled Postgres holding the document corpus.
+health_check: health.yaml
+tags: [retrieval, dense, pgvector]
+author: foundry-team
+created_at: 2026-07-08T00:00:00Z
+schema_version: 1

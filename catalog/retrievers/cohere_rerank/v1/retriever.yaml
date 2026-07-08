@@ -1,0 +1,20 @@
+name: cohere_rerank
+version: v1
+description: |
+  Cross-encoder rerank stage over the Cohere Rerank API. Binds the
+  catalog/cohere_rerank CONNECTION (same name, different artifact kind) for
+  transport + auth; the rerank model is read from the connection's pinned
+  config. Reorders + truncates only — never introduces documents. Emits a
+  `rerank` event with cost_estimate_usd always populated.
+kind: reranker
+config_schema: schemas.py::CohereRerankStageConfig
+factory: factory.py::build_reranker
+connections_required:
+  - slot: cohere
+    accepts: [catalog/cohere_rerank]
+    description: Authenticated Cohere API connection (pins the rerank model).
+health_check: health.yaml
+tags: [retrieval, rerank, cohere]
+author: foundry-team
+created_at: 2026-07-08T00:00:00Z
+schema_version: 1

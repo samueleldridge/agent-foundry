@@ -1,0 +1,18 @@
+name: hybrid_rrf
+version: v1
+description: |
+  Hybrid retrieval: a dense sub-retriever and a sparse sub-retriever run in
+  parallel and merge via Reciprocal Rank Fusion (score = sum of 1/(k+rank),
+  k=60 by default). One failed branch degrades to the other with a warning
+  event; both failing raises RetrievalError. Sub-retrievers are declared in
+  config as {ref, version, config, connection_bindings} and are prepared with
+  the full compile-time checks (slot wiring, dimension match).
+kind: hybrid
+config_schema: schemas.py::HybridRRFConfig
+factory: factory.py::build_retriever
+connections_required: []
+health_check: health.yaml
+tags: [retrieval, hybrid, rrf]
+author: foundry-team
+created_at: 2026-07-08T00:00:00Z
+schema_version: 1
