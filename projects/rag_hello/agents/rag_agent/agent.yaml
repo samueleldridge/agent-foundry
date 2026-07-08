@@ -1,0 +1,53 @@
+name: rag_agent
+description: Answers questions strictly from the retrieved knowledge-base context, citing document ids.
+model_binding:
+  provider: anthropic
+  model: claude-haiku-4-5
+  settings:
+    max_tokens: 512
+    temperature: 0.0
+prompt:
+  version: v1
+  path: prompts/v1.md
+output:
+  schema: output_schema.py::Answer
+tools: [search_docs]
+iteration_limit: 4
+state_visibility:
+  read: [query]
+  write: [answer]
+semantic_cache:
+  embedder_binding:
+    provider: voyage
+    model: voyage-3
+  similarity_threshold: 0.95
+  ttl_s: 3600
+  scope: agent
+  backend: in_process
+retrievers:
+  - slot: knowledge_base
+    ref: catalog/hybrid_rrf
+    version: v1
+    top_k: 8
+    config:
+      dense:
+        ref: local/docs_dense
+        version: v1
+        config:
+          corpus_path: corpus.json
+          dimensions: 1024
+          embedder_binding:
+            provider: voyage
+            model: voyage-3
+      sparse:
+        ref: local/docs_sparse
+        version: v1
+        config:
+          corpus_path: corpus.json
+      rrf_k: 60
+    reranker:
+      ref: catalog/cohere_rerank
+      version: v1
+      connection_bindings:
+        cohere: cohere_api
+      top_k: 3

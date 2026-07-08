@@ -1,0 +1,19 @@
+name: search_docs
+version: v1
+description: |
+  Search the project knowledge base. Runs the agent's `knowledge_base`
+  retriever (hybrid dense+sparse with RRF, then rerank) and returns the top
+  documents. Retrieval over a static corpus is idempotent on the cache-TTL
+  timescale, so results are cached (docs/24 § When to cache a tool).
+input_schema: schemas.py::SearchIn
+output_schema: schemas.py::SearchOut
+handler: handler.py::handle
+timeout_s: 30.0
+cacheable: true
+cache_ttl_s: 300
+cache_scope: project
+tags: [retrieval, rag]
+standalone_eval: eval.yaml
+author: foundry-team
+created_at: 2026-07-08T00:00:00Z
+schema_version: 1

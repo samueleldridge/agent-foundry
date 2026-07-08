@@ -1,0 +1,32 @@
+[
+  {
+    "id": "FR-001",
+    "text": "Paris is the capital of France. The city sits on the Seine and has been the seat of French government since the 10th century.",
+    "source": "world-atlas"
+  },
+  {
+    "id": "JP-001",
+    "text": "Tokyo is the capital of Japan. Greater Tokyo is the most populous metropolitan area in the world.",
+    "source": "world-atlas"
+  },
+  {
+    "id": "AU-001",
+    "text": "Canberra is the capital of Australia. It was purpose-built as a compromise between Sydney and Melbourne.",
+    "source": "world-atlas"
+  },
+  {
+    "id": "BR-001",
+    "text": "Brasilia is the capital of Brazil. The planned city replaced Rio de Janeiro as capital in 1960.",
+    "source": "world-atlas"
+  },
+  {
+    "id": "CA-001",
+    "text": "Ottawa is the capital of Canada. Queen Victoria selected it in 1857, partly for its distance from the American border.",
+    "source": "world-atlas"
+  },
+  {
+    "id": "KE-001",
+    "text": "Nairobi is the capital of Kenya. It grew from a rail depot on the Uganda Railway into East Africa's largest city.",
+    "source": "world-atlas"
+  }
+]

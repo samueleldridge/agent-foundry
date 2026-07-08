@@ -1,0 +1,23 @@
+name: search_docs_v1_eval
+description: The knowledge-base search returns relevant documents for known queries.
+scope: tool
+target: local/search_docs@v1
+cases:
+  - id: semantic_query
+    input: {query: "what is the capital of France?"}
+    expected:
+      top_document_id: FR-001
+  - id: exact_id_query
+    input: {query: "FR-001"}
+    expected:
+      top_document_id: FR-001
+  - id: paraphrase_query
+    input: {query: "seat of government of Japan"}
+    expected:
+      top_document_id: JP-001
+scorers:
+  - kind: exact
+    name: top_document_check
+threshold: 0.9
+deterministic: false
+schema_version: 1

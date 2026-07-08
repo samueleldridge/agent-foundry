@@ -1,0 +1,15 @@
+name: docs_sparse_v1_health
+description: An exact-id query must return the matching corpus document.
+scope: retriever
+target: local/docs_sparse@v1
+cases:
+  - id: exact_id_lookup
+    input: {query: "FR-001", top_k: 1}
+    expected:
+      min_documents: 1
+scorers:
+  - kind: exact
+    name: min_documents_check
+threshold: 1.0
+deterministic: false
+schema_version: 1

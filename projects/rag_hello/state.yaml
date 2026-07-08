@@ -1,0 +1,12 @@
+# State schema for the rag_hello system.
+schema:
+  query:
+    type: str
+    description: The user's question (from run input).
+  answer:
+    type: str
+    description: The grounded answer (agent output).
+visibility:
+  rag_agent:
+    read: [query]
+    write: [answer]

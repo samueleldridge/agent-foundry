@@ -1,0 +1,26 @@
+# rag_hello — the Phase 2b example system.
+# One agent answering questions from a local corpus through a hybrid
+# (dense + sparse, RRF) retriever with a Cohere rerank stage, a semantic
+# cache over the whole agent step, and a cacheable retrieval tool.
+# Everything runs on in_process backends — no external infra beyond the
+# embedder + reranker + LLM APIs.
+name: rag_hello
+description: Answers questions from a bundled knowledge corpus via hybrid retrieval + rerank; demonstrates semantic caching and tool-result caching end-to-end.
+agents: [rag_agent]
+state: state.yaml
+flow:
+  type: single
+  agent: rag_agent
+tools:
+  search_docs:
+    ref: local/search_docs
+    version: v1
+connections:
+  cohere_api:
+    ref: catalog/cohere_rerank
+    version: v1
+    credentials_ref:
+      kind: env
+      value: COHERE_API_KEY
+guardrails:
+  max_iterations: 5
