@@ -1,7 +1,8 @@
-"""Retriever + Reranker protocols — Phase 1 type stubs.
+"""Retriever + Reranker protocols and RetrievedDocument (docs/10, docs/25).
 
-Concrete retrievers land in Phase 2b. Phase 1 ships protocol shapes so the
-public ``core`` re-export is stable. See docs/10 § Retrieval primitives.
+Concrete retrievers/rerankers live in ``foundry.retrieval``; catalog/project
+retriever factories build against these protocols. Tool handlers reach
+retrievers via ``ctx.retrievers`` (the ``RetrieverAccessor``).
 """
 
 from __future__ import annotations
@@ -47,4 +48,12 @@ class Reranker(Protocol):
     ) -> list[RetrievedDocument]: ...
 
 
-__all__ = ["Reranker", "RetrievedDocument", "Retriever"]
+@runtime_checkable
+class RetrieverAccessor(Protocol):
+    """Slot-name → Retriever, parallel to ``ctx.connections``
+    (docs/25 § RetrieverBinding). Unknown slot raises ``RetrievalError``."""
+
+    def get(self, slot: str) -> Retriever: ...
+
+
+__all__ = ["Reranker", "RetrievedDocument", "Retriever", "RetrieverAccessor"]

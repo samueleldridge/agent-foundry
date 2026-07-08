@@ -1,10 +1,12 @@
 """Tool protocol, registry, and the dispatch path (docs/20 § ToolRegistry).
 
 ``ToolRegistry.dispatch`` is the single entry point every tool call flows
-through: allowlist check → resolution → input validation → handler with
-retry + timeout → output validation, with structured ``tool.started`` /
-``tool.completed`` events at each boundary. Cache lookup/store steps are
-deliberately absent — tool-result caching lands in Phase 2b.
+through: allowlist check → resolution → input validation → result-cache
+lookup (opt-in per tool, docs/24 § Layer 3) → handler with retry + timeout →
+output validation → result-cache store, with structured ``tool.started`` /
+``tool.completed`` events around every ACTUAL handler invocation (cache hits
+short-circuit before ``tool.started`` so tool_calls.jsonl counts real runs;
+the hit itself is audited via ``cache.tool.hit``).
 
 Concrete tool handlers live outside ``src/foundry`` (catalog/ or
 projects/<name>/tools/) and are loaded via ``foundry.catalog.loader``; this
@@ -26,8 +28,10 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from foundry.core.cache import CacheScope, ResultCache, scoped_input_hash
 from foundry.core.connection import ConnectionAccessor
 from foundry.core.errors import (
+    CacheError,
     ConnectionAuthError,
     FoundryError,
     ProviderError,
@@ -42,7 +46,15 @@ from foundry.core.errors import (
 from foundry.core.errors import (
     ConnectionError as FoundryConnectionError,
 )
-from foundry.core.events import ToolCompleted, ToolStarted
+from foundry.core.events import (
+    ToolCacheHit,
+    ToolCacheMiss,
+    ToolCacheStore,
+    ToolCompleted,
+    ToolStarted,
+    WarningEvent,
+)
+from foundry.core.retrieval import RetrieverAccessor
 from foundry.core.session import Session
 
 
@@ -103,6 +115,9 @@ class RunContext(BaseModel):
     connections: ConnectionAccessor | None = None
     """Slot-name → Connection accessor. None only for tools that declare no
     connection slots (accessing a slot then raises at the accessor layer)."""
+    retrievers: RetrieverAccessor | None = None
+    """Slot-name → Retriever accessor (docs/25 § RetrieverBinding). None when
+    the agent declares no retrievers."""
 
 
 class BaseTool:
@@ -172,6 +187,10 @@ class RegisteredTool:
     """True when any bound connection's refresh mode is on_auth_error: a
     ConnectionAuthError evicts + rebuilds via the accessor and the handler is
     retried once (docs/23 § Refresh)."""
+    cacheable: bool = False
+    """Result caching opt-in, from ToolSpec.cacheable (docs/24 § Layer 3)."""
+    cache_ttl_s: int | None = None
+    cache_scope: CacheScope = "project"
 
     @property
     def name(self) -> str:
@@ -296,6 +315,17 @@ class ToolRegistry:
             ) from exc
 
         hashed = input_hash(raw_input)
+
+        # Tool-result cache (docs/24 § Layer 3): exact-match lookup BEFORE the
+        # tool.started event, so tool_calls.jsonl keeps meaning "the handler
+        # actually ran". Cache errors fail open (warning + run the handler).
+        result_cache = ctx.session.cache.tool_result
+        use_cache = tool.cacheable and tool.cache_ttl_s is not None
+        if use_cache and result_cache is not None:
+            cached = await self._cache_lookup(tool, result_cache, hashed, ctx, emit)
+            if cached is not None:
+                return cached
+
         if emit is not None:
             emit(
                 ToolStarted,
@@ -336,7 +366,112 @@ class ToolRegistry:
                 retry_count=retries.count,
                 output_preview=_preview(output.model_dump(mode="json")),
             )
+        if use_cache and result_cache is not None:
+            await self._cache_store(tool, result_cache, hashed, output, ctx, emit)
         return output
+
+    async def _cache_lookup(
+        self,
+        tool: RegisteredTool,
+        cache: ResultCache,
+        hashed: str,
+        ctx: RunContext,
+        emit: EmitFn | None,
+    ) -> BaseModel | None:
+        key = scoped_input_hash(
+            tool.cache_scope, ctx.session.project, ctx.agent_name, hashed
+        )
+        try:
+            hit = await cache.lookup(
+                tool.descriptor.ref, tool.descriptor.version, key
+            )
+        except CacheError as exc:
+            if emit is not None:
+                emit(
+                    WarningEvent,
+                    agent_name=ctx.agent_name,
+                    category="cache.tool.error",
+                    message=f"tool-result cache lookup failed for "
+                    f"{tool.name!r}; running the handler (fail-open): {exc}",
+                    error_class=type(exc).__name__,
+                )
+            return None
+        if hit is None:
+            if emit is not None:
+                emit(
+                    ToolCacheMiss,
+                    agent_name=ctx.agent_name,
+                    tool_ref=tool.descriptor.ref,
+                    tool_version=tool.descriptor.version,
+                )
+            return None
+        try:
+            output = tool.output_schema.model_validate(hit.output)
+        except ValidationError as exc:
+            # Corrupted / schema-drifted entry: treat as a miss; the handler
+            # runs and its store overwrites the bad entry (docs/24 § Failure
+            # modes: CacheCorruptedEntry → eviction + miss + warning).
+            if emit is not None:
+                emit(
+                    WarningEvent,
+                    agent_name=ctx.agent_name,
+                    category="cache.tool.corrupted_entry",
+                    message=f"cached output for tool {tool.name!r} failed "
+                    f"validation against {tool.output_schema.__name__}; "
+                    "treated as a miss",
+                    error_class=type(exc).__name__,
+                )
+            return None
+        if emit is not None:
+            emit(
+                ToolCacheHit,
+                agent_name=ctx.agent_name,
+                tool_ref=tool.descriptor.ref,
+                tool_version=tool.descriptor.version,
+                cached_at=hit.cached_at,
+            )
+        return output
+
+    async def _cache_store(
+        self,
+        tool: RegisteredTool,
+        cache: ResultCache,
+        hashed: str,
+        output: BaseModel,
+        ctx: RunContext,
+        emit: EmitFn | None,
+    ) -> None:
+        assert tool.cache_ttl_s is not None  # guarded by the caller
+        key = scoped_input_hash(
+            tool.cache_scope, ctx.session.project, ctx.agent_name, hashed
+        )
+        try:
+            await cache.store(
+                tool.descriptor.ref,
+                tool.descriptor.version,
+                key,
+                output,
+                tool.cache_ttl_s,
+            )
+        except CacheError as exc:
+            if emit is not None:
+                emit(
+                    WarningEvent,
+                    agent_name=ctx.agent_name,
+                    category="cache.tool.error",
+                    message=f"tool-result cache store failed for "
+                    f"{tool.name!r}; result NOT cached (fail-open): {exc}",
+                    error_class=type(exc).__name__,
+                )
+            return
+        if emit is not None:
+            emit(
+                ToolCacheStore,
+                agent_name=ctx.agent_name,
+                tool_ref=tool.descriptor.ref,
+                tool_version=tool.descriptor.version,
+                ttl_s=tool.cache_ttl_s,
+            )
 
     async def _run_with_retries(
         self,

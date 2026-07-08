@@ -17,8 +17,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
+from foundry.core.cache import CacheBundle
 from foundry.core.errors import CostBudgetExceeded
 from foundry.core.types import RunId
 
@@ -144,6 +145,10 @@ class Session(BaseModel):
     cancel_token: CancelToken
     checkpointer: CheckpointerHandle
     cost_budget: CostBudget | None = None
+    cache: CacheBundle = Field(default_factory=CacheBundle)
+    """Session-scoped cache accessor (docs/10 § CacheAccessor on Session).
+    Defaults to an empty bundle (both layers None) when caching isn't
+    configured — consumers never construct caches directly."""
 
     @classmethod
     def new(
@@ -156,6 +161,7 @@ class Session(BaseModel):
         logger: Any = None,
         system_version: str = "",
         pin_set_hash: str = "",
+        cache: CacheBundle | None = None,
     ) -> Session:
         return cls(
             run_id=run_id or RunId.new(),
@@ -167,6 +173,7 @@ class Session(BaseModel):
             cancel_token=CancelToken(),
             checkpointer=checkpointer or NoOpCheckpointer(),
             cost_budget=cost_budget,
+            cache=cache or CacheBundle(),
         )
 
     @asynccontextmanager

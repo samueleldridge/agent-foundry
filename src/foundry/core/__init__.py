@@ -9,10 +9,14 @@ from __future__ import annotations
 from foundry.core.agent import Agent, AgentResult, BaseAgent, LifecycleHooks
 from foundry.core.cache import (
     CacheAccessor,
+    CacheBundle,
+    CachedToolResult,
+    CacheScope,
     ResultCache,
     SemanticCache,
     SemanticCacheHit,
     SemanticCacheKey,
+    scoped_input_hash,
 )
 from foundry.core.connection import (
     AuthScheme,
@@ -77,6 +81,8 @@ from foundry.core.errors import (
     ProviderTimeoutError,
     ProviderUnexpectedError,
     RefResolutionError,
+    RerankError,
+    RetrievalError,
     RollbackError,
     RunCancelled,
     StateVisibilityError,
@@ -119,12 +125,16 @@ from foundry.core.events import (
     RunFailed,
     RunStarted,
     SemanticCacheHitEvent,
+    SemanticCacheInvalidate,
     SemanticCacheMiss,
     SemanticCacheStore,
     StateTransition,
     ToolCacheHit,
+    ToolCacheMiss,
+    ToolCacheStore,
     ToolCompleted,
     ToolStarted,
+    WarningEvent,
 )
 from foundry.core.function_node import BaseFunctionNode, FunctionNode
 from foundry.core.memory import (
@@ -152,7 +162,12 @@ from foundry.core.model import (
     ToolUseBlockDelta,
 )
 from foundry.core.node import Node, NodeResult
-from foundry.core.retrieval import Reranker, RetrievedDocument, Retriever
+from foundry.core.retrieval import (
+    Reranker,
+    RetrievedDocument,
+    Retriever,
+    RetrieverAccessor,
+)
 from foundry.core.session import (
     CancelToken,
     CheckpointerHandle,
@@ -195,9 +210,12 @@ __all__ = [
     "BaseTool",
     "CacheAccessor",
     "CacheBackendError",
+    "CacheBundle",
     "CacheControl",
     "CacheCorruptedEntry",
     "CacheError",
+    "CacheScope",
+    "CachedToolResult",
     "CancelRun",
     "CancelToken",
     "CheckpointError",
@@ -294,15 +312,18 @@ __all__ = [
     "Reducer",
     "RefResolutionError",
     "RegisteredTool",
+    "RerankError",
     "RerankEvent",
     "Reranker",
     "ResolvedConnectionCredentials",
     "ResolvedCredentials",
     "ResultCache",
     "ResumeRun",
+    "RetrievalError",
     "RetrievalEvent",
     "RetrievedDocument",
     "Retriever",
+    "RetrieverAccessor",
     "RetryPolicy",
     "RollbackError",
     "RunCancelled",
@@ -318,6 +339,7 @@ __all__ = [
     "SemanticCache",
     "SemanticCacheHit",
     "SemanticCacheHitEvent",
+    "SemanticCacheInvalidate",
     "SemanticCacheKey",
     "SemanticCacheMiss",
     "SemanticCacheStore",
@@ -333,6 +355,8 @@ __all__ = [
     # tool
     "Tool",
     "ToolCacheHit",
+    "ToolCacheMiss",
+    "ToolCacheStore",
     "ToolCompleted",
     "ToolDescriptor",
     "ToolError",
@@ -348,6 +372,8 @@ __all__ = [
     "ToolUseBlockDelta",
     "UnknownPatternError",
     "VersioningError",
+    "WarningEvent",
     "apply_reducer",
+    "scoped_input_hash",
     "validate_handler_signature",
 ]

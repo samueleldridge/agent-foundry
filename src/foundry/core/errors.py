@@ -248,6 +248,19 @@ class CacheCorruptedEntry(CacheError):
     pass
 
 
+# --- Retrieval ----------------------------------------------------------------
+
+
+class RetrievalError(FoundryError):
+    """A retriever failed at call time (backing store error, both hybrid
+    branches down, unknown slot, ...)."""
+
+
+class RerankError(FoundryError):
+    """A reranker call failed. Pipelines treat this as fall-through-with-
+    warning by default (docs/25 § Failure modes)."""
+
+
 # --- Memory -----------------------------------------------------------------
 
 
@@ -342,6 +355,8 @@ __all__ = [
     "ProviderTimeoutError",
     "ProviderUnexpectedError",
     "RefResolutionError",
+    "RerankError",
+    "RetrievalError",
     "RollbackError",
     "RunCancelled",
     "StateVisibilityError",

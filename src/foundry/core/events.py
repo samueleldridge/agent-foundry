@@ -154,12 +154,52 @@ class SemanticCacheStore(_RunEventBase):
     ttl_s: int
 
 
+class SemanticCacheInvalidate(_RunEventBase):
+    """Emitted when an agent-version change (prompt / tool-binding / model-
+    binding edit) evicts that agent's entries (docs/24 correctness rule 1)."""
+
+    event: Literal["cache.semantic.invalidate"] = "cache.semantic.invalidate"
+    agent_name: str
+    reason: str = "agent_version_changed"
+    previous_version: str | None = None
+    current_version: str | None = None
+
+
 class ToolCacheHit(_RunEventBase):
     event: Literal["cache.tool.hit"] = "cache.tool.hit"
     agent_name: str
     tool_ref: str
     tool_version: str
     cached_at: datetime
+
+
+class ToolCacheMiss(_RunEventBase):
+    event: Literal["cache.tool.miss"] = "cache.tool.miss"
+    agent_name: str
+    tool_ref: str
+    tool_version: str
+
+
+class ToolCacheStore(_RunEventBase):
+    event: Literal["cache.tool.store"] = "cache.tool.store"
+    agent_name: str
+    tool_ref: str
+    tool_version: str
+    ttl_s: int
+
+
+class WarningEvent(_RunEventBase):
+    """Loud-but-non-fatal degradation: cache fail-open, hybrid branch down,
+    reranker fall-through. The run continues; the audit trail records why it
+    took the degraded path."""
+
+    event: Literal["warning"] = "warning"
+    agent_name: str
+    category: str
+    """Dotted category, e.g. 'cache.semantic.error', 'retrieval.branch_failed',
+    'rerank.fallthrough'."""
+    message: str
+    error_class: str | None = None
 
 
 class RetrievalEvent(_RunEventBase):
@@ -170,6 +210,10 @@ class RetrievalEvent(_RunEventBase):
     top_k: int
     returned: int
     latency_ms: int = 0
+    branch_latency_ms: dict[str, int] = Field(default_factory=dict)
+    """Hybrid only: per-branch latencies ('dense'/'sparse'). Both non-zero and
+    overlapping in wall time proves the branches ran in parallel."""
+    branches_failed: list[str] = Field(default_factory=list)
 
 
 class RerankEvent(_RunEventBase):
@@ -180,6 +224,8 @@ class RerankEvent(_RunEventBase):
     top_k: int | None = None
     latency_ms: int = 0
     cost_estimate_usd: Decimal | None = None
+    before_ids: list[str] = Field(default_factory=list)
+    after_ids: list[str] = Field(default_factory=list)
 
 
 class MemoryRead(_RunEventBase):
@@ -276,7 +322,11 @@ RunEvent = Annotated[
     | SemanticCacheHitEvent
     | SemanticCacheMiss
     | SemanticCacheStore
+    | SemanticCacheInvalidate
     | ToolCacheHit
+    | ToolCacheMiss
+    | ToolCacheStore
+    | WarningEvent
     | RetrievalEvent
     | RerankEvent
     | MemoryRead
@@ -364,10 +414,14 @@ __all__ = [
     "RunFailed",
     "RunStarted",
     "SemanticCacheHitEvent",
+    "SemanticCacheInvalidate",
     "SemanticCacheMiss",
     "SemanticCacheStore",
     "StateTransition",
     "ToolCacheHit",
+    "ToolCacheMiss",
+    "ToolCacheStore",
     "ToolCompleted",
     "ToolStarted",
+    "WarningEvent",
 ]
