@@ -6,6 +6,9 @@ This module owns the on-disk contract for versioned artifacts:
   README.md (docs/20 § The 5-file shape);
 - the 5-file connection shape — connection.yaml, auth.py, schemas.py,
   health.yaml, README.md (docs/23 § build_connection);
+- the 5-file retriever shape — retriever.yaml, factory.py, schemas.py,
+  health.yaml, README.md (docs/25 § Catalog template details; reranker
+  artifacts share it with ``kind: reranker``);
 - ``versions.json`` metadata per artifact (docs/12 § VersionsMetadata);
 - ``index.yaml`` per catalog root.
 
@@ -37,10 +40,12 @@ from foundry.config import (
     ArtifactRef,
     ConnectionSpec,
     FoundryRoots,
+    RetrieverSpec,
     ToolSpec,
     list_versions,
     load_config_model,
     load_connection_spec,
+    load_retriever_spec,
     load_tool_spec,
 )
 from foundry.core.errors import (
@@ -54,6 +59,13 @@ _TOOL_FILES = ("tool.yaml", "handler.py", "schemas.py", "eval.yaml", "README.md"
 _CONNECTION_FILES = (
     "connection.yaml",
     "auth.py",
+    "schemas.py",
+    "health.yaml",
+    "README.md",
+)
+_RETRIEVER_FILES = (
+    "retriever.yaml",
+    "factory.py",
     "schemas.py",
     "health.yaml",
     "README.md",
@@ -102,12 +114,16 @@ def load_versions_metadata(path: Path) -> VersionsMetadata:
 
 
 def catalog_entries(roots: FoundryRoots) -> list[CatalogEntry]:
-    """Every tool + connection visible across the catalog roots, with the
-    versions each has on disk (exit gate: the index lists both kinds)."""
+    """Every tool + connection + retriever visible across the catalog roots,
+    with the versions each has on disk."""
     entries: list[CatalogEntry] = []
     seen: set[tuple[str, str]] = set()
     for root in roots.catalog_roots:
-        for kind, subdir in (("tool", "tools"), ("connection", "connections")):
+        for kind, subdir in (
+            ("tool", "tools"),
+            ("connection", "connections"),
+            ("retriever", "retrievers"),
+        ):
             base = root / subdir
             if not base.is_dir():
                 continue
@@ -342,12 +358,69 @@ def load_connection_version(
     )
 
 
+# --- versioned retriever loading ---------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LoadedRetrieverVersion:
+    ref: ArtifactRef
+    directory: Path
+    spec: RetrieverSpec
+    config_model: type[BaseModel]
+    factory: Any
+    """The factory.py callable (async, returns a Retriever or Reranker)."""
+    health_check_path: Path | None
+
+
+def load_retriever_version(
+    ref: ArtifactRef, roots: FoundryRoots
+) -> LoadedRetrieverVersion:
+    """Resolve + load one pinned retriever/reranker version — the SAME
+    resolution code path as tools and connections (ArtifactRef.resolve_path)."""
+    version_dir = ref.resolve_path(roots)
+    _enforce_file_shape(version_dir, _RETRIEVER_FILES, kind="retriever")
+    spec = load_retriever_spec(version_dir / "retriever.yaml")
+    if spec.name != ref.name or spec.version != ref.version:
+        raise CompileError(
+            f"retriever.yaml at {version_dir} declares "
+            f"{spec.name!r}@{spec.version} but the directory is "
+            f"{ref.name!r}@{ref.version}",
+            context={
+                "version_dir": str(version_dir),
+                "declared": f"{spec.name}@{spec.version}",
+                "expected": f"{ref.name}@{ref.version}",
+            },
+        )
+    config_model = _resolve_model(version_dir, spec.config_schema, role="config_schema")
+    with _sibling_schemas_alias(version_dir):
+        factory = _resolve_symbol(version_dir, spec.factory, role="factory")
+    if not callable(factory):
+        raise CompileError(
+            f"retriever factory {spec.factory!r} in {version_dir} is not "
+            "callable",
+            context={"version_dir": str(version_dir), "factory": spec.factory},
+        )
+    health_path: Path | None = None
+    if spec.health_check is not None:
+        health_path = version_dir / spec.health_check
+    return LoadedRetrieverVersion(
+        ref=ref,
+        directory=version_dir,
+        spec=spec,
+        config_model=config_model,
+        factory=factory,
+        health_check_path=health_path,
+    )
+
+
 __all__ = [
     "LoadedConnectionVersion",
+    "LoadedRetrieverVersion",
     "LoadedToolVersion",
     "catalog_entries",
     "load_catalog_index",
     "load_connection_version",
+    "load_retriever_version",
     "load_tool_version",
     "load_versions_metadata",
 ]

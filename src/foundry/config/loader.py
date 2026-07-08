@@ -27,6 +27,7 @@ from foundry.config.schemas import (
     ConnectionSpec,
     EvalSpec,
     FunctionNodeSpec,
+    RetrieverSpec,
     StateSpec,
     SystemSpec,
     ToolSpec,
@@ -277,6 +278,10 @@ def load_connection_spec(path: Path) -> ConnectionSpec:
     return _load(ConnectionSpec, path)
 
 
+def load_retriever_spec(path: Path) -> RetrieverSpec:
+    return _load(RetrieverSpec, path)
+
+
 def load_eval_spec(path: Path) -> EvalSpec:
     return _load(EvalSpec, path)
 
@@ -343,6 +348,7 @@ __all__ = [
     "load_eval_spec",
     "load_function_node_spec",
     "load_project",
+    "load_retriever_spec",
     "load_state_spec",
     "load_system_spec",
     "load_tool_spec",

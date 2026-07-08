@@ -1,11 +1,11 @@
 """ArtifactRef parsing and resolution (docs/12 § ArtifactRef parsing).
 
-Phase 2a handles the ``tool`` and ``connection`` kinds; ``retriever`` and
-``agent_template`` kinds are added in Phase 2b. Tools and connections share
-one code path: the kind selects the subdirectory (``tools/`` vs
-``connections/``), everything else — scope, roots walk, version discovery,
-error reporting — is identical. That shared path is the exit-gate property
-"catalog tool ref AND connection ref resolve through the same code path".
+All four artifact kinds — ``tool``, ``connection``, ``retriever`` (which
+also covers reranker artifacts, docs/25), ``agent_template`` — share one
+code path: the kind selects the subdirectory, everything else — scope,
+roots walk, version discovery, error reporting — is identical. That shared
+path is the Phase 2a/2b exit-gate property "catalog refs of every kind
+resolve through the same code path".
 """
 
 from __future__ import annotations
@@ -22,9 +22,14 @@ from foundry.core.errors import RefResolutionError
 
 _logger = logging.getLogger("foundry.config.refs")
 
-ArtifactKind = Literal["tool", "connection"]
+ArtifactKind = Literal["tool", "connection", "retriever", "agent_template"]
 
-_KIND_SUBDIR: dict[str, str] = {"tool": "tools", "connection": "connections"}
+_KIND_SUBDIR: dict[str, str] = {
+    "tool": "tools",
+    "connection": "connections",
+    "retriever": "retrievers",
+    "agent_template": "agent_templates",
+}
 
 _REF_RE = re.compile(
     r"^(?P<scope>catalog|local)/(?P<name>[a-z][a-z0-9_-]{0,63})"

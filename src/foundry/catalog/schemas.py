@@ -23,6 +23,8 @@ class CatalogIndex(BaseModel):
     """Tool directory names under <root>/tools/."""
     connections: list[str] = Field(default_factory=list)
     """Connection directory names under <root>/connections/."""
+    retrievers: list[str] = Field(default_factory=list)
+    """Retriever (and reranker) directory names under <root>/retrievers/."""
     agent_templates: list[str] = Field(default_factory=list)
     """Optional feature; unused until agent templates land."""
 
@@ -61,7 +63,7 @@ class CatalogEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    kind: Literal["tool", "connection"]
+    kind: Literal["tool", "connection", "retriever"]
     versions: list[str]
     latest: str | None = None
     """Contents of the LATEST pointer file, when present."""
