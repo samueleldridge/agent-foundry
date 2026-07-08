@@ -59,6 +59,15 @@ class RunArtifactWriter:
         self._last_llm_started: LLMCallStarted | None = None
         self._last_tool_started: ToolStarted | None = None
 
+    def next_sequence(self) -> int:
+        """The next RunEvent sequence number for this run: a resumed run
+        appends to events.jsonl and continues the sequence where the killed
+        process stopped (event-stream invariant 1 across processes)."""
+        if not self._events_path.exists():
+            return 0
+        with self._events_path.open() as fh:
+            return sum(1 for _ in fh)
+
     def record_event(self, event: BaseModel) -> None:
         with self._events_path.open("a") as fh:
             fh.write(event.model_dump_json() + "\n")
