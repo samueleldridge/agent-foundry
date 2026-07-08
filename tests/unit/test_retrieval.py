@@ -55,20 +55,23 @@ class _StubRetriever:
         docs: list[RetrievedDocument],
         *,
         fail: Exception | None = None,
-        delay_s: float = 0.0,
+        rendezvous: asyncio.Barrier | None = None,
     ) -> None:
         self.name = name
         self._docs = docs
         self._fail = fail
-        self._delay_s = delay_s
+        self._rendezvous = rendezvous
         self.calls = 0
 
     async def retrieve(
         self, query: str, top_k: int = 20, filters: Any = None
     ) -> list[RetrievedDocument]:
         self.calls += 1
-        if self._delay_s:
-            await asyncio.sleep(self._delay_s)
+        if self._rendezvous is not None:
+            # Deterministic concurrency probe: this branch refuses to return
+            # until every party is in-flight simultaneously. Sequential
+            # execution deadlocks here (bounded by the test's wait_for).
+            await self._rendezvous.wait()
         if self._fail is not None:
             raise self._fail
         return self._docs[:top_k]
@@ -104,19 +107,18 @@ def test_rrf_dedupes_and_keeps_first_branch_metadata() -> None:
 
 @pytest.mark.unit
 async def test_hybrid_runs_branches_in_parallel_and_merges() -> None:
-    dense = _StubRetriever("d", [_doc("a"), _doc("b")], delay_s=0.05)
-    sparse = _StubRetriever("s", [_doc("b"), _doc("c")], delay_s=0.05)
+    # Deterministic concurrency probe (no wall-clock): each branch blocks on
+    # a 2-party barrier, so the call can only complete if BOTH branches are
+    # in-flight at the same time. A sequential regression deadlocks the first
+    # branch and the wait_for below fails the test after its bound.
+    rendezvous = asyncio.Barrier(2)
+    dense = _StubRetriever("d", [_doc("a"), _doc("b")], rendezvous=rendezvous)
+    sparse = _StubRetriever("s", [_doc("b"), _doc("c")], rendezvous=rendezvous)
     emitted = _Emitted()
     hybrid = HybridRetriever("kb", dense, sparse, emit=emitted, agent_name="t")
 
-    started = asyncio.get_event_loop().time()
-    out = await hybrid.retrieve("q", top_k=2)
-    elapsed = asyncio.get_event_loop().time() - started
-    # Parallel fan-out: ~one 0.05s delay, not two sequential ones. The bound
-    # is deliberately generous (10x one delay) so a loaded machine can't
-    # flake it while still catching sequential execution regressions by a
-    # wide margin relative to the asserted behaviour.
-    assert elapsed < 0.5
+    out = await asyncio.wait_for(hybrid.retrieve("q", top_k=2), timeout=5)
+    assert dense.calls == sparse.calls == 1
     assert [d.id for d in out] == ["b", "a"]  # RRF order, truncated to top_k
 
     event = emitted.of(RetrievalEvent)[-1]
