@@ -24,6 +24,10 @@ def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
     monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
+    # Phase 2a: hello binds a catalog connection whose credentials resolve at
+    # compile time; copies of hello under tmp_path need the repo catalog.
+    monkeypatch.setenv("HELLO_SERVICE_API_KEY", "fake-service-key-for-tests")
+    monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(HELLO_DIR.parents[1] / "catalog"))
 
 
 def _anthropic_transport(greeting: str = "Hello, world!") -> httpx.MockTransport:
