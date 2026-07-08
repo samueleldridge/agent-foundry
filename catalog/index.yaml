@@ -1,0 +1,11 @@
+# Catalog index — one per catalog root (docs/12 § CatalogIndex).
+schema_version: 1
+tools:
+  - utc_now
+  - word_count
+  - http_get_json
+connections:
+  - http_service
+  - postgres
+  - pgvector
+  - cohere_rerank

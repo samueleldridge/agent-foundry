@@ -19,6 +19,8 @@ import hashlib
 import importlib.util
 import json
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -135,8 +137,12 @@ def catalog_entries(roots: FoundryRoots) -> list[CatalogEntry]:
 
 
 def _import_module(path: Path, *, role: str) -> ModuleType:
+    # Module identity is the FILE, not the role: input_schema, output_schema,
+    # and the handler's `from schemas import ...` must all resolve to the same
+    # module object, or isinstance-based output validation would spuriously
+    # fail on classes loaded twice.
     digest = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:12]
-    module_name = f"_foundry_{role}_{digest}"
+    module_name = f"_foundry_artifact_{digest}"
     if module_name in sys.modules:
         return sys.modules[module_name]
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -159,6 +165,30 @@ def _import_module(path: Path, *, role: str) -> ModuleType:
             cause=exc if isinstance(exc, Exception) else None,
         ) from exc
     return module
+
+
+@contextmanager
+def _sibling_schemas_alias(version_dir: Path) -> Iterator[None]:
+    """Expose the version dir's schemas.py as importable ``schemas`` while a
+    sibling module (handler.py) executes.
+
+    Version directories are not packages (no __init__.py — the 5-file shape
+    is flat), so a handler cannot use relative imports. Instead it writes
+    ``from schemas import QueryIn, QueryOut`` and the loader satisfies that
+    import by aliasing the already-loaded sibling module for the duration of
+    the exec. Documented in the Phase 2a handoff as a deviation from the
+    docs/20 sketch (which showed ``from .schemas import ...``).
+    """
+    module = _import_module(version_dir / "schemas.py", role="schemas")
+    previous = sys.modules.get("schemas")
+    sys.modules["schemas"] = module
+    try:
+        yield
+    finally:
+        if previous is None:
+            sys.modules.pop("schemas", None)
+        else:
+            sys.modules["schemas"] = previous
 
 
 def _resolve_symbol(version_dir: Path, ref: str, *, role: str) -> Any:
@@ -243,7 +273,8 @@ def load_tool_version(ref: ArtifactRef, roots: FoundryRoots) -> LoadedToolVersio
     output_model = _resolve_model(
         version_dir, spec.output_schema, role="output_schema"
     )
-    handler_obj = _resolve_symbol(version_dir, spec.handler, role="handler")
+    with _sibling_schemas_alias(version_dir):
+        handler_obj = _resolve_symbol(version_dir, spec.handler, role="handler")
     handler = validate_handler_signature(
         handler_obj, where=f"{version_dir / spec.handler.split('::')[0]}"
     )

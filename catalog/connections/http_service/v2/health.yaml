@@ -1,0 +1,15 @@
+name: http_service_v2_health
+description: Trivial GET against the configured health_path.
+scope: connection
+target: catalog/http_service@v2
+cases:
+  - id: ping
+    input: {}
+    expected:
+      ok: true
+scorers:
+  - kind: exact
+    name: ok_check
+threshold: 1.0
+deterministic: false
+schema_version: 1

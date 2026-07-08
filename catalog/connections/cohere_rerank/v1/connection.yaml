@@ -1,0 +1,21 @@
+name: cohere_rerank
+version: v1
+description: |
+  Cohere rerank API over httpx with API-key auth — the reranker connection
+  shape Phase 2b's reranker adapters bind. Config pins the rerank model;
+  the key comes from credentials.
+auth_scheme: api_key
+config_schema: schemas.py::CohereRerankConfig
+factory: auth.py::build_connection
+client_type: httpx.AsyncClient
+health_check: health.yaml
+refresh:
+  mode: on_auth_error
+pool:
+  max_concurrent: 16
+  acquire_timeout_s: 10.0
+non_sensitive_config_fields: [base_url, model, timeout_s]
+tags: [rerank, cohere]
+author: foundry-team
+created_at: 2026-07-07T00:00:00Z
+schema_version: 1

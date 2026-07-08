@@ -1,0 +1,22 @@
+name: pgvector
+version: v1
+description: |
+  PostgreSQL with the pgvector extension — the vector-store shape used by
+  Phase 2b retrievers and semantic caches. Same auth pattern as
+  catalog/postgres, plus the embedding dimensionality contract that 2b's
+  dimension-match compile check validates against.
+auth_scheme: basic_auth
+config_schema: schemas.py::PgVectorConfig
+factory: auth.py::build_connection
+client_type: asyncpg.Pool
+health_check: health.yaml
+refresh:
+  mode: on_auth_error
+pool:
+  max_concurrent: 8
+  acquire_timeout_s: 15.0
+non_sensitive_config_fields: [host, port, database, embedding_dimensions]
+tags: [database, postgres, vector]
+author: foundry-team
+created_at: 2026-07-07T00:00:00Z
+schema_version: 1

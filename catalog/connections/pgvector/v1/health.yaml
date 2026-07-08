@@ -1,0 +1,15 @@
+name: pgvector_v1_health
+description: Verify the pgvector extension is installed and reachable.
+scope: connection
+target: catalog/pgvector@v1
+cases:
+  - id: extension_present
+    input: {}
+    expected:
+      ok: true
+scorers:
+  - kind: exact
+    name: ok_check
+threshold: 1.0
+deterministic: false
+schema_version: 1

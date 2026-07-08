@@ -1,0 +1,15 @@
+name: utc_now_v1_eval
+description: Shape check — output carries a parseable ISO time.
+scope: tool
+target: catalog/utc_now@v1
+cases:
+  - id: returns_time
+    input: {}
+    expected:
+      has_fields: [iso_time, unix_ms]
+scorers:
+  - kind: user
+    name: shape_check
+threshold: 1.0
+deterministic: false
+schema_version: 1

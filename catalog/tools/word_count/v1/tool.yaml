@@ -1,0 +1,14 @@
+name: word_count
+version: v1
+description: |
+  Count words, characters, and lines in a text. Pure transformation tool
+  with no connections.
+input_schema: schemas.py::WordCountIn
+output_schema: schemas.py::WordCountOut
+handler: handler.py::handle
+timeout_s: 5.0
+tags: [text, read-only]
+standalone_eval: eval.yaml
+author: foundry-team
+created_at: 2026-07-07T00:00:00Z
+schema_version: 1

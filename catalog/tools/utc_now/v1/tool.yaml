@@ -1,0 +1,15 @@
+name: utc_now
+version: v1
+description: |
+  Return the current UTC time (ISO 8601 + unix milliseconds). Pure,
+  deterministic-shape tool with no connections; useful for timestamping
+  agent output.
+input_schema: schemas.py::UtcNowIn
+output_schema: schemas.py::UtcNowOut
+handler: handler.py::handle
+timeout_s: 5.0
+tags: [time, read-only]
+standalone_eval: eval.yaml
+author: foundry-team
+created_at: 2026-07-07T00:00:00Z
+schema_version: 1

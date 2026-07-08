@@ -1,0 +1,22 @@
+name: http_service
+version: v2
+description: |
+  Generic HTTP JSON service over httpx. v2 swaps auth to HTTP basic
+  (username + password credentials) — the auth-scheme-swap demo per
+  docs/23 § Versioning connections. Tools using the `service` slot keep
+  running unchanged.
+auth_scheme: basic_auth
+config_schema: schemas.py::HTTPServiceConfig
+factory: auth.py::build_connection
+client_type: httpx.AsyncClient
+health_check: health.yaml
+refresh:
+  mode: on_auth_error
+pool:
+  max_concurrent: 16
+  acquire_timeout_s: 10.0
+non_sensitive_config_fields: [base_url, timeout_s, health_path]
+tags: [http, generic]
+author: foundry-team
+created_at: 2026-07-07T00:00:00Z
+schema_version: 1

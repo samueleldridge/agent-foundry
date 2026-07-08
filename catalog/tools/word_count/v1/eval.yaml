@@ -1,0 +1,25 @@
+name: word_count_v1_eval
+description: Behavioural contract for word_count@v1.
+scope: tool
+target: catalog/word_count@v1
+cases:
+  - id: simple_sentence
+    input:
+      text: "hello brave new world"
+    expected:
+      words: 4
+      characters: 21
+      lines: 1
+  - id: empty
+    input:
+      text: ""
+    expected:
+      words: 0
+      characters: 0
+      lines: 0
+scorers:
+  - kind: exact
+    name: exact_match
+threshold: 1.0
+deterministic: true
+schema_version: 1

@@ -1,0 +1,16 @@
+name: http_get_json_v2_eval
+description: Contract check against a test-double http_service connection.
+scope: tool
+target: catalog/http_get_json@v2
+cases:
+  - id: get_root
+    input:
+      path: /
+    expected:
+      status_code: 200
+scorers:
+  - kind: user
+    name: status_check
+threshold: 1.0
+deterministic: false
+schema_version: 1

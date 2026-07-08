@@ -1,0 +1,24 @@
+name: http_get_json
+version: v1
+description: |
+  Issue an authenticated GET against the service bound to the `service`
+  connection slot and return the parsed JSON body. Read-only; the base URL
+  and auth live in the connection, never in tool inputs.
+input_schema: schemas.py::HttpGetIn
+output_schema: schemas.py::HttpGetOut
+handler: handler.py::handle
+timeout_s: 15.0
+retry_policy:
+  max_attempts: 2
+  backoff: exponential
+  initial_delay_s: 0.2
+  retryable_errors: [ConnectionTimeoutError]
+tags: [http, read-only]
+standalone_eval: eval.yaml
+connections_required:
+  - slot: service
+    accepts: [catalog/http_service]
+    description: The HTTP JSON service to query (base_url + auth).
+author: foundry-team
+created_at: 2026-07-07T00:00:00Z
+schema_version: 1

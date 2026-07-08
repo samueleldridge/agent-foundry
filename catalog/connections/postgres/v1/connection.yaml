@@ -1,0 +1,22 @@
+name: postgres
+version: v1
+description: |
+  PostgreSQL over asyncpg with username/password auth. Credentials resolve
+  to a JSON object {"username": ..., "password": ...}; config carries the
+  non-secret host/port/database. Requires the optional `asyncpg` package
+  at build time (structured error if missing).
+auth_scheme: basic_auth
+config_schema: schemas.py::PostgresConfig
+factory: auth.py::build_connection
+client_type: asyncpg.Pool
+health_check: health.yaml
+refresh:
+  mode: on_auth_error
+pool:
+  max_concurrent: 8
+  acquire_timeout_s: 15.0
+non_sensitive_config_fields: [host, port, database, ssl_mode]
+tags: [database, postgres]
+author: foundry-team
+created_at: 2026-07-07T00:00:00Z
+schema_version: 1
