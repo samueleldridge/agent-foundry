@@ -813,8 +813,10 @@ class EvalSpec(BaseModel):
 
     name: str
     description: str = ""
-    scope: Literal["tool", "agent", "project"]
-    """What this eval runs against. Determines loading and execution path."""
+    scope: Literal["tool", "agent", "project", "connection"]
+    """What this eval runs against. Determines loading and execution path.
+    'connection' is the shape of a connection's health.yaml (docs/23
+    § Health checks) — added as a Phase 2a erratum."""
 
     target: str
     """A ref: 'catalog/query_snowflake@v2' for tool; agent name for agent;

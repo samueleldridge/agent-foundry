@@ -158,9 +158,15 @@ Every tool version is a directory with these files. The shape is enforced by the
 ├── tool.yaml            ToolSpec (the contract)
 ├── handler.py           async def handle(inputs, ctx) -> output
 ├── schemas.py           Pydantic input + output models
-├── eval.yaml            standalone tool-level EvalSpec (optional but encouraged)
+├── eval.yaml            standalone tool-level EvalSpec (REQUIRED by the loader)
 └── README.md            what it does, when to use, edge cases, gotchas
 ```
+
+> **Erratum (Phase 2a, implemented behaviour):** the loader enforces the full
+> 5-file shape — `eval.yaml` is a REQUIRED file, not optional. A version
+> directory missing it fails at compile time. What stays a matter of
+> judgement is the eval's *quality* (case count, scorer choice), not the
+> file's presence.
 
 ### `tool.yaml`
 
@@ -737,7 +743,7 @@ Every failure emits a `tool.completed` event with `success=false` and `error_cat
 ### Contract
 
 1. **No credential leak in tool spans**: a tool whose connection auth carries an API key — the API key never appears in any emitted observability data; `ConnectionDescriptor.redacted_config` is the only connection metadata in spans.
-2. **Forbidden imports in handler scaffolds**: lint enforces no `os.environ`, `subprocess`, `eval`, `exec` in `handler.py` files unless `dangerous: true`.
+2. **Forbidden imports in handler scaffolds**: lint enforces no `os.environ`, `subprocess`, `eval`, `exec` in `handler.py` files unless `dangerous: true`. *(Deferred: this lint ships with the Phase 6 meta-tools — the meta-agent's `build_tool` scaffold path is what runs it. Phases 2a/2b load handlers without it.)*
 
 ### Integration (Phase 2 exit gate)
 
