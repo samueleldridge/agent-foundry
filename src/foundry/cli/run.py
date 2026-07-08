@@ -113,6 +113,8 @@ def execute_run(
         _print_error(exc)
         return 1
 
+    if result.final_state is not None:
+        writer.write_final_state(result.final_state)
     writer.write_metadata(
         project=compiled.project.system.name,
         status="completed",
@@ -127,8 +129,20 @@ def execute_run(
         },
     )
     logger.info("run.completed", artifact_dir=str(writer.directory))
-    print(json.dumps(result.output, indent=2, default=str))
+    print(json.dumps(_deep_jsonable(result.output), indent=2, default=str))
     return 0
+
+
+def _deep_jsonable(value: Any) -> Any:
+    from pydantic import BaseModel
+
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {k: _deep_jsonable(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_deep_jsonable(v) for v in value]
+    return value
 
 
 __all__ = ["execute_run"]

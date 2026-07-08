@@ -39,6 +39,10 @@ from foundry.storage.paths import run_dir
 def _jsonable(value: Any) -> Any:
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_jsonable(v) for v in value]
     return value
 
 
@@ -74,6 +78,11 @@ class RunArtifactWriter:
             "agent_name": event.agent_name,
             "provider": started.provider if started else None,
             "model": started.model if started else None,
+            "prompt_messages": (
+                [m.model_dump(mode="json") for m in started.prompt_messages]
+                if started is not None and started.prompt_messages is not None
+                else None
+            ),
             "token_usage": event.usage.model_dump(mode="json"),
             "cost_estimate_usd": (
                 str(event.cost_estimate_usd)
@@ -107,6 +116,13 @@ class RunArtifactWriter:
         }
         with self._tool_calls_path.open("a") as fh:
             fh.write(json.dumps(record) + "\n")
+
+    def write_final_state(self, state: dict[str, Any]) -> None:
+        """Persist the run's final state projection (final_state.json) —
+        the debug surface for memory fields + function-node pipelines."""
+        (self.directory / "final_state.json").write_text(
+            json.dumps({"state": _jsonable(state)}, indent=2, default=str) + "\n"
+        )
 
     def write_metadata(
         self,

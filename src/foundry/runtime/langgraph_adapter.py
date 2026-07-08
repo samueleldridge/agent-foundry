@@ -1,28 +1,25 @@
-"""LangGraph runtime adapter — compile + run a single-agent graph.
+"""LangGraph runtime adapter — compile + run single/sequential flows.
 
 The ONLY module (with ``_langgraph_types``) allowed to import ``langgraph`` /
-``langchain_core`` (import-boundary lint). Phase 2a scope: compile a
-``SystemSpec`` with a ``single`` flow into a one-node ``StateGraph`` whose
-node runs the agent's LLM ⇄ tool loop — model → tool call (pooled,
-authenticated connection) → tool result → model → final output.
-Checkpointers, streaming, and multi-node flows land in Phase 3; the real
-compiler (``foundry.orchestration.compiler``) also lands there — this module
+``langchain_core`` (import-boundary lint). Phase 2 scope: compile a
+``SystemSpec`` with a ``single`` flow (one agent node) or a ``sequential``
+flow (function nodes + exactly one agent node, chained) into a ``StateGraph``.
+Step execution lives in ``foundry.runtime.execution``; checkpointers,
+streaming, multi-agent flows and the real compiler
+(``foundry.orchestration.compiler``) land in Phase 3 — this module
 deliberately stays a thin adapter.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import importlib.util
 import json
 import subprocess
 import sys
-from collections.abc import Callable
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 from langgraph.graph import END, START, StateGraph
@@ -30,41 +27,30 @@ from pydantic import BaseModel, ValidationError
 
 from foundry.cache import (
     InProcessResultCache,
-    PreparedSemanticCache,
     default_result_cache_path,
-    ensure_version_marker,
     prepare_semantic_cache,
-    semantic_lookup,
-    semantic_store,
 )
 from foundry.catalog.loader import load_tool_version
 from foundry.config import (
     ArtifactRef,
     EnvSecretsProvider,
     FoundryRoots,
-    LoadedAgent,
+    LoadedFunction,
     LoadedProject,
+    SequentialFlow,
+    SingleFlow,
+    StateVisibility,
     ToolSpec,
     load_project,
 )
 from foundry.config.secrets import SecretsProvider
 from foundry.connections import (
     InProcessConnectionPool,
-    PreparedConnection,
-    SlotConnectionAccessor,
     prepare_connections,
     validate_tool_connection_wiring,
 )
 from foundry.core import (
-    AgentCompleted,
-    AgentStarted,
     CacheBundle,
-    ConnectionContext,
-    FoundryMessage,
-    LLMCallCompleted,
-    LLMCallStarted,
-    MessageRole,
-    ModelResponse,
     RegisteredTool,
     ResultCache,
     RetryPolicy,
@@ -72,84 +58,161 @@ from foundry.core import (
     RunFailed,
     RunStarted,
     Session,
-    TextBlock,
     ToolDescriptor,
     ToolRegistry,
-    ToolResultBlock,
-    ToolUseBlock,
 )
 from foundry.core.errors import (
     CompileError,
     FoundryError,
-    IterationLimitError,
     OrchestrationError,
     ProviderConfigError,
     StateVisibilityError,
-    ToolError,
 )
-from foundry.core.errors import (
-    ConnectionError as FoundryConnectionError,
-)
-from foundry.core.tool import RunContext
-from foundry.orchestration.state_scope import (
-    AgentStateView,
-    CompiledState,
-    compile_state,
-)
-from foundry.providers import ProviderAdapter, ToolSchema, resolve
+from foundry.memory import prepare_memory
+from foundry.orchestration.state_scope import CompiledState, compile_state
+from foundry.providers import resolve
 from foundry.retrieval import (
     MappingRetrieverAccessor,
-    PreparedRetriever,
     build_retriever_accessor,
     prepare_retrievers,
 )
 from foundry.runtime._langgraph_types import GraphState
-
-EventSink = Callable[[BaseModel], None]
+from foundry.runtime.compiled import (
+    CompiledFunction,
+    CompiledProject,
+    FunctionHandler,
+    RunResult,
+)
+from foundry.runtime.execution import (
+    EventEmitter,
+    EventSink,
+    RunCounters,
+    apply_delta,
+    run_agent_step,
+    run_function_step,
+    seed_state,
+)
 
 _OVERRIDABLE_SETTINGS = ("timeout_s", "retry_policy")
 
+_EXECUTABLE_FLOWS = ("single", "sequential")
+
+
+# --- flow validation ----------------------------------------------------------------
+
+
+def _flow_node_refs(flow: Any) -> list[tuple[str, str]]:
+    """Every node name a flow references, as (json_pointer, name) pairs.
+    Works across all five flow types so reference resolution is validated
+    even for patterns whose EXECUTION lands in Phase 3+."""
+    refs: list[tuple[str, str]] = []
+    if flow.type == "single":
+        refs.append(("/flow/agent", flow.agent))
+    elif flow.type == "sequential":
+        refs.extend(
+            (f"/flow/steps/{i}", step) for i, step in enumerate(flow.steps)
+        )
+    elif flow.type == "parallel":
+        refs.extend(
+            (f"/flow/parallel_branches/{i}", branch)
+            for i, branch in enumerate(flow.parallel_branches)
+        )
+        if flow.join is not None:
+            refs.append(("/flow/join", flow.join))
+        refs.extend((f"/flow/then/{i}", step) for i, step in enumerate(flow.then))
+    elif flow.type == "supervisor":
+        refs.append(("/flow/supervisor", flow.supervisor))
+        refs.extend(
+            (f"/flow/workers/{i}", worker) for i, worker in enumerate(flow.workers)
+        )
+    else:  # graph
+        refs.append(("/flow/start", flow.start))
+        for i, edge in enumerate(flow.edges):
+            refs.append((f"/flow/edges/{i}/from", edge.from_))
+            refs.append((f"/flow/edges/{i}/to", edge.to))
+    return refs
+
+
+def _validate_flow_refs(project: LoadedProject, system_file: Path) -> None:
+    """Mixed-flow reference resolution (docs/03 § Phase 2c): every from/to/
+    step name must resolve to an agent OR a function, interchangeably."""
+    known = set(project.system.agents) | set(project.system.functions)
+    for pointer, name in _flow_node_refs(project.system.flow):
+        if name == "END":  # graph flows may target the terminal sentinel
+            continue
+        if name not in known:
+            raise CompileError(
+                f"flow references unknown node {name!r} at {pointer}; it is "
+                f"neither an agent ({', '.join(sorted(project.system.agents)) or '(none)'}) "
+                f"nor a function ({', '.join(sorted(project.system.functions)) or '(none)'})",
+                context={
+                    "file": str(system_file),
+                    "pointer": pointer,
+                    "received": name,
+                    "agents": sorted(project.system.agents),
+                    "functions": sorted(project.system.functions),
+                },
+            )
+
+
+def _validate_namespace(project: LoadedProject, system_file: Path) -> None:
+    """Agents and functions share one node namespace (docs/21): the compiler
+    resolves flow steps to either, so names cannot collide."""
+    collisions = sorted(set(project.system.agents) & set(project.system.functions))
+    if collisions:
+        raise CompileError(
+            f"node namespace collision: {', '.join(collisions)} declared as "
+            "BOTH an agent and a function in system.yaml; agents and "
+            "functions share one flow-node namespace",
+            context={
+                "file": str(system_file),
+                "pointer": "/functions",
+                "collisions": collisions,
+            },
+        )
+
+
+def _resolve_flow_agent(
+    project: LoadedProject, system_file: Path
+) -> tuple[str, tuple[str, ...]]:
+    """Phase 2 execution support: 'single' (one agent) or 'sequential'
+    (exactly one agent + any number of functions). Returns (agent_name,
+    execution steps)."""
+    flow = project.system.flow
+    if isinstance(flow, SingleFlow):
+        if flow.agent not in project.agents:
+            raise CompileError(
+                f"flow.agent {flow.agent!r} is not in SystemSpec.agents "
+                f"{sorted(project.agents)}",
+                context={"file": str(system_file),
+                         "pointer": "/flow/agent", "received": flow.agent},
+            )
+        return flow.agent, ()
+    if not isinstance(flow, SequentialFlow):
+        raise CompileError(
+            f"Phase 2 executes only the {' / '.join(_EXECUTABLE_FLOWS)!s} "
+            f"flow patterns; got {flow.type!r} (its references validated, "
+            "but execution lands in Phase 3+)",
+            context={"file": str(system_file),
+                     "pointer": "/flow/type", "received": flow.type},
+        )
+    agent_steps = [step for step in flow.steps if step in project.agents]
+    if len(agent_steps) != 1:
+        raise CompileError(
+            f"Phase 2 sequential flows need exactly ONE agent step (plus any "
+            f"number of function nodes); got {len(agent_steps)} "
+            f"({', '.join(agent_steps) or '(none)'}) — multi-agent flows land "
+            "in Phase 3+",
+            context={
+                "file": str(system_file),
+                "pointer": "/flow/steps",
+                "agent_steps": agent_steps,
+            },
+        )
+    return agent_steps[0], tuple(flow.steps)
+
 
 # --- compilation -----------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class CompiledProject:
-    """A Phase 2a compiled system: one agent, its tools + connections + state."""
-
-    project: LoadedProject
-    agent_name: str
-    agent: LoadedAgent
-    output_model: type[BaseModel]
-    provider: ProviderAdapter
-    pin_set_hash: str
-    system_version: str
-    roots: FoundryRoots
-    compiled_state: CompiledState
-    tool_registry: ToolRegistry = field(default_factory=ToolRegistry)
-    tool_slots: dict[str, dict[str, PreparedConnection]] = field(default_factory=dict)
-    prepared_connections: dict[str, PreparedConnection] = field(default_factory=dict)
-    transport: httpx.AsyncBaseTransport | None = None
-    secrets: SecretsProvider = field(default_factory=EnvSecretsProvider)
-    retrievers: dict[str, PreparedRetriever] = field(default_factory=dict)
-    """Prepared retriever bindings for the single agent (Phase 2b)."""
-    semantic_cache: PreparedSemanticCache | None = None
-    uses_tool_cache: bool = False
-    """True when any registered tool opted into result caching."""
-
-    @property
-    def pins(self) -> dict[str, Any]:
-        """Pinned tool + connection versions — recorded in run metadata."""
-        return {
-            "tools": {
-                name: f"{binding.ref}@{binding.version}"
-                for name, binding in self.project.system.tools.items()
-            },
-            "connections": {
-                name: f"{binding.ref}@{binding.version}"
-                for name, binding in self.project.system.connections.items()
-            },
-        }
 
 
 def compile_project(
@@ -158,44 +221,58 @@ def compile_project(
     secrets: SecretsProvider | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
 ) -> CompiledProject:
-    """Load + validate a project; resolve provider, tools, connections, state.
+    """Load + validate a project; resolve provider, tools, connections,
+    functions, state, retrievers, caches, memory.
 
     Every wiring error below is compile-time by construction: unbound slot →
     ConnectionSlotNotBoundError; accepts mismatch → CompileError; visibility
-    hole → StateVisibilityError; missing version → RefResolutionError.
+    hole → StateVisibilityError; missing version → RefResolutionError;
+    namespace collision / dangling flow ref / memory-scope hole →
+    CompileError; memory field misconfiguration → MemoryConfigError.
     """
     secrets = secrets or EnvSecretsProvider()
     project = load_project(project_dir)
     system_file = project.directory / "system.yaml"
-    flow = project.system.flow
-    if flow.type != "single":
-        raise CompileError(
-            f"Phase 2a supports only the 'single' flow pattern; "
-            f"got {flow.type!r} (multi-node flows land in Phase 3+)",
-            context={"file": str(system_file),
-                     "pointer": "/flow/type", "received": flow.type},
-        )
-    agent_name = flow.agent
-    if agent_name not in project.agents:
-        raise CompileError(
-            f"flow.agent {agent_name!r} is not in SystemSpec.agents "
-            f"{sorted(project.agents)}",
-            context={"file": str(system_file),
-                     "pointer": "/flow/agent", "received": agent_name},
-        )
+
+    _validate_namespace(project, system_file)
+    _validate_flow_refs(project, system_file)
+    agent_name, flow_steps = _resolve_flow_agent(project, system_file)
+
     agent = project.agents[agent_name]
     agent_yaml = agent.directory / "agent.yaml"
 
     output_model = _load_output_schema(agent.directory, agent.spec.output.schema_ref)
 
-    # State: compile + validate visibility (docs/22). agent.yaml's
-    # state_visibility must agree with state.yaml's entry for the agent.
+    # State: compile + validate visibility (docs/22) for EVERY node — agents
+    # and functions share the same structural enforcement. Each node's own
+    # YAML declaration must agree with state.yaml's entry.
+    node_names = [*project.system.agents, *project.system.functions]
     compiled_state = compile_state(
         project.state,
-        project.system.agents,
+        node_names,
         where=str(project.directory / project.system.state),
     )
-    _check_agent_state_visibility(agent, compiled_state, agent_yaml)
+    for loaded_agent in project.agents.values():
+        _check_node_state_visibility(
+            loaded_agent.spec.name,
+            loaded_agent.spec.state_visibility,
+            compiled_state,
+            loaded_agent.directory / "agent.yaml",
+            kind="agent",
+        )
+    for loaded_function in project.functions.values():
+        _check_node_state_visibility(
+            loaded_function.spec.name,
+            loaded_function.spec.state_visibility,
+            compiled_state,
+            loaded_function.directory / "function.yaml",
+            kind="function node",
+        )
+
+    functions = {
+        name: _compile_function(name, loaded)
+        for name, loaded in project.functions.items()
+    }
 
     roots = FoundryRoots.for_project(project.directory)
     prepared_connections = prepare_connections(
@@ -203,7 +280,7 @@ def compile_project(
     )
 
     registry = ToolRegistry()
-    tool_slots: dict[str, dict[str, PreparedConnection]] = {}
+    tool_slots: dict[str, dict[str, Any]] = {}
     uses_tool_cache = False
     for name, binding in project.system.tools.items():
         ref = ArtifactRef.parse(binding.ref, "tool", version=binding.version)
@@ -276,6 +353,21 @@ def compile_project(
         transport=transport,
     )
 
+    # Phase 2c: memory config validation — state-field existence + type
+    # (MemoryConfigError), read/write scope + retriever-slot binding
+    # (CompileError), consolidator prompt on disk (MemoryConfigError).
+    agent_view = compiled_state.agent_views[agent_name]
+    prepared_memory = prepare_memory(
+        agent.spec,
+        agent_dir=agent.directory,
+        state_field_types={
+            name: field_spec.type
+            for name, field_spec in project.state.state_schema.items()
+        },
+        read_scope=agent_view.read,
+        write_scope=agent_view.write,
+    )
+
     try:
         provider = resolve(
             agent.spec.model_binding,
@@ -313,30 +405,105 @@ def compile_project(
         retrievers=prepared_retrievers,
         semantic_cache=prepared_semantic_cache,
         uses_tool_cache=uses_tool_cache,
+        functions=functions,
+        flow_steps=flow_steps,
+        memory=prepared_memory,
     )
 
 
-def _check_agent_state_visibility(
-    agent: LoadedAgent, compiled_state: CompiledState, agent_yaml: Path
+def _check_node_state_visibility(
+    node_name: str,
+    declared: StateVisibility,
+    compiled_state: CompiledState,
+    config_path: Path,
+    *,
+    kind: str,
 ) -> None:
-    view = compiled_state.agent_views[agent.spec.name]
-    declared = agent.spec.state_visibility
+    view = compiled_state.agent_views[node_name]
     if set(declared.read) != set(view.read) or set(declared.write) != set(view.write):
         raise StateVisibilityError(
-            f"agent {agent.spec.name!r} declares state_visibility "
+            f"{kind} {node_name!r} declares state_visibility "
             f"(read: {sorted(declared.read)}, write: {sorted(declared.write)}) "
             "that disagrees with state.yaml's visibility entry "
             f"(read: {sorted(view.read)}, write: {sorted(view.write)}); "
             "the two declarations must match",
             context={
-                "file": str(agent_yaml),
+                "file": str(config_path),
                 "pointer": "/state_visibility",
-                "agent_declared": {"read": sorted(declared.read),
-                                   "write": sorted(declared.write)},
+                "node_declared": {"read": sorted(declared.read),
+                                  "write": sorted(declared.write)},
                 "state_yaml_declared": {"read": sorted(view.read),
                                         "write": sorted(view.write)},
             },
         )
+
+
+def _compile_function(name: str, loaded: LoadedFunction) -> CompiledFunction:
+    """Import the function handler + compute the content-hashed node_version
+    (function source + config; docs/21 § What function nodes DO have)."""
+    handler = _load_function_handler(loaded)
+    digest = hashlib.sha256(
+        (
+            loaded.source_text
+            + loaded.spec.model_dump_json()
+        ).encode()
+    ).hexdigest()[:12]
+    return CompiledFunction(
+        name=name,
+        spec=loaded.spec,
+        handler=handler,
+        node_version=digest,
+        directory=loaded.directory,
+    )
+
+
+def _load_function_handler(loaded: LoadedFunction) -> FunctionHandler:
+    """Import 'function.py::callable_name' relative to the function dir and
+    enforce the docs/12 signature: async def <name>(state_view, ctx)."""
+    ref = loaded.spec.function
+    where = str(loaded.directory / "function.yaml")
+    if "::" not in ref:
+        raise CompileError(
+            f"function ref must look like 'function.py::callable_name'; "
+            f"got {ref!r}",
+            context={"file": where, "pointer": "/function", "received": ref},
+        )
+    file_part, callable_name = ref.split("::", 1)
+    module_path = loaded.directory / file_part
+    digest = hashlib.sha256(str(module_path).encode()).hexdigest()[:12]
+    module_name = f"_foundry_function_{digest}"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise CompileError(
+            f"could not import function module: {module_path}",
+            context={"file": where, "ref": ref},
+        )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    handler = getattr(module, callable_name, None)
+    if handler is None:
+        raise CompileError(
+            f"{callable_name!r} not found in {module_path}",
+            context={"file": where, "ref": ref},
+        )
+    import inspect
+
+    if not inspect.iscoroutinefunction(handler):
+        raise CompileError(
+            f"function node handler {ref!r} at {module_path} must be an "
+            "async function (`async def <name>(state_view, ctx)`)",
+            context={"file": where, "ref": ref},
+        )
+    params = list(inspect.signature(handler).parameters)
+    if tuple(params[:2]) != ("state_view", "ctx") or len(params) != 2:
+        raise CompileError(
+            f"function node handler {ref!r} has signature "
+            f"({', '.join(params)}); expected exactly (state_view, ctx) — "
+            "the compiler introspects by name (docs/12 § FunctionNodeSpec)",
+            context={"file": where, "ref": ref, "received_params": params},
+        )
+    return cast(FunctionHandler, handler)
 
 
 def _apply_tool_overrides(
@@ -420,6 +587,10 @@ def _pin_set_hash(project: LoadedProject) -> str:
                 name: a.spec.model_dump(mode="json", by_alias=True)
                 for name, a in sorted(project.agents.items())
             },
+            "functions": {
+                name: f.spec.model_dump(mode="json", by_alias=True)
+                for name, f in sorted(project.functions.items())
+            },
         },
         sort_keys=True,
         default=str,
@@ -446,172 +617,6 @@ def _git_sha(directory: Path) -> str:
 # --- execution --------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class RunResult:
-    output: Any
-    response: ModelResponse | None
-    pool_metrics: dict[str, Any] = field(default_factory=dict)
-    llm_call_count: int = 0
-    """Actual provider calls made — 0 on a semantic-cache hit."""
-
-
-class _EventEmitter:
-    """Sequence-stamped event emission (event-stream invariant 1)."""
-
-    def __init__(self, session: Session, sink: EventSink | None) -> None:
-        self._session = session
-        self._sink = sink
-        self._sequence = 0
-
-    def emit(self, event_cls: type[BaseModel], **fields: Any) -> None:
-        event = event_cls(
-            run_id=self._session.run_id,
-            sequence=self._sequence,
-            timestamp=datetime.now(UTC),
-            **fields,
-        )
-        self._sequence += 1
-        if self._sink is not None:
-            self._sink(event)
-        if self._session.logger is not None:
-            self._session.logger.info(
-                str(getattr(event, "event", event_cls.__name__)),
-                sequence=event.sequence,  # type: ignore[attr-defined]
-            )
-
-
-def _build_messages(
-    compiled: CompiledProject,
-    agent_input: dict[str, Any],
-    tool_descriptions: str,
-) -> list[FoundryMessage]:
-    schema_json = json.dumps(compiled.output_model.model_json_schema(), indent=2)
-    system_text = (
-        compiled.agent.prompt_text.rstrip()
-        + (
-            "\n\nYou can call the following tools when they help:\n"
-            + tool_descriptions
-            if tool_descriptions
-            else ""
-        )
-        + "\n\nWhen you give your final answer, respond ONLY with a single "
-        "JSON object that validates against this JSON Schema — no code "
-        "fences, no commentary:\n"
-        + schema_json
-    )
-    return [
-        FoundryMessage(role=MessageRole.SYSTEM, content=[TextBlock(text=system_text)]),
-        FoundryMessage(
-            role=MessageRole.USER,
-            content=[TextBlock(text=json.dumps(agent_input))],
-        ),
-    ]
-
-
-def _parse_output(compiled: CompiledProject, response: ModelResponse) -> BaseModel:
-    text = "".join(
-        b.text for b in response.message.content if isinstance(b, TextBlock)
-    ).strip()
-    if text.startswith("```"):
-        text = text.strip("`\n")
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    try:
-        return compiled.output_model.model_validate_json(text)
-    except ValidationError as exc:
-        raise OrchestrationError(
-            f"agent {compiled.agent_name!r} output failed validation against "
-            f"output schema {compiled.output_model.__name__!r}",
-            context={
-                "agent": compiled.agent_name,
-                "output_schema": compiled.output_model.__name__,
-                "response_preview": text[:500],
-            },
-            cause=exc,
-        ) from exc
-
-
-def _tool_schemas(compiled: CompiledProject) -> list[ToolSchema]:
-    allow = set(compiled.agent.spec.tools)
-    schemas: list[ToolSchema] = []
-    for descriptor in compiled.tool_registry.list_all():
-        if descriptor.name not in allow:
-            continue
-        registered = compiled.tool_registry.get(descriptor.name)
-        assert registered is not None  # descriptor came from the registry
-        schemas.append(
-            ToolSchema(
-                name=descriptor.name,
-                description=descriptor.description,
-                input_schema=registered.input_schema.model_json_schema(),
-            )
-        )
-    return schemas
-
-
-def _tool_descriptions(schemas: list[ToolSchema]) -> str:
-    return "\n".join(f"- {s.name}: {s.description}" for s in schemas)
-
-
-async def _dispatch_one(
-    compiled: CompiledProject,
-    pool: InProcessConnectionPool,
-    session: Session,
-    emitter: _EventEmitter,
-    block: ToolUseBlock,
-    retrievers: MappingRetrieverAccessor | None = None,
-) -> ToolResultBlock:
-    """One tool call → one tool_result block. Tool-layer errors become
-    structured is_error results the LLM can recover from (docs/20 § Error
-    semantics); non-tool errors (cost budget, cancellation) propagate."""
-    registered = compiled.tool_registry.get(block.name)
-    accessor = SlotConnectionAccessor(
-        pool,
-        compiled.project.system.name,
-        compiled.tool_slots.get(block.name, {}),
-        ConnectionContext(http_transport=compiled.transport),
-        agent_name=compiled.agent_name,
-        emit=emitter.emit,
-    )
-    ctx = RunContext(
-        run_id=str(session.run_id),
-        agent_name=compiled.agent_name,
-        session=session,
-        tool_ref=(
-            f"{registered.descriptor.ref}@{registered.descriptor.version}"
-            if registered is not None
-            else block.name
-        ),
-        timeout_s=registered.timeout_s if registered is not None else None,
-        retry_policy=(
-            registered.retry_policy if registered is not None else RetryPolicy()
-        ),
-        connections=accessor,
-        retrievers=retrievers,
-    )
-    try:
-        output = await compiled.tool_registry.dispatch(
-            block.name,
-            compiled.agent.spec.tools,
-            block.input,
-            ctx,
-            emit=emitter.emit,
-        )
-    except (ToolError, FoundryConnectionError) as exc:
-        return ToolResultBlock(
-            tool_use_id=block.id,
-            is_error=True,
-            content=[TextBlock(text=f"{type(exc).__name__}: {exc}")],
-        )
-    finally:
-        await accessor.release_all()
-    return ToolResultBlock(
-        tool_use_id=block.id,
-        content=[TextBlock(text=output.model_dump_json())],
-    )
-
-
 async def run_project(
     compiled: CompiledProject,
     input_data: dict[str, Any],
@@ -620,23 +625,22 @@ async def run_project(
     *,
     pool: InProcessConnectionPool | None = None,
 ) -> RunResult:
-    """Run the compiled single-agent system through a LangGraph StateGraph.
+    """Run the compiled system through a LangGraph StateGraph.
 
-    The agent node runs the LLM ⇄ tool loop: tool_use blocks dispatch through
-    the ToolRegistry (with pooled connections), results feed back as
-    tool_result blocks, until a terminal response or iteration_limit.
+    Single flow: one agent node. Sequential flow: one node per step (function
+    nodes + the agent), chained; the project state dict threads through every
+    node with reducer-merged deltas and per-node visibility projections.
     """
-    emitter = _EventEmitter(session, event_sink)
+    emitter = EventEmitter(session, event_sink)
     started = datetime.now(UTC)
-    last_response: ModelResponse | None = None
-    llm_call_count = 0
+    counters = RunCounters()
     pool = pool or InProcessConnectionPool()
-    view: AgentStateView = compiled.compiled_state.agent_views[compiled.agent_name]
     retriever_accessor: MappingRetrieverAccessor | None = None
-    retriever_conn_accessors: list[SlotConnectionAccessor] = []
+    retriever_conn_accessors: list[Any] = []
+    reducers = compiled.compiled_state.reducers
 
     # Session-scoped cache bundle (docs/10 § CacheAccessor on Session): the
-    # dispatcher reads tool_result; the semantic side is driven below.
+    # dispatcher reads tool_result; the semantic side is driven per step.
     result_cache: ResultCache | None = None
     if compiled.uses_tool_cache:
         result_cache = InProcessResultCache(default_result_cache_path())
@@ -655,119 +659,41 @@ async def run_project(
         )
 
     async def agent_node(state: GraphState) -> dict[str, Any]:
-        nonlocal last_response, llm_call_count
-        spec = compiled.agent.spec
-        emitter.emit(
-            AgentStarted,
-            agent_name=compiled.agent_name,
-            agent_version=spec.prompt.version,
+        run_state = state.get("state", {})
+        delta, output = await run_agent_step(
+            compiled, run_state, session, emitter, pool,
+            retriever_accessor, counters,
         )
-        # Structural visibility: the agent sees ONLY its `read` fields —
-        # everything else is absent from its projection, not None-ed.
-        agent_input = view.project_input(state.get("input", {}))
-        schemas = _tool_schemas(compiled)
-        messages = _build_messages(
-            compiled, agent_input, _tool_descriptions(schemas)
-        )
+        return {
+            "state": apply_delta(run_state, delta, reducers),
+            "output": output,
+        }
 
-        # Semantic cache (docs/24 § Layer 2): keyed by the agent's INITIAL
-        # input; a hit short-circuits the whole LLM ⇄ tool loop and replays
-        # the cached terminal response. Every failure inside fails open.
-        semantic = compiled.semantic_cache
-        cache_key = None
-        response: ModelResponse | None = None
-        if semantic is not None:
-            await ensure_version_marker(
-                semantic, compiled.agent_name, emitter.emit
+    def make_function_node(function: CompiledFunction) -> Any:
+        async def function_node(state: GraphState) -> dict[str, Any]:
+            run_state = state.get("state", {})
+            delta = await run_function_step(
+                compiled, function, run_state, session, emitter
             )
-            response, cache_key = await semantic_lookup(
-                semantic,
-                agent_name=compiled.agent_name,
-                model_binding=spec.model_binding,
-                tools=schemas,
-                messages=messages,
-                emit=emitter.emit,
-            )
+            return {"state": apply_delta(run_state, delta, reducers)}
 
-        cache_hit = response is not None
-        if not cache_hit:
-            for _round in range(spec.iteration_limit):
-                emitter.emit(
-                    LLMCallStarted,
-                    agent_name=compiled.agent_name,
-                    provider=compiled.provider.name,
-                    model=compiled.provider.model,
-                )
-                response = await compiled.provider.generate(
-                    messages,
-                    schemas,
-                    spec.model_binding.settings,
-                    session,
-                )
-                llm_call_count += 1
-                last_response = response
-                emitter.emit(
-                    LLMCallCompleted,
-                    agent_name=compiled.agent_name,
-                    usage=response.usage,
-                    cost_estimate_usd=response.cost_estimate_usd,
-                    latency_ms=response.latency_ms,
-                    stop_reason=response.stop_reason,
-                )
-                tool_uses = [
-                    b for b in response.message.content
-                    if isinstance(b, ToolUseBlock)
-                ]
-                if not tool_uses:
-                    break
-                # Parallel tool calls within one round (docs/21).
-                results = list(
-                    await asyncio.gather(
-                        *(
-                            _dispatch_one(
-                                compiled, pool, session, emitter, block,
-                                retriever_accessor,
-                            )
-                            for block in tool_uses
-                        )
-                    )
-                )
-                messages.append(response.message)
-                messages.append(
-                    FoundryMessage(role=MessageRole.USER, content=list(results))
-                )
-            else:
-                raise IterationLimitError(
-                    f"agent {compiled.agent_name!r} exceeded its "
-                    f"iteration_limit of {spec.iteration_limit} LLM rounds "
-                    "without a terminal response",
-                    context={"agent": compiled.agent_name,
-                             "iteration_limit": spec.iteration_limit},
-                )
-
-        # NOTE: last_response tracks ACTUAL provider calls only — on a cache
-        # hit it stays None so run totals report zero spend (the saving is on
-        # the cache.semantic.hit event instead).
-        assert response is not None  # cache hit or the loop ran at least once
-        if semantic is not None and cache_key is not None and not cache_hit:
-            # Store the TERMINAL response keyed by the initial input — a
-            # future hit replays the final answer without the tool loop.
-            await semantic_store(
-                semantic, cache_key, response,
-                agent_name=compiled.agent_name, emit=emitter.emit,
-            )
-        output = _parse_output(compiled, response)
-        emitter.emit(
-            AgentCompleted,
-            agent_name=compiled.agent_name,
-            output_summary=f"{compiled.output_model.__name__} produced",
-        )
-        return {"output": output.model_dump(mode="json")}
+        return function_node
 
     graph = StateGraph(GraphState)
-    graph.add_node("agent", agent_node)
-    graph.add_edge(START, "agent")
-    graph.add_edge("agent", END)
+    if compiled.flow_steps:
+        previous: Any = START
+        for step in compiled.flow_steps:
+            if step == compiled.agent_name:
+                graph.add_node(step, agent_node)
+            else:
+                graph.add_node(step, make_function_node(compiled.functions[step]))
+            graph.add_edge(previous, step)
+            previous = step
+        graph.add_edge(previous, END)
+    else:
+        graph.add_node("agent", agent_node)
+        graph.add_edge(START, "agent")
+        graph.add_edge("agent", END)
     app = graph.compile()
 
     inputs_hash = hashlib.sha256(
@@ -794,7 +720,7 @@ async def run_project(
                     emit=emitter.emit,
                 )
             )
-        final_state = await app.ainvoke({"input": input_data})
+        final = await app.ainvoke({"state": seed_state(compiled, input_data)})
     except FoundryError as exc:
         emitter.emit(RunFailed, error=exc.to_dict())
         await _release_retrievers(retriever_conn_accessors)
@@ -811,12 +737,18 @@ async def run_project(
         await pool.close_all()
         raise wrapped from exc
 
+    final_state: dict[str, Any] = final.get("state", {})
+    # Sequential flows: the pipeline's product IS the final state (a
+    # post-agent function may have transformed the agent's output).
+    output = final_state if compiled.flow_steps else final.get("output")
+
     duration_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
+    last_response = counters.last_response
     usage = last_response.usage if last_response else None
     emitter.emit(
         RunCompleted,
         status="success",
-        final_output=final_state.get("output"),
+        final_output=output,
         total_input_tokens=usage.input_tokens if usage else 0,
         total_output_tokens=usage.output_tokens if usage else 0,
         total_cost_estimate_usd=(
@@ -828,19 +760,21 @@ async def run_project(
     await _release_retrievers(retriever_conn_accessors)
     await pool.close_all()
     return RunResult(
-        output=final_state.get("output"),
+        output=output,
         response=last_response,
         pool_metrics=metrics,
-        llm_call_count=llm_call_count,
+        llm_call_count=counters.llm_call_count,
+        final_state=final_state,
     )
 
 
-async def _release_retrievers(accessors: list[SlotConnectionAccessor]) -> None:
+async def _release_retrievers(accessors: list[Any]) -> None:
     for accessor in accessors:
         await accessor.release_all()
 
 
 __all__ = [
+    "CompiledFunction",
     "CompiledProject",
     "RunResult",
     "compile_project",
