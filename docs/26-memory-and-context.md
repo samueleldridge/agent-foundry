@@ -215,6 +215,8 @@ Custom layers must always specify both `placement` and `template`.
 
 Failures at any of these → `MemoryConfigError` with the bad field's path.
 
+> **Errata (Phase 2c):** the implementation splits the compile-time failures above into two classes — field/type/file issues (state-field existence, working `source_field` type, consolidator prompt on disk) raise `MemoryConfigError`; scope/slot issues (a layer reading/writing outside the agent's `state_visibility`, an unbound `retriever_slot`) raise `CompileError`, matching docs/03 § Phase 2c. Both are load-time.
+
 ## Lifecycle
 
 ### Per-turn
