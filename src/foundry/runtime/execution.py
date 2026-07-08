@@ -1,7 +1,17 @@
-"""Step execution: the agent step (with optional memory) + function-node
-step + shared event emission. No langgraph imports — graph wiring lives in
-``langgraph_adapter``; this module is plain asyncio so the Phase 3 compiler
-can reuse it per node.
+"""Step execution: node-sized slices of the agent step (with optional
+memory) + the function-node step + shared event emission.
+
+Phase 3 shape: :class:`AgentStepRuntime` splits the agent step into graph-
+node-sized async methods (``begin`` → ``llm_round`` ⇄ ``dispatch_tools`` →
+``finish``, with ``start_turn`` / ``end_turn`` wrapping the loop for
+memory-enabled agents). The LangGraph adapter wires them as StateGraph
+nodes, so the LLM ⇄ tool loop and the docs/26 memory turn loop are
+checkpointed at every boundary — a killed run resumes mid-loop instead of
+restarting the whole step.
+
+No langgraph imports — graph wiring lives in ``langgraph_adapter``; every
+method here takes plain ``(conv, run_state)`` dicts and returns a partial
+graph-state update (keys: ``conv`` / ``state`` / ``output``).
 """
 
 from __future__ import annotations
@@ -51,6 +61,7 @@ from foundry.core.errors import (
 )
 from foundry.core.tool import RunContext
 from foundry.memory import DefaultMemory, build_memory, weave
+from foundry.observability.tracing import foundry_span, set_span_attributes
 from foundry.orchestration.state_scope import AgentStateView
 from foundry.providers import ToolSchema
 from foundry.retrieval import MappingRetrieverAccessor
@@ -58,19 +69,32 @@ from foundry.runtime.compiled import CompiledFunction, CompiledProject
 
 EventSink = Callable[[BaseModel], None]
 
+NodeUpdate = dict[str, Any]
+"""A partial graph-state update: any of ``conv`` / ``state`` / ``output``."""
+
 _TURNS_FIELD = "turns"
 """Phase 2c multi-turn convention: a memory-enabled agent whose read scope
 projects a list-of-strings field named ``turns`` converses once per item.
-The real conversation surface (checkpointed sessions / API) is Phase 3+."""
+Phase 3 checkpoints the loop (kill mid-turn → resume); the API-level
+conversation surface remains Phase 8."""
 
 
 class EventEmitter:
-    """Sequence-stamped event emission (event-stream invariant 1)."""
+    """Sequence-stamped event emission (event-stream invariant 1).
 
-    def __init__(self, session: Session, sink: EventSink | None) -> None:
+    ``start_sequence`` lets a resumed run continue the sequence where the
+    killed process stopped (SSE Last-Event-ID semantics, docs/10)."""
+
+    def __init__(
+        self,
+        session: Session,
+        sink: EventSink | None,
+        *,
+        start_sequence: int = 0,
+    ) -> None:
         self._session = session
         self._sink = sink
-        self._sequence = 0
+        self._sequence = start_sequence
 
     def emit(self, event_cls: type[BaseModel], **fields: Any) -> None:
         event = event_cls(
@@ -275,70 +299,7 @@ async def _dispatch_one(
     )
 
 
-async def llm_tool_loop(
-    compiled: CompiledProject,
-    messages: list[FoundryMessage],
-    schemas: list[ToolSchema],
-    session: Session,
-    emitter: EventEmitter,
-    pool: InProcessConnectionPool,
-    retrievers: MappingRetrieverAccessor | None,
-    counters: RunCounters,
-) -> ModelResponse:
-    """The LLM ⇄ tool loop: generate → dispatch tool_use blocks in parallel →
-    feed results back → repeat until a terminal response or iteration_limit.
-    Mutates ``messages`` in place (the conversation grows)."""
-    spec = compiled.agent.spec
-    capture = compiled.project.system.observability.capture_inputs
-    for _round in range(spec.iteration_limit):
-        emitter.emit(
-            LLMCallStarted,
-            agent_name=compiled.agent_name,
-            provider=compiled.provider.name,
-            model=compiled.provider.model,
-            prompt_messages=list(messages) if capture else None,
-        )
-        response = await compiled.provider.generate(
-            messages,
-            schemas,
-            spec.model_binding.settings,
-            session,
-        )
-        counters.llm_call_count += 1
-        counters.last_response = response
-        emitter.emit(
-            LLMCallCompleted,
-            agent_name=compiled.agent_name,
-            usage=response.usage,
-            cost_estimate_usd=response.cost_estimate_usd,
-            latency_ms=response.latency_ms,
-            stop_reason=response.stop_reason,
-        )
-        tool_uses = [
-            b for b in response.message.content if isinstance(b, ToolUseBlock)
-        ]
-        if not tool_uses:
-            return response
-        # Parallel tool calls within one round (docs/21).
-        results = list(
-            await asyncio.gather(
-                *(
-                    _dispatch_one(compiled, pool, session, emitter, block, retrievers)
-                    for block in tool_uses
-                )
-            )
-        )
-        messages.append(response.message)
-        messages.append(FoundryMessage(role=MessageRole.USER, content=list(results)))
-    raise IterationLimitError(
-        f"agent {compiled.agent_name!r} exceeded its iteration_limit of "
-        f"{spec.iteration_limit} LLM rounds without a terminal response",
-        context={"agent": compiled.agent_name,
-                 "iteration_limit": spec.iteration_limit},
-    )
-
-
-# --- agent step ---------------------------------------------------------------------
+# --- agent step (node-sized slices) ---------------------------------------------------
 
 
 def _output_delta(
@@ -350,82 +311,6 @@ def _output_delta(
     function nodes whose return value IS a state delta."""
     dump = output.model_dump(mode="json")
     return {k: v for k, v in dump.items() if k in view.write}
-
-
-async def run_agent_step(
-    compiled: CompiledProject,
-    run_state: dict[str, Any],
-    session: Session,
-    emitter: EventEmitter,
-    pool: InProcessConnectionPool,
-    retrievers: MappingRetrieverAccessor | None,
-    counters: RunCounters,
-) -> tuple[dict[str, Any], Any]:
-    """One agent step → (state delta, final output). Dispatches to the
-    memory-enabled turn loop when the agent configures memory."""
-    spec = compiled.agent.spec
-    emitter.emit(
-        AgentStarted,
-        agent_name=compiled.agent_name,
-        agent_version=spec.prompt.version,
-    )
-    view = compiled.compiled_state.agent_views[compiled.agent_name]
-    schemas = tool_schemas(compiled)
-
-    if compiled.memory is not None:
-        delta, output_dump = await _memory_agent_turns(
-            compiled, run_state, session, emitter, pool, retrievers,
-            counters, view, schemas,
-        )
-        emitter.emit(
-            AgentCompleted,
-            agent_name=compiled.agent_name,
-            output_summary=f"{compiled.output_model.__name__} produced",
-        )
-        return delta, output_dump
-
-    # --- memory-off path (Phase 2a/2b behaviour, semantic cache included) ---
-    agent_input = view.project_input(run_state)
-    messages = build_messages(compiled, agent_input, tool_descriptions(schemas))
-
-    # Semantic cache (docs/24 § Layer 2): keyed by the agent's INITIAL
-    # input; a hit short-circuits the whole LLM ⇄ tool loop and replays
-    # the cached terminal response. Every failure inside fails open.
-    semantic = compiled.semantic_cache
-    cache_key = None
-    response: ModelResponse | None = None
-    if semantic is not None:
-        await ensure_version_marker(semantic, compiled.agent_name, emitter.emit)
-        response, cache_key = await semantic_lookup(
-            semantic,
-            agent_name=compiled.agent_name,
-            model_binding=spec.model_binding,
-            tools=schemas,
-            messages=messages,
-            emit=emitter.emit,
-        )
-
-    cache_hit = response is not None
-    if response is None:
-        response = await llm_tool_loop(
-            compiled, messages, schemas, session, emitter, pool,
-            retrievers, counters,
-        )
-
-    if semantic is not None and cache_key is not None and not cache_hit:
-        # Store the TERMINAL response keyed by the initial input — a
-        # future hit replays the final answer without the tool loop.
-        await semantic_store(
-            semantic, cache_key, response,
-            agent_name=compiled.agent_name, emit=emitter.emit,
-        )
-    output = parse_output(compiled, response)
-    emitter.emit(
-        AgentCompleted,
-        agent_name=compiled.agent_name,
-        output_summary=f"{compiled.output_model.__name__} produced",
-    )
-    return _output_delta(output, view), output.model_dump(mode="json")
 
 
 def _extract_turns(agent_input: dict[str, Any]) -> list[str]:
@@ -441,98 +326,188 @@ def _response_text(response: ModelResponse) -> str:
     ).strip()
 
 
-async def _memory_agent_turns(
-    compiled: CompiledProject,
-    run_state: dict[str, Any],
-    session: Session,
-    emitter: EventEmitter,
-    pool: InProcessConnectionPool,
-    retrievers: MappingRetrieverAccessor | None,
-    counters: RunCounters,
-    view: AgentStateView,
-    schemas: list[ToolSchema],
-) -> tuple[dict[str, Any], Any]:
-    """The docs/26 per-turn lifecycle: memory.read → weave → LLM ⇄ tools →
-    state append + memory.write → periodic consolidate. Runs once per item
-    of the ``turns`` read-scope field (single turn when absent).
+class AgentStepRuntime:
+    """The agent step, sliced into graph nodes.
 
-    NOTE: the semantic cache is bypassed for memory-enabled agents in Phase
-    2c — its key covers the step's initial input, not the evolving memory
-    envelope, so a hit could replay a response that ignores state."""
-    assert compiled.memory is not None
-    prepared = compiled.memory
-    memory: DefaultMemory = build_memory(
-        prepared,
-        agent_name=compiled.agent_name,
-        provider=compiled.provider,
-        retrievers=retrievers,
-        emit=emitter.emit,
-    )
-    memory_config = prepared.spec.memory
-    assert memory_config is not None
-    reducers = compiled.compiled_state.reducers
-    schema_types = {
-        name: field_spec.type.replace(" ", "")
-        for name, field_spec in compiled.project.state.state_schema.items()
-    }
-    message_fields = [
-        layer.source_field
-        for layer in memory_config.layers
-        if isinstance(layer, WorkingMemoryLayerConfig)
-        and layer.source_field in view.write
-        and schema_types.get(layer.source_field) == "list[FoundryMessage]"
-    ]
+    Routing vocabulary returned by the ``route_after_*`` methods (the
+    adapter maps labels onto graph node names):
 
-    local_state = dict(run_state)
-    delta: dict[str, Any] = {}
-    pending_appends: dict[str, list[FoundryMessage]] = {}
+    - ``begin`` → ``turn`` (memory) | ``llm`` | ``finish`` (cache hit)
+    - ``llm``   → ``tools`` (tool_use blocks) | ``turn_end`` (memory) |
+      ``finish``
+    - ``tools`` → ``llm`` (unconditional loop edge)
+    - ``turn_end`` → ``turn`` (more turns) | ``finish``
 
-    def write_field(field_name: str, value: Any) -> None:
-        if field_name not in view.write:
-            emitter.emit(
-                WarningEvent,
-                agent_name=compiled.agent_name,
-                category="memory.out_of_scope_write",
-                message=f"memory write to state field {field_name!r} dropped: "
-                f"outside agent {compiled.agent_name!r}'s write scope",
-                error_class=None,
+    All conversation state lives in the ``conv`` dict inside the graph
+    state (checkpointed); this object holds only process-scoped plumbing
+    (provider, pool, emitter, lazily-built memory coordinator) so a fresh
+    process can resume a checkpointed conv.
+    """
+
+    def __init__(
+        self,
+        compiled: CompiledProject,
+        session: Session,
+        emitter: EventEmitter,
+        pool: InProcessConnectionPool,
+        counters: RunCounters,
+    ) -> None:
+        self.compiled = compiled
+        self.session = session
+        self.emitter = emitter
+        self.pool = pool
+        self.counters = counters
+        self.retrievers: MappingRetrieverAccessor | None = None
+        self._memory_obj: DefaultMemory | None = None
+        self.view = compiled.compiled_state.agent_views[compiled.agent_name]
+        self.reducers = compiled.compiled_state.reducers
+        self.schemas = tool_schemas(compiled)
+        self.descriptions = tool_descriptions(self.schemas)
+        self.message_fields: list[str] = []
+        if compiled.memory is not None:
+            memory_config = compiled.memory.spec.memory
+            assert memory_config is not None
+            schema_types = {
+                name: field_spec.type.replace(" ", "")
+                for name, field_spec in (
+                    compiled.project.state.state_schema.items()
+                )
+            }
+            self.message_fields = [
+                layer.source_field
+                for layer in memory_config.layers
+                if isinstance(layer, WorkingMemoryLayerConfig)
+                and layer.source_field in self.view.write
+                and schema_types.get(layer.source_field) == "list[FoundryMessage]"
+            ]
+
+    # --- process-scoped helpers -------------------------------------------------
+
+    def _memory(self) -> DefaultMemory:
+        """Built lazily: a resumed process may enter mid-turn without ever
+        running ``begin``, and the retriever accessor is attached to this
+        runtime only just before graph invocation."""
+        assert self.compiled.memory is not None
+        if self._memory_obj is None:
+            self._memory_obj = build_memory(
+                self.compiled.memory,
+                agent_name=self.compiled.agent_name,
+                provider=self.compiled.provider,
+                retrievers=self.retrievers,
+                emit=self.emitter.emit,
             )
-            return
-        local_state[field_name] = value
-        delta[field_name] = value
+        return self._memory_obj
 
-    def append_messages(new_messages: list[FoundryMessage]) -> None:
-        for field_name in message_fields:
-            current = list(local_state.get(field_name) or [])
-            local_state[field_name] = [*current, *new_messages]
-            if reducers.get(field_name) is Reducer.APPEND:
-                pending = pending_appends.setdefault(field_name, [])
-                pending.extend(new_messages)
-                delta[field_name] = list(pending)
-            else:
-                delta[field_name] = local_state[field_name]
+    def _make_ctx(
+        self,
+        local: dict[str, Any],
+        writes: dict[str, Any],
+        turn_count: int,
+        recent: list[FoundryMessage],
+    ) -> MemoryContext:
+        def write_field(field_name: str, value: Any) -> None:
+            if field_name not in self.view.write:
+                self.emitter.emit(
+                    WarningEvent,
+                    agent_name=self.compiled.agent_name,
+                    category="memory.out_of_scope_write",
+                    message=(
+                        f"memory write to state field {field_name!r} dropped: "
+                        f"outside agent {self.compiled.agent_name!r}'s write "
+                        "scope"
+                    ),
+                    error_class=None,
+                )
+                return
+            local[field_name] = value
+            writes[field_name] = value
 
-    def make_ctx(turn_count: int, recent: list[FoundryMessage]) -> MemoryContext:
         return MemoryContext(
-            run_id=session.run_id,
-            agent_name=compiled.agent_name,
-            session=session,
-            state_view=view.project_input(local_state),
+            run_id=self.session.run_id,
+            agent_name=self.compiled.agent_name,
+            session=self.session,
+            state_view=self.view.project_input(local),
             state_writer=write_field,
             turn_count=turn_count,
             recent_messages=list(recent),
         )
 
-    turns = _extract_turns(view.project_input(local_state))
-    descriptions = tool_descriptions(schemas)
-    recent: list[FoundryMessage] = []
-    turn_count = 0
-    output: BaseModel | None = None
+    # --- nodes -------------------------------------------------------------------
 
-    for turn_text in turns:
-        ctx = make_ctx(turn_count, recent)
-        envelope = await memory.read(turn_text, ctx)
-        woven = weave(_system_text(compiled, descriptions), envelope, memory_config)
+    async def begin(
+        self, conv: dict[str, Any], run_state: dict[str, Any]
+    ) -> NodeUpdate:
+        """Emit agent.started; seed the conversation bundle. Non-memory
+        agents also consult the semantic cache here (docs/24 § Layer 2:
+        keyed by the step's INITIAL input; a hit skips the whole loop)."""
+        spec = self.compiled.agent.spec
+        self.emitter.emit(
+            AgentStarted,
+            agent_name=self.compiled.agent_name,
+            agent_version=spec.prompt.version,
+        )
+        if self.compiled.memory is not None:
+            turns = _extract_turns(self.view.project_input(run_state))
+            return {
+                "conv": {
+                    "mode": "memory",
+                    "turns": turns,
+                    "turn_index": 0,
+                    "recent": [],
+                    "messages": [],
+                    "round": 0,
+                    "response": None,
+                    "output_dump": None,
+                }
+            }
+        agent_input = self.view.project_input(run_state)
+        messages = build_messages(self.compiled, agent_input, self.descriptions)
+        new_conv: dict[str, Any] = {
+            "mode": "plain",
+            "messages": messages,
+            "round": 0,
+            "response": None,
+            "cache_hit": False,
+            "cache_key": None,
+        }
+        semantic = self.compiled.semantic_cache
+        if semantic is not None:
+            await ensure_version_marker(
+                semantic, self.compiled.agent_name, self.emitter.emit
+            )
+            response, cache_key = await semantic_lookup(
+                semantic,
+                agent_name=self.compiled.agent_name,
+                model_binding=spec.model_binding,
+                tools=self.schemas,
+                messages=messages,
+                emit=self.emitter.emit,
+            )
+            new_conv["response"] = response
+            new_conv["cache_hit"] = response is not None
+            new_conv["cache_key"] = cache_key
+        return {"conv": new_conv}
+
+    def route_after_begin(self, conv: dict[str, Any]) -> str:
+        if conv.get("mode") == "memory":
+            return "turn"
+        return "finish" if conv.get("response") is not None else "llm"
+
+    async def start_turn(
+        self, conv: dict[str, Any], run_state: dict[str, Any]
+    ) -> NodeUpdate:
+        """docs/26 per-turn head: memory.read → weave → turn messages."""
+        assert self.compiled.memory is not None
+        memory_config = self.compiled.memory.spec.memory
+        assert memory_config is not None
+        turn_text: str = conv["turns"][conv["turn_index"]]
+        local = dict(run_state)
+        writes: dict[str, Any] = {}
+        ctx = self._make_ctx(local, writes, conv["turn_index"], conv["recent"])
+        envelope = await self._memory().read(turn_text, ctx)
+        woven = weave(
+            _system_text(self.compiled, self.descriptions), envelope, memory_config
+        )
         user_text = (
             f"{woven.user_prefix}\n\n{turn_text}" if woven.user_prefix else turn_text
         )
@@ -544,11 +519,118 @@ async def _memory_agent_turns(
             *woven.memory_messages,
             FoundryMessage(role=MessageRole.USER, content=[TextBlock(text=user_text)]),
         ]
-        response = await llm_tool_loop(
-            compiled, messages, schemas, session, emitter, pool,
-            retrievers, counters,
+        update: NodeUpdate = {
+            "conv": {**conv, "messages": messages, "round": 0, "response": None}
+        }
+        if writes:
+            update["state"] = apply_delta(run_state, writes, self.reducers)
+        return update
+
+    async def llm_round(
+        self, conv: dict[str, Any], run_state: dict[str, Any]
+    ) -> NodeUpdate:
+        """One LLM call, wrapped in a ``foundry.llm`` span (docs/01 attrs)."""
+        spec = self.compiled.agent.spec
+        if conv["round"] >= spec.iteration_limit:
+            raise IterationLimitError(
+                f"agent {self.compiled.agent_name!r} exceeded its "
+                f"iteration_limit of {spec.iteration_limit} LLM rounds "
+                "without a terminal response",
+                context={"agent": self.compiled.agent_name,
+                         "iteration_limit": spec.iteration_limit},
+            )
+        capture = self.compiled.project.system.observability.capture_inputs
+        messages: list[FoundryMessage] = list(conv["messages"])
+        self.emitter.emit(
+            LLMCallStarted,
+            agent_name=self.compiled.agent_name,
+            provider=self.compiled.provider.name,
+            model=self.compiled.provider.model,
+            prompt_messages=list(messages) if capture else None,
         )
-        output = parse_output(compiled, response)
+        with foundry_span(
+            "foundry.llm",
+            {
+                "run_id": str(self.session.run_id),
+                "project": self.compiled.project.system.name,
+                "agent": self.compiled.agent_name,
+                "provider": self.compiled.provider.name,
+                "model": self.compiled.provider.model,
+                "tool_schemas_count": len(self.schemas),
+            },
+        ) as span:
+            response = await self.compiled.provider.generate(
+                messages,
+                self.schemas,
+                spec.model_binding.settings,
+                self.session,
+            )
+            set_span_attributes(
+                span,
+                {
+                    "prompt_tokens": response.usage.input_tokens,
+                    "completion_tokens": response.usage.output_tokens,
+                    "latency_ms": response.latency_ms,
+                    "cost_estimate_usd": response.cost_estimate_usd,
+                    "stop_reason": response.stop_reason.value,
+                },
+            )
+        self.counters.llm_call_count += 1
+        self.counters.last_response = response
+        self.emitter.emit(
+            LLMCallCompleted,
+            agent_name=self.compiled.agent_name,
+            usage=response.usage,
+            cost_estimate_usd=response.cost_estimate_usd,
+            latency_ms=response.latency_ms,
+            stop_reason=response.stop_reason,
+        )
+        return {"conv": {**conv, "round": conv["round"] + 1, "response": response}}
+
+    def route_after_llm(self, conv: dict[str, Any]) -> str:
+        response: ModelResponse = conv["response"]
+        has_tool_uses = any(
+            isinstance(b, ToolUseBlock) for b in response.message.content
+        )
+        if has_tool_uses:
+            return "tools"
+        return "turn_end" if conv.get("mode") == "memory" else "finish"
+
+    async def dispatch_tools(
+        self, conv: dict[str, Any], run_state: dict[str, Any]
+    ) -> NodeUpdate:
+        """Dispatch every tool_use block of the round in parallel (docs/21)
+        and grow the conversation with the results."""
+        response: ModelResponse = conv["response"]
+        tool_uses = [
+            b for b in response.message.content if isinstance(b, ToolUseBlock)
+        ]
+        results = list(
+            await asyncio.gather(
+                *(
+                    _dispatch_one(
+                        self.compiled, self.pool, self.session, self.emitter,
+                        block, self.retrievers,
+                    )
+                    for block in tool_uses
+                )
+            )
+        )
+        messages = [
+            *conv["messages"],
+            response.message,
+            FoundryMessage(role=MessageRole.USER, content=list(results)),
+        ]
+        return {"conv": {**conv, "messages": messages, "response": None}}
+
+    async def end_turn(
+        self, conv: dict[str, Any], run_state: dict[str, Any]
+    ) -> NodeUpdate:
+        """docs/26 per-turn tail: state append + memory.write (episodic
+        ingest) → periodic consolidation."""
+        response: ModelResponse = conv["response"]
+        output = parse_output(self.compiled, response)
+        turn_text: str = conv["turns"][conv["turn_index"]]
         assistant_text = _response_text(response)
         turn_messages = [
             FoundryMessage(
@@ -559,26 +641,96 @@ async def _memory_agent_turns(
                 content=[TextBlock(text=assistant_text)],
             ),
         ]
-        append_messages(turn_messages)
-        recent.extend(turn_messages)
-        await memory.write(
+        local = dict(run_state)
+        writes: dict[str, Any] = {}
+        delta: dict[str, Any] = {}
+        for field_name in self.message_fields:
+            current = list(local.get(field_name) or [])
+            local[field_name] = [*current, *turn_messages]
+            if self.reducers.get(field_name) is Reducer.APPEND:
+                delta[field_name] = list(turn_messages)
+            else:
+                delta[field_name] = local[field_name]
+        ctx = self._make_ctx(local, writes, conv["turn_index"], conv["recent"])
+        await self._memory().write(
             MemoryWrite(
                 kind="message",
                 content=f"user: {turn_text}\nassistant: {assistant_text}",
             ),
             ctx,
         )
-        turn_count += 1
-        if memory.consolidation_due(turn_count):
-            await memory.consolidate(make_ctx(turn_count, recent))
-            recent.clear()
+        turn_count = conv["turn_index"] + 1
+        recent: list[FoundryMessage] = [*conv["recent"], *turn_messages]
+        if self._memory().consolidation_due(turn_count):
+            await self._memory().consolidate(
+                self._make_ctx(local, writes, turn_count, recent)
+            )
+            recent = []
+        new_conv = {
+            **conv,
+            "turn_index": turn_count,
+            "recent": recent,
+            "messages": [],
+            "response": None,
+            "output_dump": output.model_dump(mode="json"),
+        }
+        return {
+            "conv": new_conv,
+            "state": apply_delta(run_state, {**delta, **writes}, self.reducers),
+        }
 
-    assert output is not None  # turns is never empty
-    for field_name, value in _output_delta(output, view).items():
-        # Message-carrier fields were already threaded per turn.
-        if field_name not in message_fields:
-            write_field(field_name, value)
-    return delta, output.model_dump(mode="json")
+    def route_after_turn_end(self, conv: dict[str, Any]) -> str:
+        return "turn" if conv["turn_index"] < len(conv["turns"]) else "finish"
+
+    async def finish(
+        self, conv: dict[str, Any], run_state: dict[str, Any]
+    ) -> NodeUpdate:
+        """Terminal slice: semantic-cache store (miss path), output parse +
+        write-scope projection, agent.completed."""
+        if conv.get("mode") == "memory":
+            output_dump: dict[str, Any] = conv["output_dump"]
+            final_writes = {
+                field_name: value
+                for field_name, value in output_dump.items()
+                if field_name in self.view.write
+                and field_name not in self.message_fields
+            }
+            self.emitter.emit(
+                AgentCompleted,
+                agent_name=self.compiled.agent_name,
+                output_summary=f"{self.compiled.output_model.__name__} produced",
+            )
+            return {
+                "conv": None,
+                "state": apply_delta(run_state, final_writes, self.reducers),
+                "output": output_dump,
+            }
+        response: ModelResponse = conv["response"]
+        semantic = self.compiled.semantic_cache
+        if (
+            semantic is not None
+            and conv.get("cache_key") is not None
+            and not conv.get("cache_hit")
+        ):
+            # Store the TERMINAL response keyed by the initial input — a
+            # future hit replays the final answer without the tool loop.
+            await semantic_store(
+                semantic, conv["cache_key"], response,
+                agent_name=self.compiled.agent_name, emit=self.emitter.emit,
+            )
+        output = parse_output(self.compiled, response)
+        self.emitter.emit(
+            AgentCompleted,
+            agent_name=self.compiled.agent_name,
+            output_summary=f"{self.compiled.output_model.__name__} produced",
+        )
+        return {
+            "conv": None,
+            "state": apply_delta(
+                run_state, _output_delta(output, self.view), self.reducers
+            ),
+            "output": output.model_dump(mode="json"),
+        }
 
 
 # --- function-node step ----------------------------------------------------------------
@@ -679,14 +831,14 @@ async def _run_function_with_retries(
 
 
 __all__ = [
+    "AgentStepRuntime",
     "EventEmitter",
     "EventSink",
+    "NodeUpdate",
     "RunCounters",
     "apply_delta",
     "build_messages",
-    "llm_tool_loop",
     "parse_output",
-    "run_agent_step",
     "run_function_step",
     "seed_state",
     "tool_descriptions",

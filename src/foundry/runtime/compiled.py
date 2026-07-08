@@ -113,6 +113,8 @@ class RunResult:
     """Actual provider calls made — 0 on a semantic-cache hit."""
     final_state: dict[str, Any] | None = None
     """The run's final state projection (written to final_state.json)."""
+    resumed: bool = False
+    """True when this invocation resumed an interrupted checkpointed run."""
 
 
 __all__ = [
