@@ -459,3 +459,52 @@ def test_plan_tool_rollback_schema_check_details(project: Path) -> None:
         from foundry.versioning.rollback import enforce_preflight
 
         enforce_preflight(plan)  # no confirmation -> refused
+
+
+# --- foundry versions / foundry diff (deliverable 8) ----------------------------------
+
+
+@pytest.mark.integration
+def test_versions_shows_commits_pins_and_available_versions(
+    repo: Path, project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from foundry.cli.versions import execute_versions
+
+    assert execute_versions(str(project)) == 0
+    out = capsys.readouterr().out
+    assert "Project: hello" in out
+    assert "baseline: hello + banner v2" in out  # commit history
+    assert "hello_agent" in out and "*v2" in out  # active prompt pin marked
+    assert "local/banner" in out
+    assert "v1, *v2" in out  # both banner versions, pin marked
+    assert "catalog/http_get_json" in out
+    assert "time_service" in out  # connections section
+
+    # --tool narrows to one binding
+    assert execute_versions(str(project), tool="banner") == 0
+    narrowed = capsys.readouterr().out
+    assert "local/banner" in narrowed and "hello_agent" not in narrowed
+
+
+@pytest.mark.integration
+def test_diff_scopes_to_the_project_subtree(
+    repo: Path, project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from foundry.cli.versions import execute_diff
+
+    code = execute_rollback_command(
+        str(project), tool="banner", to="v1", assume_yes=True
+    )
+    assert code == 0
+    assert execute_diff(str(project), "HEAD~1", "HEAD") == 0
+    out = capsys.readouterr().out
+    assert "-    version: v2" in out and "+    version: v1" in out
+
+    # --path narrows further; an untouched subtree diffs empty
+    assert (
+        execute_diff(
+            str(project), "HEAD~1", "HEAD", path="agents/hello_agent/"
+        )
+        == 0
+    )
+    assert "no differences" in capsys.readouterr().out

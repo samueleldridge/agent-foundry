@@ -140,9 +140,12 @@ def promote_artifact(
             "are immutable — never overwritten (docs/50 invariant 1)",
             context={"target": target, "dest": str(dest_dir)},
         )
-    if prior is not None and _tree_digest(prior) == _tree_digest(source_version_dir):
+    spec_file_name = _SPEC_FILE[kind_subdir]
+    if prior is not None and _tree_digest(prior, spec_file_name) == _tree_digest(
+        source_version_dir, spec_file_name
+    ):
         raise CatalogPromotionRefused(
-            f"{kind_subdir}/{name}@{source_version} is byte-identical to "
+            f"{kind_subdir}/{name}@{source_version} is content-identical to "
             f"catalog {name}@{existing[-1]}; nothing to promote (re-promoting "
             "would overwrite nothing and duplicate the version)",
             context={
@@ -450,14 +453,26 @@ def _parse_target(target: str) -> tuple[str, str, str]:
     return project, kind_subdir, name
 
 
-def _tree_digest(directory: Path) -> str:
+def _tree_digest(directory: Path, spec_file_name: str) -> str:
+    """Content fingerprint for the duplicate-promotion check. The spec
+    yaml's top-level ``version:`` line is neutralised — the catalog copy is
+    rewritten to the catalog's own number, so it must not defeat the
+    'nothing actually changed' comparison."""
     digest = hashlib.sha256()
     for file in sorted(directory.rglob("*")):
         if not file.is_file() or "__pycache__" in file.parts:
             continue
+        content = file.read_bytes()
+        if file.name == spec_file_name:
+            content = b"\n".join(
+                b"version: <neutralised>"
+                if line.startswith(b"version:")
+                else line
+                for line in content.splitlines()
+            )
         digest.update(file.relative_to(directory).as_posix().encode())
         digest.update(b"\0")
-        digest.update(file.read_bytes())
+        digest.update(content)
         digest.update(b"\0")
     return digest.hexdigest()
 
