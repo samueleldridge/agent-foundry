@@ -98,3 +98,39 @@ def test_single_flow_agent_must_be_an_agent() -> None:
     with pytest.raises(CompileError) as excinfo:
         plan_flow(project, SYSTEM_FILE)
     assert excinfo.value.context["pointer"] == "/flow/agent"
+
+
+# --- reserved sub-node names (Phase 4 pre-work; Phase 3 review finding 4) -------------
+
+
+@pytest.mark.unit
+def test_function_named_like_reserved_subnode_is_compile_error() -> None:
+    """The runtime expands agents into <agent>__llm/tools/finish/turn/
+    turn_end sub-nodes; a function claiming one of those names must fail at
+    COMPILE time (exit 2 via the CLI), not at runtime graph wiring."""
+    from foundry.orchestration.patterns import validate_namespace
+
+    project = _project(
+        SequentialFlow(steps=["hello_agent", "hello_agent__llm"]),
+        ["hello_agent"],
+        ["hello_agent__llm"],
+    )
+    with pytest.raises(CompileError) as excinfo:
+        validate_namespace(project, SYSTEM_FILE)
+    message = str(excinfo.value)
+    assert "hello_agent__llm" in message
+    assert "reserved" in message
+    assert excinfo.value.context["collisions"] == ["hello_agent__llm"]
+    assert excinfo.value.context["file"] == str(SYSTEM_FILE)
+
+
+@pytest.mark.unit
+def test_non_reserved_double_underscore_names_are_fine() -> None:
+    from foundry.orchestration.patterns import validate_namespace
+
+    project = _project(
+        SequentialFlow(steps=["hello_agent", "other__llm"]),
+        ["hello_agent"],
+        ["other__llm"],
+    )
+    validate_namespace(project, SYSTEM_FILE)  # no raise

@@ -434,6 +434,36 @@ def test_agent_and_function_with_same_name_is_compile_error(
     assert not _run_dirs(tmp_path)
 
 
+@pytest.mark.integration
+def test_function_named_like_agent_subnode_is_compile_error_exit_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A function named <agent>__llm collides with the agent's reserved
+    internal sub-node names — compile-time CompileError, exit 2 (Phase 3
+    review finding 4: previously failed only at runtime graph wiring)."""
+    project = _copy_project(tmp_path, "memory_reserved")
+    clone = project / "functions" / "hello_agent__llm"
+    shutil.copytree(project / "functions" / "normalize_input", clone)
+    function_yaml = clone / "function.yaml"
+    function_yaml.write_text(
+        function_yaml.read_text().replace(
+            "name: normalize_input", "name: hello_agent__llm"
+        )
+    )
+    system_yaml = project / "system.yaml"
+    system_yaml.write_text(system_yaml.read_text().replace(
+        "functions: [normalize_input, format_output]",
+        "functions: [normalize_input, format_output, hello_agent__llm]",
+    ))
+    code = execute_run(project, _turns(1), transport=MemoryTransport().build())
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "CompileError" in err
+    assert "hello_agent__llm" in err
+    assert "reserved" in err
+    assert not _run_dirs(tmp_path)
+
+
 # --- mixed-flow validation (exit gate 12) ----------------------------------------------
 
 

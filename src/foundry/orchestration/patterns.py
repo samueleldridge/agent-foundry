@@ -23,6 +23,11 @@ from foundry.core.errors import CompileError
 SUPPORTED_PATTERNS = ("single", "sequential")
 """Patterns Phase 3 executes. parallel/supervisor/graph compile in Phase 7."""
 
+RESERVED_SUBNODE_SUFFIXES = ("llm", "tools", "finish", "turn", "turn_end")
+"""The runtime expands every agent into ``<agent>__<suffix>`` sub-graph
+nodes (docs/_phase_handoffs/phase_3.md deviation 7); those names are
+reserved in the flow-node namespace and checked at compile time."""
+
 
 @dataclass(frozen=True)
 class ExecutionPlan:
@@ -91,7 +96,10 @@ def validate_flow_refs(project: LoadedProject, system_file: Path) -> None:
 
 def validate_namespace(project: LoadedProject, system_file: Path) -> None:
     """Agents and functions share one node namespace (docs/21): the compiler
-    resolves flow steps to either, so names cannot collide."""
+    resolves flow steps to either, so names cannot collide. The runtime's
+    per-agent sub-node names (``<agent>__llm`` etc.) live in that namespace
+    too — a colliding node name is a compile-time error, not a runtime one
+    (Phase 3 review finding 4)."""
     collisions = sorted(set(project.system.agents) & set(project.system.functions))
     if collisions:
         raise CompileError(
@@ -104,6 +112,25 @@ def validate_namespace(project: LoadedProject, system_file: Path) -> None:
                 "collisions": collisions,
             },
         )
+    node_names = set(project.system.agents) | set(project.system.functions)
+    for agent_name in project.system.agents:
+        reserved = {
+            f"{agent_name}__{suffix}" for suffix in RESERVED_SUBNODE_SUFFIXES
+        }
+        taken = sorted(reserved & node_names)
+        if taken:
+            raise CompileError(
+                f"node name(s) collide with agent {agent_name!r}'s reserved "
+                f"internal sub-node names: {', '.join(taken)}; rename the "
+                f"node(s) (reserved per agent: <agent>__"
+                f"{'/'.join(RESERVED_SUBNODE_SUFFIXES)})",
+                context={
+                    "file": str(system_file),
+                    "pointer": "/functions",
+                    "collisions": taken,
+                    "agent": agent_name,
+                },
+            )
 
 
 def plan_flow(project: LoadedProject, system_file: Path) -> ExecutionPlan:
