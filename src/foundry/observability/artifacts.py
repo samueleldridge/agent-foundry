@@ -62,11 +62,24 @@ class RunArtifactWriter:
     def next_sequence(self) -> int:
         """The next RunEvent sequence number for this run: a resumed run
         appends to events.jsonl and continues the sequence where the killed
-        process stopped (event-stream invariant 1 across processes)."""
+        process stopped (event-stream invariant 1 across processes).
+
+        A SIGKILL mid-write can leave a torn trailing line (no ``\\n``);
+        counting it would both miscount the sequence and leave garbage the
+        next append glues onto — so the partial line is truncated away and
+        only complete lines count (Phase 3 review finding 3)."""
         if not self._events_path.exists():
             return 0
-        with self._events_path.open() as fh:
-            return sum(1 for _ in fh)
+        raw = self._events_path.read_bytes()
+        if not raw:
+            return 0
+        complete, newline, partial = raw.rpartition(b"\n")
+        if partial:
+            with self._events_path.open("wb") as fh:
+                fh.write(complete + newline)
+        if not newline:
+            return 0
+        return complete.count(b"\n") + 1
 
     def record_event(self, event: BaseModel) -> None:
         with self._events_path.open("a") as fh:
