@@ -1,0 +1,48 @@
+# hello — end-to-end project eval (docs/40 § Three scopes: project).
+# The greeting is free text, so "correct" = the greeting names the caller;
+# the exact scorer runs in regex mode against the `greeting` output field.
+name: hello_greeting
+description: |
+  Five representative greetings: the produced greeting must address the
+  caller by name. Deterministic (temperature forced to 0, seed propagated
+  where the provider supports it).
+scope: project
+target: hello
+
+cases:
+  - id: plain_name
+    input: { name: "world" }
+    expected: { greeting: "\\bworld\\b" }
+    tags: [smoke]
+  - id: short_name
+    input: { name: "Ada" }
+    expected: { greeting: "\\bAda\\b" }
+    tags: [smoke]
+  - id: full_name
+    input: { name: "Grace Hopper" }
+    expected: { greeting: "Grace Hopper" }
+    tags: [multi_word]
+  - id: lowercase_name
+    input: { name: "linus" }
+    expected: { greeting: "\\blinus\\b" }
+    tags: [casing]
+  - id: heavier_weighted_name
+    input: { name: "Foundry" }
+    expected: { greeting: "\\bFoundry\\b" }
+    tags: [smoke]
+    weight: 2.0
+
+scorers:
+  - kind: exact
+    name: greeting_mentions_name
+    config:
+      field: greeting
+      case_sensitive: false
+      fuzzy: { kind: regex }
+    weight: 1.0
+
+threshold: 0.9
+max_parallel: 4
+deterministic: true
+seed: 42
+schema_version: 1

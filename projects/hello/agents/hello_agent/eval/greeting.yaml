@@ -1,0 +1,36 @@
+# hello_agent — agent-scoped eval (docs/40 § Three scopes: agent).
+# Input is a slice of the agent's READ-visible state (just `name`); the
+# agent runs in isolation (its step loop only, no flow around it).
+name: hello_agent_greeting
+description: |
+  The agent in isolation: given a name in its read scope, the produced
+  Greeting output must mention that name.
+scope: agent
+target: hello_agent
+
+cases:
+  - id: plain_name
+    input: { name: "world" }
+    expected: { greeting: "\\bworld\\b" }
+  - id: short_name
+    input: { name: "Ada" }
+    expected: { greeting: "\\bAda\\b" }
+  - id: skipped_example
+    input: { name: "Skip Me" }
+    expected: { greeting: "Skip Me" }
+    skip: true
+    skip_reason: "documents EvalCase.skip; not counted in the aggregate"
+
+scorers:
+  - kind: exact
+    name: greeting_mentions_name
+    config:
+      field: greeting
+      case_sensitive: false
+      fuzzy: { kind: regex }
+    weight: 1.0
+
+threshold: 0.9
+deterministic: true
+seed: 42
+schema_version: 1

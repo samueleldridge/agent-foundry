@@ -1,0 +1,55 @@
+# hello — judged project eval (docs/40 § llm_judge).
+# Demonstrates the provider-agnostic judge: the agent under test runs on
+# the binding in agent.yaml (anthropic by default) while the judge runs on
+# a DIFFERENT vendor via ModelBinding — cross-vendor judging per docs/40.
+name: hello_greeting_judged
+description: |
+  Same greeting contract, scored half by the regex check and half by an
+  LLM judge grading warmth + correctness on a 0-1 scale.
+scope: project
+target: hello
+
+cases:
+  - id: plain_name
+    input: { name: "world" }
+    expected: { greeting: "\\bworld\\b" }
+  - id: short_name
+    input: { name: "Ada" }
+    expected: { greeting: "\\bAda\\b" }
+  - id: full_name
+    input: { name: "Grace Hopper" }
+    expected: { greeting: "Grace Hopper" }
+
+scorers:
+  - kind: exact
+    name: greeting_mentions_name
+    config:
+      field: greeting
+      case_sensitive: false
+      fuzzy: { kind: regex }
+    weight: 0.5
+  - kind: llm_judge
+    name: warm_greeting_judge
+    config:
+      judge_model_binding:
+        provider: openai
+        model: gpt-4o-mini
+        settings:
+          max_tokens: 300
+      rubric_template: |
+        The system under test greets a caller by name.
+
+        Caller input: {input}
+        Expected pattern (the greeting must mention this name): {expected}
+        Actual output: {actual}
+
+        Score 1.0 when the greeting addresses the caller by name AND reads
+        as warm and friendly; 0.5 when it names the caller but is flat or
+        awkward; 0.0 when it fails to name the caller at all.
+      pass_threshold: 0.5
+    weight: 0.5
+
+threshold: 0.75
+deterministic: true
+seed: 42
+schema_version: 1

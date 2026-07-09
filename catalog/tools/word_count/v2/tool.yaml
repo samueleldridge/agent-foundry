@@ -1,0 +1,16 @@
+name: word_count
+version: v2
+description: |
+  Count words, characters, and lines in a text. v2 counts words as
+  alphanumeric tokens (hyphenated compounds count per component;
+  punctuation-only tokens don't count), fixing v1's whitespace-split
+  behaviour. Pure transformation tool with no connections.
+input_schema: schemas.py::WordCountIn
+output_schema: schemas.py::WordCountOut
+handler: handler.py::handle
+timeout_s: 5.0
+tags: [text, read-only]
+standalone_eval: eval.yaml
+author: foundry-team
+created_at: 2026-07-09T00:00:00Z
+schema_version: 1

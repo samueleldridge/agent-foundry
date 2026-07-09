@@ -1,0 +1,45 @@
+# word_count@v2 behavioural contract. Also the shared spec for
+# `foundry eval compare --tool word_count v1 v2` (compare uses the NEWEST
+# listed version's eval so every run shares one eval_spec_hash — docs/40
+# invariant 5). Cases 3-4 pin the v2 word semantics v1 gets wrong.
+name: word_count_v2_eval
+description: Behavioural contract for word_count@v2 (token-based words).
+scope: tool
+target: catalog/word_count@v2
+cases:
+  - id: simple_sentence
+    input:
+      text: "hello brave new world"
+    expected:
+      words: 4
+      characters: 21
+      lines: 1
+  - id: empty
+    input:
+      text: ""
+    expected:
+      words: 0
+      characters: 0
+      lines: 0
+  - id: hyphenated_compound
+    input:
+      text: "state-of-the-art design"
+    expected:
+      words: 5
+      characters: 23
+      lines: 1
+    tags: [tokenisation]
+  - id: punctuation_only
+    input:
+      text: "!!! ???"
+    expected:
+      words: 0
+      characters: 7
+      lines: 1
+    tags: [tokenisation]
+scorers:
+  - kind: exact
+    name: exact_match
+threshold: 1.0
+deterministic: true
+schema_version: 1
