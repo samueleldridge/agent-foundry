@@ -310,11 +310,23 @@ class RollbackError(VersioningError):
     pass
 
 
+class GitBackendError(VersioningError):
+    """A git subprocess operation failed (docs/51 § Failure modes).
+    ``context`` carries the failing argv, returncode, and stderr."""
+
+
+class CatalogPromotionRefused(VersioningError):
+    """`foundry catalog promote` refused: eval below floor, overwrite
+    attempt, schema-breaking under --strict-semver, or an artifact whose
+    eval cannot run (docs/50 § Versioning failure modes)."""
+
+
 __all__ = [
     "ApprovalRequired",
     "CacheBackendError",
     "CacheCorruptedEntry",
     "CacheError",
+    "CatalogPromotionRefused",
     "CheckpointError",
     "CheckpointReadError",
     "CheckpointWriteError",
@@ -339,6 +351,7 @@ __all__ = [
     "EmbedderTimeoutError",
     "EmbedderUnexpectedError",
     "FoundryError",
+    "GitBackendError",
     "IterationLimitError",
     "MaxHopsExceededError",
     "MemoryConfigError",
