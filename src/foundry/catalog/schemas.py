@@ -40,6 +40,15 @@ class VersionMetadata(BaseModel):
     notes: str = ""
     deprecated: bool = False
     deprecation_reason: str | None = None
+    # Phase 5 additive fields (docs/50 § Catalog promotion + semver):
+    schema_change: Literal["initial", "additive", "breaking"] | None = None
+    """Contract movement vs the immediately-prior catalog version."""
+    breaking_changes: list[str] = Field(default_factory=list)
+    """Human-readable breaking-change list when schema_change='breaking'."""
+    promoted_by: str | None = None
+    """The promoting human's identity (git config user.email / auth ctx)."""
+    source_ref: str | None = None
+    """Where a promoted version came from, e.g. 'hello/tools/word_stats@v2'."""
 
 
 class VersionsMetadata(BaseModel):
