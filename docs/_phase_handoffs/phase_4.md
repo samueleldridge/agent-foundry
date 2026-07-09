@@ -139,6 +139,18 @@ against `httpx.MockTransport` per the established pattern.
     carries everything clustering needs (per-case tags, scorer results,
     errors).
 
+## Errata (added post-review)
+
+- **Non-deterministic replicates keep only the LAST replicate's output.**
+  With `deterministic: false` and `replicates: N`, the harness stores all
+  N per-replicate weighted scores in `CaseResult.metadata
+  ["replicate_scores"]` (and `score` is their mean), but
+  `CaseResult.actual` / `actual_preview` / `scorer_results` reflect ONLY
+  the final replicate — earlier replicates' outputs and per-scorer
+  breakdowns are not persisted. Consumers comparing scorer_results across
+  runs of a non-deterministic spec should treat them as a sample, not the
+  aggregate.
+
 ## Interface notes for Phase 5/6 (the artifact contract)
 
 - **Read APIs:** `foundry.eval.load_eval_result(eval_run_id | dir |
