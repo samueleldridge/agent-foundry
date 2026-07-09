@@ -217,6 +217,8 @@ Failures at any of these → `MemoryConfigError` with the bad field's path.
 
 > **Errata (Phase 2c):** the implementation splits the compile-time failures above into two classes — field/type/file issues (state-field existence, working `source_field` type, consolidator prompt on disk) raise `MemoryConfigError`; scope/slot issues (a layer reading/writing outside the agent's `state_visibility`, an unbound `retriever_slot`) raise `CompileError`, matching docs/03 § Phase 2c. Both are load-time.
 
+> **Errata (Phase 3/4 — kill+resume durability):** episodic ingests performed DURING a run (`memory.write` → the layer's retriever store) are **process-local** in the shipped in-memory episode stores: a run killed mid-conversation and resumed in a fresh process rehydrates its graph state from the checkpointer, but in-run episodic ingests made by the killed process are gone unless the retriever's backing store is itself durable (e.g. pgvector). Only **state-backed** memory content — the working layer's `source_field` messages and the semantic layer's `state_field` — lives in checkpointed graph state and therefore survives kill+resume. Durable episodic ingest is a store property, not a memory-subsystem guarantee.
+
 ## Lifecycle
 
 ### Per-turn
