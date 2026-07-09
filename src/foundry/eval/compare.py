@@ -256,8 +256,8 @@ async def compare_project_pin_sets(
                 transport=transport,
                 event_sink=event_sink,
                 eval_spec_ref=str(eval_path),
+                extra_metadata={"pin_set_ref": ref},
             )
-            result.metadata["pin_set_ref"] = ref
             runs.append(result)
     return compare_runs(runs, pin_set_refs)
 

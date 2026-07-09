@@ -407,6 +407,7 @@ async def run_eval(
     event_sink: EventSink | None = None,
     eval_spec_ref: str = "",
     write_artifact: bool = True,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> EvalRunResult:
     """Run one eval set against one target; returns (and by default
     persists) the ``EvalRunResult``.
@@ -514,6 +515,8 @@ async def run_eval(
             duration_ms=int((time.monotonic() - started_clock) * 1000),
             halted_reason=halted_reason,
         )
+        if extra_metadata:
+            result.metadata.update(extra_metadata)
         set_span_attributes(
             span,
             {

@@ -13,4 +13,7 @@ wheels/
 # Virtual environments
 .venv
 
+# Per-project runtime state (eval history, audit) — never committed
+projects/*/.foundry/
+
 personal_docs/
