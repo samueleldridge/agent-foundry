@@ -14,6 +14,11 @@ from foundry.eval.compare import (
     compare_tool_versions,
     write_comparison_artifact,
 )
+from foundry.eval.failure_clustering import (
+    FailureCluster,
+    FailureClustering,
+    cluster_failures,
+)
 from foundry.eval.harness import (
     AgentEvalTarget,
     EvalTarget,
@@ -59,11 +64,14 @@ __all__ = [
     "EvalScorer",
     "EvalSpec",
     "EvalTarget",
+    "FailureCluster",
+    "FailureClustering",
     "ProjectEvalTarget",
     "ScoredCase",
     "ScorerConfig",
     "ScorerSummary",
     "ToolEvalTarget",
+    "cluster_failures",
     "compare_project_pin_sets",
     "compare_runs",
     "compare_tool_versions",
