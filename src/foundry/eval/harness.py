@@ -30,10 +30,22 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from foundry.catalog.loader import LoadedToolVersion, load_tool_version
-from foundry.config import ArtifactRef, EnvSecretsProvider, FoundryRoots
+from foundry.config import (
+    ArtifactRef,
+    EnvSecretsProvider,
+    FoundryRoots,
+    load_system_spec,
+)
 from foundry.config.secrets import SecretsProvider
-from foundry.connections import InProcessConnectionPool
+from foundry.connections import (
+    InProcessConnectionPool,
+    PreparedConnection,
+    SlotConnectionAccessor,
+    prepare_connection,
+    validate_tool_connection_wiring,
+)
 from foundry.core import (
+    ConnectionContext,
     CostBudget,
     LLMCallCompleted,
     RegisteredTool,
@@ -83,6 +95,11 @@ class ToolEvalTarget:
     """One tool version, invoked through the dispatcher — NOT via an agent."""
 
     loaded: LoadedToolVersion
+    slots: dict[str, PreparedConnection] | None = None
+    """Connection bindings for connection-requiring tools (docs/40: 'a test
+    fixture or the project's bound connection'). None for pure tools."""
+    project: str = ""
+    """Pool scope when slots are bound (the lending project's name)."""
 
     scope = "tool"
 
@@ -134,29 +151,86 @@ EvalTarget = ToolEvalTarget | AgentEvalTarget | ProjectEvalTarget
 
 
 def load_tool_target(
-    ref_str: str, roots: FoundryRoots, *, version: str | None = None
+    ref_str: str,
+    roots: FoundryRoots,
+    *,
+    version: str | None = None,
+    connections_from: Path | None = None,
+    secrets: SecretsProvider | None = None,
 ) -> ToolEvalTarget:
     """Resolve ``catalog/<name>@v<N>`` (or local/) into a tool eval target.
 
-    Phase 4 limitation (documented in the handoff): standalone tool evals
-    run WITHOUT connection bindings — a tool whose spec requires a
-    non-optional connection slot cannot be eval'd standalone yet
-    (``test_connection_overrides`` lands with a later phase).
+    Connection-requiring tools (Phase 5 closes the Phase 4 seam): pass
+    ``connections_from`` — a project directory whose ``system.yaml`` binds
+    the tool — and the standalone eval runs against the project's bound
+    connections (docs/40 § Three scopes: 'a test fixture or the project's
+    bound connection'). Without it, a tool whose spec requires a
+    non-optional connection slot is refused with a structured error.
     """
     ref = ArtifactRef.parse(ref_str, "tool", version=version)
     loaded = load_tool_version(ref, roots)
     required = [
         slot.slot for slot in loaded.spec.connections_required if not slot.optional
     ]
-    if required:
+    if not required:
+        return ToolEvalTarget(loaded=loaded)
+    if connections_from is None:
         raise CompileError(
             f"tool {ref.to_str()!r} requires connection slot(s) "
-            f"{', '.join(required)}; standalone tool evals cannot bind "
-            "connections in Phase 4 — eval it through a project that binds "
-            "them",
+            f"{', '.join(required)}; standalone tool evals need a project "
+            "that binds them — pass --project <dir> (its system.yaml "
+            "connection_bindings for this tool are used)",
             context={"ref": ref.to_str(), "required_slots": required},
         )
-    return ToolEvalTarget(loaded=loaded)
+    slots, project_name = _project_bound_slots(
+        loaded, ref, connections_from, secrets or EnvSecretsProvider()
+    )
+    return ToolEvalTarget(loaded=loaded, slots=slots, project=project_name)
+
+
+def _project_bound_slots(
+    loaded: LoadedToolVersion,
+    ref: ArtifactRef,
+    project_dir: Path,
+    secrets: SecretsProvider,
+) -> tuple[dict[str, PreparedConnection], str]:
+    """Borrow a project's connection bindings for a standalone tool eval."""
+    system_file = project_dir / "system.yaml"
+    system = load_system_spec(system_file)
+    bare_ref = f"{ref.scope}/{ref.name}"
+    candidates = [
+        (name, binding)
+        for name, binding in system.tools.items()
+        if binding.ref == bare_ref
+    ]
+    if not candidates:
+        raise CompileError(
+            f"project {system.name!r} does not bind tool {bare_ref!r} in "
+            f"{system_file}; bind it (with connection_bindings) so its "
+            "standalone eval can run against real connections",
+            context={
+                "ref": ref.to_str(),
+                "project": system.name,
+                "bound_tools": sorted(system.tools),
+            },
+        )
+    logical_name, binding = candidates[0]
+    project_roots = FoundryRoots.for_project(project_dir)
+    prepared = {
+        conn_name: prepare_connection(
+            conn_name,
+            system.connections[conn_name],
+            project_roots,
+            secrets,
+            system_file=system_file,
+        )
+        for conn_name in sorted(set(binding.connection_bindings.values()))
+        if conn_name in system.connections
+    }
+    slots = validate_tool_connection_wiring(
+        logical_name, loaded.spec, binding, prepared, system_file=system_file
+    )
+    return slots, system.name
 
 
 # --- case invocation ---------------------------------------------------------------
@@ -166,7 +240,13 @@ Invoke = Callable[
 ]
 
 
-def _tool_invoke(loaded: LoadedToolVersion) -> Invoke:
+def _tool_invoke(
+    loaded: LoadedToolVersion,
+    *,
+    slots: dict[str, PreparedConnection] | None = None,
+    project: str = "",
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> Invoke:
     registry = ToolRegistry()
     name = loaded.spec.name
     registry.register(
@@ -177,12 +257,16 @@ def _tool_invoke(loaded: LoadedToolVersion) -> Invoke:
                 version=loaded.ref.version,
                 description=loaded.spec.description,
                 tags=loaded.spec.tags,
+                connection_slots=sorted(slots) if slots else [],
             ),
             input_schema=loaded.input_model,
             output_schema=loaded.output_model,
             handler=loaded.handler,
             timeout_s=float(loaded.spec.timeout_s),
             retry_policy=loaded.spec.retry_policy,
+            auth_error_retry=any(
+                p.refresh.mode == "on_auth_error" for p in (slots or {}).values()
+            ),
             # Caches are never required for eval correctness (docs/40
             # § Composition); standalone tool evals run cache-less.
             cacheable=False,
@@ -192,6 +276,32 @@ def _tool_invoke(loaded: LoadedToolVersion) -> Invoke:
     async def invoke(
         case: EvalCase, session: Session, emitter: EventEmitter, sink: EventSink
     ) -> Any:
+        pool: InProcessConnectionPool | None = None
+        accessor: SlotConnectionAccessor | None = None
+        if slots:
+            pool = InProcessConnectionPool()
+            accessor = SlotConnectionAccessor(
+                pool,
+                project or "standalone_eval",
+                slots,
+                ConnectionContext(http_transport=transport),
+                agent_name="__eval__",
+                emit=emitter.emit,
+            )
+        try:
+            return await _dispatch(case, session, emitter, accessor)
+        finally:
+            if accessor is not None:
+                await accessor.release_all()
+            if pool is not None:
+                await pool.close_all()
+
+    async def _dispatch(
+        case: EvalCase,
+        session: Session,
+        emitter: EventEmitter,
+        connections: SlotConnectionAccessor | None,
+    ) -> Any:
         ctx = RunContext(
             run_id=str(session.run_id),
             agent_name="__eval__",
@@ -199,7 +309,7 @@ def _tool_invoke(loaded: LoadedToolVersion) -> Invoke:
             tool_ref=loaded.ref.to_str(),
             timeout_s=float(loaded.spec.timeout_s),
             retry_policy=loaded.spec.retry_policy,
-            connections=None,
+            connections=connections,
             retrievers=None,
         )
         return await registry.dispatch(
@@ -295,9 +405,16 @@ def _project_invoke(compiled: CompiledProject) -> Invoke:
     return invoke
 
 
-def _build_invoke(target: EvalTarget) -> Invoke:
+def _build_invoke(
+    target: EvalTarget, transport: httpx.AsyncBaseTransport | None = None
+) -> Invoke:
     if isinstance(target, ToolEvalTarget):
-        return _tool_invoke(target.loaded)
+        return _tool_invoke(
+            target.loaded,
+            slots=target.slots,
+            project=target.project,
+            transport=transport,
+        )
     if isinstance(target, AgentEvalTarget):
         return _agent_invoke(target.compiled)
     return _project_invoke(target.compiled)
@@ -454,7 +571,7 @@ async def run_eval(
         ),
     )
     _apply_determinism(spec, target, eval_emitter)
-    invoke = _build_invoke(target)
+    invoke = _build_invoke(target, transport)
 
     semaphore = asyncio.Semaphore(spec.max_parallel)
     total_cost = Decimal("0")

@@ -60,7 +60,10 @@ def execute_eval(
     configure_logging()
     try:
         if target == "tool":
-            return _eval_tool(args, fail_under, json_output, eval_option, transport)
+            return _eval_tool(
+                args, fail_under, json_output, eval_option, transport,
+                connections_from=project,
+            )
         if target == "agent":
             return _eval_agent(args, fail_under, json_output, eval_option, transport)
         if target == "compare":
@@ -195,16 +198,20 @@ def _eval_tool(
     json_output: bool,
     eval_option: str | None,
     transport: httpx.AsyncBaseTransport | None,
+    *,
+    connections_from: str | None = None,
 ) -> int:
     if len(args) != 1:
         raise ConfigValidationError(
-            "usage: foundry eval tool <ref>@<version> (e.g. "
-            "catalog/word_count@v1)",
+            "usage: foundry eval tool <ref>@<version> [--project <dir>] "
+            "(--project lends a binding project's connections to a "
+            "connection-requiring tool)",
             context={"received_args": args},
         )
     ref = args[0] if "/" in args[0] else f"catalog/{args[0]}"
-    roots = FoundryRoots.for_project(Path.cwd())
-    target = load_tool_target(ref, roots)
+    project_dir = Path(connections_from) if connections_from else None
+    roots = FoundryRoots.for_project(project_dir or Path.cwd())
+    target = load_tool_target(ref, roots, connections_from=project_dir)
     if eval_option is not None:
         spec_path = Path(eval_option)
     else:
