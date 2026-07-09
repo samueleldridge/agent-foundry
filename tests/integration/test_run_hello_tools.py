@@ -168,6 +168,34 @@ def test_one_tool_agent_end_to_end(
 
 
 @pytest.mark.integration
+def test_run_totals_accumulate_across_llm_calls(tmp_path: Path) -> None:
+    """A 2-round tool run's run.completed (and metadata trail) must report
+    the SUM of both LLM calls' tokens/cost, not the last call's values
+    (Phase 3 review finding 2: RunCounters kept only last_response)."""
+    transport = Transport(
+        [_tool_use_turn(_get_time_block()), _final_turn("Hello, totals!")]
+    )
+    code = execute_run(HELLO_DIR, '{"name": "world"}', transport=transport.build())
+    assert code == 0
+
+    run_dir = _run_dir(tmp_path)
+    llm_calls = _read_jsonl(run_dir / "llm_calls.jsonl")
+    assert len(llm_calls) == 2
+    events = _read_jsonl(run_dir / "events.jsonl")
+    completed = events[-1]
+    assert completed["event"] == "run.completed"
+    # round 1: 50 in / 30 out; round 2: 90 in / 25 out (scripted above)
+    assert completed["total_input_tokens"] == 50 + 90
+    assert completed["total_output_tokens"] == 30 + 25
+    from decimal import Decimal
+
+    expected_cost = sum(
+        Decimal(call["cost_estimate_usd"]) for call in llm_calls
+    )
+    assert Decimal(completed["total_cost_estimate_usd"]) == expected_cost
+
+
+@pytest.mark.integration
 def test_pool_reuse_across_two_tool_calls_in_one_run(tmp_path: Path) -> None:
     transport = Transport(
         [

@@ -21,6 +21,7 @@ import json
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -114,11 +115,29 @@ class EventEmitter:
 
 
 class RunCounters:
-    """Mutable per-run tallies shared across steps."""
+    """Mutable per-run tallies shared across steps.
+
+    Token/cost totals ACCUMULATE across every LLM call in the run (a
+    2-round tool run reports the sum of both calls, not the last call's
+    values — Phase 3 review finding 2)."""
 
     def __init__(self) -> None:
         self.llm_call_count = 0
         self.last_response: ModelResponse | None = None
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+        self.total_cost_estimate_usd: Decimal | None = None
+
+    def record(self, response: ModelResponse) -> None:
+        """Tally one completed LLM call."""
+        self.llm_call_count += 1
+        self.last_response = response
+        self.total_input_tokens += response.usage.input_tokens
+        self.total_output_tokens += response.usage.output_tokens
+        if response.cost_estimate_usd is not None:
+            self.total_cost_estimate_usd = (
+                self.total_cost_estimate_usd or Decimal("0")
+            ) + response.cost_estimate_usd
 
 
 # --- state helpers ---------------------------------------------------------------
@@ -575,8 +594,7 @@ class AgentStepRuntime:
                     "stop_reason": response.stop_reason.value,
                 },
             )
-        self.counters.llm_call_count += 1
-        self.counters.last_response = response
+        self.counters.record(response)
         self.emitter.emit(
             LLMCallCompleted,
             agent_name=self.compiled.agent_name,

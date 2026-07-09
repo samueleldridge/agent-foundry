@@ -119,20 +119,13 @@ def _wire_graph(
 
     # Agent sub-graph. The begin node carries the agent's flow-visible name;
     # the internal slices are suffixed (":" is reserved by LangGraph).
+    # Collisions with these reserved names are rejected at compile time by
+    # ``validate_namespace`` (Phase 3 review finding 4).
     llm_name = f"{agent}__llm"
     tools_name = f"{agent}__tools"
     finish_name = f"{agent}__finish"
     turn_name = f"{agent}__turn"
     turn_end_name = f"{agent}__turn_end"
-    generated = {llm_name, tools_name, finish_name, turn_name, turn_end_name}
-    taken = generated & set(compiled.functions)
-    if taken:
-        raise OrchestrationError(
-            f"function node name(s) collide with the agent's internal "
-            f"sub-node names: {', '.join(sorted(taken))}; rename the "
-            f"function(s) (reserved: <agent>__llm/tools/finish/turn/turn_end)",
-            context={"collisions": sorted(taken)},
-        )
 
     graph.add_node(agent, wrap(agent, agent, runtime.begin))
     graph.add_node(llm_name, wrap(llm_name, agent, runtime.llm_round))
@@ -348,16 +341,15 @@ async def run_project(
 
         duration_ms = int((datetime.now(UTC) - started).total_seconds() * 1000)
         last_response = counters.last_response
-        usage = last_response.usage if last_response else None
+        # Totals accumulate across EVERY LLM call in the run (Phase 3 review
+        # finding 2: a 2-round tool run must not report only the last call).
         emitter.emit(
             RunCompleted,
             status="success",
             final_output=output,
-            total_input_tokens=usage.input_tokens if usage else 0,
-            total_output_tokens=usage.output_tokens if usage else 0,
-            total_cost_estimate_usd=(
-                last_response.cost_estimate_usd if last_response else None
-            ),
+            total_input_tokens=counters.total_input_tokens,
+            total_output_tokens=counters.total_output_tokens,
+            total_cost_estimate_usd=counters.total_cost_estimate_usd,
             duration_ms=duration_ms,
         )
         set_span_attributes(
@@ -365,11 +357,9 @@ async def run_project(
             {
                 "status": "success",
                 "total_duration_ms": duration_ms,
-                "total_input_tokens": usage.input_tokens if usage else 0,
-                "total_output_tokens": usage.output_tokens if usage else 0,
-                "total_cost_estimate_usd": (
-                    last_response.cost_estimate_usd if last_response else None
-                ),
+                "total_input_tokens": counters.total_input_tokens,
+                "total_output_tokens": counters.total_output_tokens,
+                "total_cost_estimate_usd": counters.total_cost_estimate_usd,
             },
         )
     return RunResult(
