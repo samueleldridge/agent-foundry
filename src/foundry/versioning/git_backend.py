@@ -126,7 +126,12 @@ class GitBackend:
     # --- read operations ----------------------------------------------------
 
     def rev_parse(self, ref: str = "HEAD") -> str:
-        return self.run_git("rev-parse", "--verify", f"{ref}^{{commit}}").strip()
+        # ``--end-of-options`` on every path that interpolates a caller-
+        # supplied ref: a ref like ``--upload-pack=...`` must reach git as a
+        # revision (and fail), never as an option (Phase 5 review finding 4).
+        return self.run_git(
+            "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"
+        ).strip()
 
     def commit_exists(self, ref: str) -> bool:
         try:
@@ -180,12 +185,12 @@ class GitBackend:
 
     def show(self, ref: str) -> str:
         """The full ``git show`` output (message + diff) for one commit."""
-        return self.run_git("show", ref)
+        return self.run_git("show", "--end-of-options", ref)
 
     def diff(
         self, ref1: str, ref2: str, *, paths: list[str] | None = None
     ) -> str:
-        args = ["diff", f"{ref1}..{ref2}"]
+        args = ["diff", "--end-of-options", f"{ref1}..{ref2}"]
         if paths:
             args += ["--", *paths]
         return self.run_git(*args)
@@ -203,7 +208,9 @@ class GitBackend:
 
     def ls_files_at(self, ref: str, path: str) -> list[str]:
         """Tracked files under ``path`` (repo-relative) at ``ref``."""
-        out = self.run_git("ls-tree", "-r", "--name-only", ref, "--", path)
+        out = self.run_git(
+            "ls-tree", "-r", "--name-only", "--end-of-options", ref, "--", path
+        )
         return [line for line in out.splitlines() if line.strip()]
 
     def user_email(self) -> str | None:
@@ -249,7 +256,7 @@ class GitBackend:
 
     def revert(self, ref: str) -> str:
         """``git revert --no-edit <ref>``; returns the new commit sha."""
-        self.run_git("revert", "--no-edit", ref)
+        self.run_git("revert", "--no-edit", "--end-of-options", ref)
         return self.rev_parse("HEAD")
 
     def checkout_paths(self, ref: str, paths: list[str]) -> None:
@@ -261,7 +268,7 @@ class GitBackend:
             raise GitBackendError(
                 "checkout_paths called with no paths", context={"ref": ref}
             )
-        self.run_git("checkout", ref, "--", *paths)
+        self.run_git("checkout", "--end-of-options", ref, "--", *paths)
 
 
 __all__ = ["CommitInfo", "GitBackend"]

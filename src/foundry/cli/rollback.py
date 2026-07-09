@@ -67,13 +67,18 @@ def execute_rollback_command(
             print("\n--dry-run: no changes applied, no commit, no audit entry.")
             return 0
 
-        if not assume_yes and not force:
+        confirmed = assume_yes or force
+        if not confirmed:
             if not _confirm(f"\nApply this {plan.granularity} rollback? [y/N] "):
                 print("Aborted; nothing changed.")
                 return 1
+            # An interactive `y` IS the confirmation — it satisfies
+            # confirm-class pre-flight checks (e.g. schema_compatible)
+            # without requiring a --yes rerun. Phase 5 review finding 3.
+            confirmed = True
 
         result = execute_rollback(
-            plan, backend=backend, force=force, assume_yes=assume_yes or force
+            plan, backend=backend, force=force, assume_yes=confirmed
         )
         print(f"\nApplied. Commit: {result.commit_sha[:8]}")
         print(f"  {plan.commit_message.splitlines()[0]}")

@@ -501,15 +501,25 @@ def _cache_notes(plan: RollbackPlan) -> list[str]:
 def _apply_project_rollback(plan: RollbackPlan, backend: GitBackend) -> str:
     """checkout <target> -- <project>/ + explicit removal of files added
     since + ONE commit. On any failure the subtree is restored to HEAD —
-    all files or none (docs/03 exit gate)."""
+    all files or none (docs/03 exit gate).
+
+    Staging and recovery operate on the COMPUTED file set (files tracked at
+    the target + files being removed) — never ``add -A`` / ``clean -fd`` on
+    the whole subtree, which on a ``--force``d dirty tree would sweep
+    uncommitted operator files into the rollback commit (or delete untracked
+    ones during recovery). Phase 5 review finding 1.
+    """
     rel = plan.files[0]
+    files_at_target = backend.ls_files_at(plan.target, rel)
+    files_at_head = backend.ls_files_at("HEAD", rel)
+    staged = sorted({*files_at_target, *plan.removed_files})
     try:
         backend.checkout_paths(plan.target, [rel])
         for removed in plan.removed_files:
             path = backend.repo_root / removed
             if path.exists():
                 path.unlink()
-        backend.run_git("add", "-A", "--", rel)
+        backend.run_git("add", "--", *staged)
         if not backend.run_git("diff", "--cached", "--name-only", "--", rel).strip():
             raise RollbackError(
                 f"project subtree {rel} is already identical to "
@@ -519,13 +529,21 @@ def _apply_project_rollback(plan: RollbackPlan, backend: GitBackend) -> str:
         backend.run_git("commit", "-m", plan.commit_message)
         return backend.rev_parse("HEAD")
     except Exception:
-        # restore the subtree to HEAD: tracked files back, index reset;
-        # files that exist at target but not HEAD become untracked → clean.
-        backend.run_git(
-            "restore", "--source=HEAD", "--staged", "--worktree", "--", rel,
-            check=False,
-        )
-        backend.run_git("clean", "-fd", "--", rel, check=False)
+        # Restore ONLY the computed set to HEAD: files tracked at HEAD go
+        # back (index + worktree); files that exist at target but not at
+        # HEAD (restored by checkout_paths above) are explicitly deleted.
+        # Untracked operator files elsewhere in the subtree are untouched.
+        if files_at_head:
+            backend.run_git(
+                "restore", "--source=HEAD", "--staged", "--worktree", "--",
+                *files_at_head, check=False,
+            )
+        for extra in sorted(set(files_at_target) - set(files_at_head)):
+            path = backend.repo_root / extra
+            if path.exists():
+                path.unlink()
+            backend.run_git("rm", "--cached", "--ignore-unmatch", "-q", "--",
+                            extra, check=False)
         raise
 
 

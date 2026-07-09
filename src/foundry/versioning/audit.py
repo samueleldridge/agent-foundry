@@ -3,8 +3,11 @@
 ``projects/<name>/.foundry/audit.jsonl`` — one JSON object per line, never
 edited, never removed. Git is the source of truth for CONTENT; this file is
 the source of truth for QUERYABILITY (filtering by type / artifact / time
-without shelling out to ``git log``). The file itself is git-versioned, so
-post-hoc tampering shows up as a diff (docs/52 § Append-only invariant).
+without shelling out to ``git log``). The file itself is runtime state under
+the gitignored ``.foundry/`` directory (Phase 5 deviation 4) — appends never
+dirty the working tree, and docs/52's tamper-evidence-via-git property is
+deferred until compliance needs bite. Cross-check entries against the
+``commit_sha`` they record when provenance matters.
 
 Entry ids are ULIDs (``RunId.new()``) — the versioning operation's run id;
 they thread through logs and the ``foundry.rollback`` /
@@ -142,8 +145,9 @@ def read_audit_entries(
         except (json.JSONDecodeError, ValidationError) as exc:
             raise VersioningError(
                 f"corrupt audit entry at {path}:{lineno} — the audit log is "
-                "append-only JSONL; inspect `git log -p` on the file to see "
-                f"what changed: {exc}",
+                "append-only JSONL runtime state (gitignored, so git history "
+                "cannot explain the damage); inspect the file directly and "
+                f"cross-check the commits it references: {exc}",
                 context={"file": str(path), "line": lineno},
                 cause=exc,
             ) from exc

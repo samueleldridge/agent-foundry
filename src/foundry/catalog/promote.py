@@ -6,14 +6,19 @@ LATEST project-local version to the next contiguous catalog version. Gates,
 in order — each refusal is a structured ``CatalogPromotionRefused`` before
 any file is written:
 
-1. **Eval floor** (configurable, default 0.85). Tools: the standalone eval
-   runs, borrowing the source project's connection bindings when the tool
-   requires connections (the Phase 4 seam, closed in Phase 5). Connections:
-   the version's ``health.yaml`` must pass against the project's binding.
+1. **Catalog branch.** Promotion commits belong on the catalog branch —
+   ``main`` unless ``FOUNDRY_CATALOG_BRANCH`` overrides (docs/51 § Catalog
+   changes live on main). When that branch doesn't exist in the repo, the
+   check passes on the current branch with the mismatch surfaced in errors
+   only when the branch DOES exist.
 2. **No overwrite / no duplicate.** The destination is always latest+1 and
    must not exist; promoting content identical to the latest catalog
    version is refused (nothing to promote).
-3. **Semver discipline.** Contract movement vs the prior catalog version is
+3. **Eval floor** (configurable, default 0.85). Tools: the standalone eval
+   runs, borrowing the source project's connection bindings when the tool
+   requires connections (the Phase 4 seam, closed in Phase 5). Connections:
+   the version's ``health.yaml`` must pass against the project's binding.
+4. **Semver discipline.** Contract movement vs the prior catalog version is
    classified; ``breaking`` warns (and requires confirmation) by default,
    and is BLOCKED under ``strict_semver`` unless ``allow_breaking``.
 
@@ -30,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -109,6 +115,7 @@ def promote_artifact(
 ) -> PromotionResult:
     """Promote ``<project>/<kind>/<name>`` to the catalog (human-gated)."""
     project_name, kind_subdir, name = _parse_target(target)
+    _check_catalog_branch(backend, target)
     project_dir = (projects_root / project_name).resolve()
     if not (project_dir / "system.yaml").is_file():
         raise CatalogPromotionRefused(
@@ -155,7 +162,7 @@ def promote_artifact(
             },
         )
 
-    # --- gate 1: eval / health floor -------------------------------------------
+    # --- gate 3: eval / health floor -------------------------------------------
     score: float | None
     eval_run_id: str | None
     if kind_subdir == "tools":
@@ -187,7 +194,7 @@ def promote_artifact(
                 context={"target": target, "score": score, "floor": floor},
             )
 
-    # --- gate 3: semver discipline ---------------------------------------------
+    # --- gate 4: semver discipline ---------------------------------------------
     if prior is None:
         diff = ContractDiff()
         schema_change = "initial"
@@ -234,41 +241,63 @@ def promote_artifact(
             "schema_change": schema_change,
         },
     ):
-        _copy_version(source_version_dir, dest_dir)
-        if source_version != dest_version:
-            _rewrite_version(
-                dest_dir / _SPEC_FILE[kind_subdir], dest_version
-            )
-        from foundry.versioning.artifacts import append_version_metadata
-
-        append_version_metadata(
-            catalog_artifact_dir,
-            VersionMetadata(
-                version=dest_version,
-                created_at=datetime.now(UTC),
-                created_by="human",
-                eval_score=score,
-                eval_run_id=eval_run_id,
-                notes=notes,
-                schema_change=schema_change,  # type: ignore[arg-type]
-                breaking_changes=diff.breaking,
-                promoted_by=operator.human_email or operator.human_supervisor,
-                source_ref=source_ref,
-            ),
-        )
         index_path = catalog_root / "index.yaml"
-        _add_to_index(index_path, _INDEX_KEY[kind_subdir], name)
+        try:
+            _copy_version(source_version_dir, dest_dir)
+            if source_version != dest_version:
+                _rewrite_version(
+                    dest_dir / _SPEC_FILE[kind_subdir], dest_version
+                )
+            from foundry.versioning.artifacts import append_version_metadata
 
-        files = [
-            *sorted(str(p) for p in dest_dir.rglob("*") if p.is_file()),
-            str(catalog_artifact_dir / "versions.json"),
-            str(index_path),
-        ]
-        commit_sha = backend.commit(
-            [Path(f) for f in files],
-            f"catalog({name}): promote {source_ref} → catalog "
-            f"{name}@{dest_version}",
-        )
+            append_version_metadata(
+                catalog_artifact_dir,
+                VersionMetadata(
+                    version=dest_version,
+                    created_at=datetime.now(UTC),
+                    created_by="human",
+                    eval_score=score,
+                    eval_run_id=eval_run_id,
+                    notes=notes,
+                    schema_change=schema_change,  # type: ignore[arg-type]
+                    breaking_changes=diff.breaking,
+                    promoted_by=(
+                        operator.human_email or operator.human_supervisor
+                    ),
+                    source_ref=source_ref,
+                ),
+            )
+            _add_to_index(index_path, _INDEX_KEY[kind_subdir], name)
+
+            files = [
+                *sorted(str(p) for p in dest_dir.rglob("*") if p.is_file()),
+                str(catalog_artifact_dir / "versions.json"),
+                str(index_path),
+            ]
+            commit_sha = backend.commit(
+                [Path(f) for f in files],
+                f"catalog({name}): promote {source_ref} → catalog "
+                f"{name}@{dest_version}",
+            )
+        except Exception:
+            # Mid-apply failure: leave no half-promoted catalog state
+            # behind. The copied version dir is removed; versions.json +
+            # index.yaml are restored to HEAD (they were untouched in the
+            # worktree before this apply block).
+            shutil.rmtree(dest_dir, ignore_errors=True)
+            for touched in (catalog_artifact_dir / "versions.json", index_path):
+                if not touched.exists():
+                    continue
+                try:
+                    rel = backend.relpath(touched)
+                except FoundryError:  # pragma: no cover - defensive
+                    continue
+                if backend.ls_files_at("HEAD", rel):
+                    backend.run_git("checkout", "HEAD", "--", rel, check=False)
+                else:
+                    # created by this promotion attempt → remove entirely
+                    touched.unlink(missing_ok=True)
+            raise
         entry = new_audit_entry(
             type="catalog",
             scope=f"{project_name}/{kind_subdir}/{name}",
@@ -304,6 +333,28 @@ def promote_artifact(
 
 
 # --- gates ------------------------------------------------------------------------
+
+
+def _check_catalog_branch(backend: GitBackend, target: str) -> None:
+    """Promotion commits land on the catalog branch (docs/51: catalog
+    changes live on ``main`` or the institution's chosen catalog branch —
+    ``FOUNDRY_CATALOG_BRANCH`` overrides). When the expected branch doesn't
+    exist (single-branch repos), the current branch is accepted."""
+    expected = os.environ.get("FOUNDRY_CATALOG_BRANCH") or "main"
+    if not backend.branch_exists(expected):
+        return
+    current = backend.current_branch()
+    if current != expected:
+        raise CatalogPromotionRefused(
+            f"promotion commits belong on the catalog branch {expected!r} "
+            f"(docs/51); currently on {current!r} — `git checkout "
+            f"{expected}` first (or set FOUNDRY_CATALOG_BRANCH)",
+            context={
+                "target": target,
+                "expected_branch": expected,
+                "current_branch": current,
+            },
+        )
 
 
 def _tool_eval_score(
