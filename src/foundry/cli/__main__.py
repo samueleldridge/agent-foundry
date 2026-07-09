@@ -21,8 +21,9 @@ app = typer.Typer(
     help=(
         "agent-foundry — build, evaluate, version, and orchestrate "
         "multi-agent LLM systems from declarative configs.\n\n"
-        "`foundry run` is live (Phase 1). Remaining subcommands land in "
-        "later phases; see docs/03-development-phases.md."
+        "`foundry run` (Phase 1), `foundry connections health` (Phase 2a) "
+        "and `foundry eval` (Phase 4) are live. Remaining subcommands land "
+        "in later phases; see docs/03-development-phases.md."
     ),
     no_args_is_help=True,
     add_completion=False,
