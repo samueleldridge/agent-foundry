@@ -496,3 +496,67 @@ def test_case_max_cost_budget_errors_the_case(tmp_path: Path) -> None:
     assert case.status == "error"
     assert case.error is not None
     assert case.error["error_class"] == "CostBudgetExceeded"
+
+
+@pytest.mark.integration
+def test_judge_spend_alone_trips_eval_total_cost_budget(
+    tmp_path: Path,
+) -> None:
+    """Phase 4 review follow-up: the LLM judge runs on the EVAL session, so
+    judge spend ALONE is subject to max_total_cost_usd. Target here is a
+    pure tool (word_count — zero LLM spend of its own); the only provider
+    call in the whole run would be the judge's, and the eval-session budget
+    blocks it pre-call (no HTTP ever reaches the judge vendor)."""
+    spec_path = tmp_path / "judge_capped.yaml"
+    spec_path.write_text(
+        "name: judge_capped_word_count\n"
+        "scope: tool\n"
+        "target: catalog/word_count@v1\n"
+        "cases:\n"
+        "  - id: simple\n"
+        "    input: { text: \"hello brave new world\" }\n"
+        "    expected: { words: 4 }\n"
+        "scorers:\n"
+        "  - kind: llm_judge\n"
+        "    name: judge_only\n"
+        "    config:\n"
+        "      judge_model_binding:\n"
+        "        provider: openai\n"
+        "        model: gpt-4o-mini\n"
+        "        settings: { max_tokens: 50 }\n"
+        "      rubric_template: |\n"
+        "        Input: {input}  Expected: {expected}  Actual: {actual}\n"
+        "        Score 1.0 when words matches expected.\n"
+        "    weight: 1.0\n"
+        "deterministic: true\n"
+        "max_total_cost_usd: \"0.00000001\"\n"
+        "schema_version: 1\n"
+    )
+    judge_http_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal judge_http_calls
+        judge_http_calls += 1
+        return httpx.Response(200, json={})
+
+    code = execute_eval(
+        "tool",
+        ["catalog/word_count@v1"],
+        eval_option=str(spec_path),
+        transport=httpx.MockTransport(handler),
+    )
+    assert judge_http_calls == 0, (
+        "eval-session budget must block the judge BEFORE any HTTP call"
+    )
+    result = load_eval_result(next(_eval_runs_root(tmp_path).iterdir()))
+    case = result.per_case[0]
+    # the tool itself ran fine (scored, $0 spend) — only the judge tripped
+    assert case.status == "scored"
+    assert case.actual["words"] == 4
+    assert len(case.scorer_results) == 1
+    judge_scored = case.scorer_results[0]
+    assert judge_scored.score == 0.0
+    assert judge_scored.error is not None
+    assert "CostBudgetExceeded" in judge_scored.error
+    # judge failure -> case scores 0.0 -> quality verdict (exit 1), not infra
+    assert code == 1
