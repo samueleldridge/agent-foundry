@@ -314,6 +314,62 @@ class RunCancelledEvent(_RunEventBase):
     reason: str
 
 
+# --- forge (meta-agent session) events (docs/62 § Composition) --------------
+
+
+class ForgeStarted(_RunEventBase):
+    event: Literal["forge.started"] = "forge.started"
+    project: str
+    forge_run_id: str
+    meta_agent_version: str
+    max_iterations: int
+    max_cost_usd: Decimal | None = None
+    threshold: float
+
+
+class ForgeIterationStarted(_RunEventBase):
+    event: Literal["forge.iteration_started"] = "forge.iteration_started"
+    forge_run_id: str
+    iteration_number: int
+    directive_kind: Literal["bootstrap", "iterate"]
+
+
+class ForgeIterationCompleted(_RunEventBase):
+    event: Literal["forge.iteration_completed"] = "forge.iteration_completed"
+    forge_run_id: str
+    iteration_number: int
+    eval_score: float | None = None
+    eval_delta: float | None = None
+    commit_shas: list[str] = Field(default_factory=list)
+    cluster_id: str | None = None
+    applied: bool = True
+
+
+class ForgeRollback(_RunEventBase):
+    event: Literal["forge.rollback"] = "forge.rollback"
+    forge_run_id: str
+    iteration_number: int
+    scope: str
+    target: str
+    to_version: str
+
+
+class ForgeTerminated(_RunEventBase):
+    event: Literal["forge.terminated"] = "forge.terminated"
+    forge_run_id: str
+    reason: str
+    final_score: float | None = None
+    iterations: int = 0
+    total_cost_usd: Decimal | None = None
+
+
+class MetaAgentViolation(_RunEventBase):
+    event: Literal["meta_agent.violation"] = "meta_agent.violation"
+    forge_run_id: str
+    tool: str
+    detail: str
+
+
 RunEvent = Annotated[
     RunStarted
     | AgentStarted
@@ -344,6 +400,12 @@ RunEvent = Annotated[
     | StateTransition
     | ApprovalRequiredEvent
     | ApprovalResolved
+    | ForgeStarted
+    | ForgeIterationStarted
+    | ForgeIterationCompleted
+    | ForgeRollback
+    | ForgeTerminated
+    | MetaAgentViolation
     | RunCompleted
     | RunFailed
     | RunCancelledEvent,
@@ -401,6 +463,11 @@ __all__ = [
     "CancelRun",
     "ConnectionEvent",
     "EmbedCall",
+    "ForgeIterationCompleted",
+    "ForgeIterationStarted",
+    "ForgeRollback",
+    "ForgeStarted",
+    "ForgeTerminated",
     "FunctionNodeCompleted",
     "FunctionNodeStarted",
     "Handoff",
@@ -412,6 +479,7 @@ __all__ = [
     "MemoryConsolidate",
     "MemoryRead",
     "MemoryWriteEvent",
+    "MetaAgentViolation",
     "PauseRun",
     "RerankEvent",
     "ResumeRun",
