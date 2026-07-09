@@ -614,22 +614,50 @@ class EvalCase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    """Stable, human-readable. The key for per-case results across runs;
+    renaming a case loses cross-run comparability (docs/40 § EvalCase)."""
     input: dict[str, Any]
+    """Validated against the target's input schema at eval-load time —
+    tool: input_schema; agent: the agent's read-scope fields; project:
+    the project's state schema."""
     expected: Any
+    """Shape depends on the scorers: exact wants a value or partial
+    structure; numeric a comparison target; llm_judge/rubric structured
+    expectations. Passed to every scorer alongside the actual output."""
     tags: list[str] = Field(default_factory=list)
     weight: float = Field(default=1.0, ge=0.0)
+    seed: int | None = None
+    """Per-case seed; overrides the spec's seed for this case."""
+    skip: bool = False
+    skip_reason: str | None = None
+    """Marked but not run — keeps the case in version control while
+    debugging without losing it."""
 
 
 class ScorerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["exact", "llm_judge", "rubric", "user"]
+    kind: Literal["exact", "numeric", "llm_judge", "rubric", "user"]
     name: str
+    """Instance name in reports. For ``kind: user`` this is ALSO the
+    Python entry-point name looked up in the ``foundry.scorers`` group
+    (docs/40 § user)."""
     config: dict[str, Any] = Field(default_factory=dict)
-    weight: float = 1.0
+    """Validated against the scorer kind's config model when the harness
+    builds the scorer (load time, before any case runs)."""
+    weight: float = Field(default=1.0, ge=0.0)
 
 
 class EvalSpec(BaseModel):
+    """One eval set (docs/40). Determinism contract: with
+    ``deterministic: true`` the harness seeds Python ``random``, forces
+    ``temperature: 0`` on the target's model binding, and propagates
+    ``seed`` to providers that support it — same spec + same target +
+    same seed reproduces the same score within scorer-type tolerance
+    (exact/numeric: exact; llm_judge: best-effort, flagged
+    ``is_deterministic: false`` in results). With ``deterministic:
+    false`` each case runs ``replicates`` times and the mean is scored."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str
@@ -642,10 +670,42 @@ class EvalSpec(BaseModel):
     cases: list[EvalCase] = Field(min_length=1)
     scorers: list[ScorerConfig] = Field(min_length=1)
     threshold: float = Field(default=0.9, ge=0.0, le=1.0)
+    """A case passes when its weighted scorer score >= threshold; the
+    eval passes when the case-weighted aggregate >= threshold."""
     max_parallel: int = Field(default=4, ge=1, le=64)
     deterministic: bool = True
     seed: int | None = None
+    """Seed applied run-wide in deterministic mode (propagated to the
+    provider where the model supports ``seed``; best-effort otherwise,
+    surfaced as a warning)."""
+    replicates: int = Field(default=1, ge=1, le=20)
+    """Non-deterministic mode only: run each case N times and report the
+    mean score (per-replicate scores land in the case metadata)."""
+    case_timeout_s: float = Field(default=300.0, gt=0)
+    """Hard wall-clock cap per case; a case that exceeds it errors with
+    score 0.0 and the run continues."""
+    case_max_cost_usd: Decimal | None = None
+    """Per-case Session.cost_budget; a breach errors the case."""
+    max_total_cost_usd: Decimal | None = None
+    """Across all cases; when hit the run halts and remaining cases are
+    marked skipped (partial result reported)."""
     schema_version: Literal[1] = 1
+
+    @model_validator(mode="after")
+    def _validate_weights_and_cases(self) -> EvalSpec:
+        total = sum(s.weight for s in self.scorers)
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                f"scorer weights must sum to 1.0 (docs/40); got {total} "
+                f"across {len(self.scorers)} scorer(s)"
+            )
+        case_ids = [case.id for case in self.cases]
+        duplicates = sorted({i for i in case_ids if case_ids.count(i) > 1})
+        if duplicates:
+            raise ValueError(
+                f"case ids must be unique; duplicated: {', '.join(duplicates)}"
+            )
+        return self
 
 
 __all__ = [
