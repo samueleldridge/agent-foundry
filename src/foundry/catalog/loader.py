@@ -152,6 +152,20 @@ def catalog_entries(roots: FoundryRoots) -> list[CatalogEntry]:
 # --- python-module loading -----------------------------------------------------
 
 
+def invalidate_artifact_module(path: Path) -> bool:
+    """Evict a cached artifact module after its FILE changed on disk.
+
+    ``_import_module`` caches by file path (module identity is the file),
+    which is correct for immutable catalog versions — but the meta-agent
+    legitimately REWRITES the latest local version's handler.py while
+    iterating it against its standalone eval (docs/61). Without eviction
+    the next eval would silently run the stale code. Returns True when a
+    cached module was dropped.
+    """
+    digest = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:12]
+    return sys.modules.pop(f"_foundry_artifact_{digest}", None) is not None
+
+
 def _import_module(path: Path, *, role: str) -> ModuleType:
     # Module identity is the FILE, not the role: input_schema, output_schema,
     # and the handler's `from schemas import ...` must all resolve to the same

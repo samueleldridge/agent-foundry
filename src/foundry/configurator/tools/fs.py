@@ -109,6 +109,12 @@ def make_write_file(
         tmp = path.with_name(path.name + ".foundry-meta-tmp")
         tmp.write_text(inputs.content)
         os.replace(tmp, path)
+        if path.suffix == ".py":
+            # The artifact loader caches modules by file; a rewritten
+            # handler/schema must be re-imported on the next eval.
+            from foundry.catalog.loader import invalidate_artifact_module
+
+            invalidate_artifact_module(path)
         mctx.records.files_written.append(str(path))
         return WriteResult(
             path=str(path),

@@ -58,6 +58,7 @@ from foundry.core.events import (
     ForgeRollback,
     ForgeStarted,
     ForgeTerminated,
+    MetaAgentViolation,
 )
 from foundry.core.session import CostBudget, Session
 from foundry.core.types import RunId
@@ -654,6 +655,14 @@ class ForgeSession:
             )
 
         activity = records.since(mark)
+        for violation in activity.violations:
+            self._emit(
+                MetaAgentViolation,
+                forge_run_id,
+                forge_run_id=forge_run_id,
+                tool=violation.tool,
+                detail=violation.detail,
+            )
         if reason is None and activity.violations:
             reason = "sandbox_violation"
             detail = "; ".join(
