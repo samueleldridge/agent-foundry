@@ -304,6 +304,32 @@ def load_tool_version(ref: ArtifactRef, roots: FoundryRoots) -> LoadedToolVersio
     )
 
 
+def load_tool_contract(
+    version_dir: Path,
+) -> tuple[ToolSpec, type[BaseModel], type[BaseModel]]:
+    """A tool version's CONTRACT only — spec + input/output models — without
+    importing the handler. Used by Phase 5 schema-compatibility checks
+    (rollback pre-flight + catalog promotion semver detection, docs/50)."""
+    spec = load_tool_spec(version_dir / "tool.yaml")
+    input_model = _resolve_model(version_dir, spec.input_schema, role="input_schema")
+    output_model = _resolve_model(
+        version_dir, spec.output_schema, role="output_schema"
+    )
+    return spec, input_model, output_model
+
+
+def load_connection_contract(
+    version_dir: Path,
+) -> tuple[ConnectionSpec, type[BaseModel]]:
+    """A connection version's contract — spec + config model — without
+    importing the auth factory. Same consumers as ``load_tool_contract``."""
+    spec = load_connection_spec(version_dir / "connection.yaml")
+    config_model = _resolve_model(
+        version_dir, spec.config_schema, role="config_schema"
+    )
+    return spec, config_model
+
+
 # --- versioned connection loading ------------------------------------------------
 
 
@@ -419,8 +445,10 @@ __all__ = [
     "LoadedToolVersion",
     "catalog_entries",
     "load_catalog_index",
+    "load_connection_contract",
     "load_connection_version",
     "load_retriever_version",
+    "load_tool_contract",
     "load_tool_version",
     "load_versions_metadata",
 ]
