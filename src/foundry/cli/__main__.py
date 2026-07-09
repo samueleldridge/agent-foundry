@@ -128,11 +128,80 @@ def catalog() -> None:
     _not_yet_implemented("catalog", "Phase 5")
 
 
-@app.command(name="eval", help="Run evals and compare across versions. Lands in Phase 4.")
-def eval_() -> None:
+_EVAL_TARGET_ARG = typer.Argument(
+    ...,
+    help=(
+        "Project path (run a project eval), or one of: 'tool', 'agent', "
+        "'compare', 'show', 'list'."
+    ),
+)
+_EVAL_ARGS = typer.Argument(
+    None,
+    help=(
+        "Remaining positionals: <eval-set> after a project path; "
+        "<ref>@<version> after 'tool'; <project> <agent> after 'agent'; "
+        "versions after 'compare --tool'; <eval_run_id> after 'show'; "
+        "<project> after 'list'."
+    ),
+)
+_FAIL_UNDER_OPTION = typer.Option(
+    None,
+    "--fail-under",
+    help="Exit non-zero when the aggregate score is below this floor (CI gate).",
+)
+_JSON_OPTION = typer.Option(
+    False, "--json", help="Emit the full machine-readable result as JSON."
+)
+_COMPARE_TOOL_OPTION = typer.Option(
+    None, "--tool", help="compare: tool name; versions follow as positionals."
+)
+_COMPARE_PROJECT_OPTION = typer.Option(
+    None, "--project", help="compare: project path for pin-set comparison."
+)
+_PIN_SET_OPTION = typer.Option(
+    None,
+    "--pin-set",
+    help="compare --project: git ref to materialize (repeatable; "
+    "'worktree' = live tree).",
+)
+_EVAL_NAME_OPTION = typer.Option(
+    None,
+    "--eval",
+    help="Eval set override: a path (tool/compare) or a name under the "
+    "agent's eval/ dir.",
+)
+
+
+@app.command(
+    name="eval",
+    help="Run evals and compare across versions (docs/40 § CLI surface).",
+)
+def eval_(
+    target: str = _EVAL_TARGET_ARG,
+    args: list[str] | None = _EVAL_ARGS,
+    fail_under: float | None = _FAIL_UNDER_OPTION,
+    json_output: bool = _JSON_OPTION,
+    tool: str | None = _COMPARE_TOOL_OPTION,
+    project: str | None = _COMPARE_PROJECT_OPTION,
+    pin_set: list[str] | None = _PIN_SET_OPTION,
+    eval_name: str | None = _EVAL_NAME_OPTION,
+) -> None:
     # Function suffixed with `_` to avoid shadowing the Python builtin;
     # the user-facing command is `foundry eval` via the decorator's `name=`.
-    _not_yet_implemented("eval", "Phase 4")
+    from foundry.cli.eval import execute_eval
+
+    raise typer.Exit(
+        code=execute_eval(
+            target,
+            list(args or []),
+            fail_under=fail_under,
+            json_output=json_output,
+            tool=tool,
+            project=project,
+            pin_sets=list(pin_set or []),
+            eval_option=eval_name,
+        )
+    )
 
 
 @app.command(help="Per-artifact and per-project rollback. Lands in Phase 5.")
