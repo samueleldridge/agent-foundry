@@ -115,14 +115,99 @@ def connections_health(target: str = _HEALTH_TARGET_ARG) -> None:
     raise typer.Exit(code=execute_connections_health(target))
 
 
-@app.command(help="Drive the meta-agent against a project. Lands in Phase 6.")
-def forge() -> None:
-    _not_yet_implemented("forge", "Phase 6")
+_FORGE_PROJECT_ARG = typer.Argument(
+    ..., help="Project path (projects/qa_bot) or name (qa_bot)."
+)
+_FORGE_DESCRIPTION_OPTION = typer.Option(
+    ...,
+    "--description",
+    help="What the system should do (the meta-agent's brief).",
+)
+_FORGE_EVAL_OPTION = typer.Option(
+    ...,
+    "--eval",
+    help="Project-scope eval set path (the target; never modified).",
+)
+_FORGE_THRESHOLD_OPTION = typer.Option(
+    0.9, "--threshold", help="Aggregate score the forge must reach."
+)
+_FORGE_MAX_ITER_OPTION = typer.Option(
+    5, "--max-iter", help="Improvement iterations after bootstrap."
+)
+_FORGE_MAX_COST_OPTION = typer.Option(
+    None,
+    "--max-cost-usd",
+    help="Forge-wide cost cap (meta-agent LLM spend + eval spend).",
+)
+_FORGE_MODEL_OPTION = typer.Option(
+    None,
+    "--model",
+    help="Meta-agent model binding, '<provider>/<model>' "
+    "(default anthropic/claude-opus-4-7).",
+)
+_FORGE_PLATEAU_OPTION = typer.Option(
+    3,
+    "--no-improvement-after",
+    help="Stop after this many consecutive non-improving iterations.",
+)
+_FORGE_QUIET_OPTION = typer.Option(
+    False, "--quiet", help="Suppress progress lines; print the summary only."
+)
 
 
-@app.command(help="Project lifecycle: new / list / diff. Lands in Phase 6.")
-def project() -> None:
-    _not_yet_implemented("project", "Phase 6")
+@app.command(
+    help="Drive the meta-agent: bootstrap + eval-driven iteration until "
+    "the threshold, a budget cap, or a plateau (docs/60)."
+)
+def forge(
+    project: str = _FORGE_PROJECT_ARG,
+    description: str = _FORGE_DESCRIPTION_OPTION,
+    eval_path: str = _FORGE_EVAL_OPTION,
+    threshold: float = _FORGE_THRESHOLD_OPTION,
+    max_iter: int = _FORGE_MAX_ITER_OPTION,
+    max_cost_usd: str | None = _FORGE_MAX_COST_OPTION,
+    model: str | None = _FORGE_MODEL_OPTION,
+    no_improvement_after: int = _FORGE_PLATEAU_OPTION,
+    quiet: bool = _FORGE_QUIET_OPTION,
+) -> None:
+    from foundry.cli.forge import execute_forge
+
+    raise typer.Exit(
+        code=execute_forge(
+            project,
+            description=description,
+            eval_path=eval_path,
+            threshold=threshold,
+            max_iter=max_iter,
+            max_cost_usd=max_cost_usd,
+            model=model,
+            no_improvement_after=no_improvement_after,
+            quiet=quiet,
+        )
+    )
+
+
+project_app = typer.Typer(
+    name="project",
+    help="Project lifecycle. `new` is live (Phase 6).",
+    no_args_is_help=True,
+)
+app.add_typer(project_app)
+
+_PROJECT_NAME_ARG = typer.Argument(
+    ..., help="Project name (becomes projects/<name> + branch foundry/<name>)."
+)
+
+
+@project_app.command(
+    name="new",
+    help="Create a project skeleton (evals/ + README) and its "
+    "foundry/<name> branch. The meta-agent scaffolds the rest.",
+)
+def project_new(name: str = _PROJECT_NAME_ARG) -> None:
+    from foundry.cli.project import execute_project_new
+
+    raise typer.Exit(code=execute_project_new(name))
 
 
 catalog_app = typer.Typer(
