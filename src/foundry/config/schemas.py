@@ -627,7 +627,10 @@ class EvalCase(BaseModel):
     tags: list[str] = Field(default_factory=list)
     weight: float = Field(default=1.0, ge=0.0)
     seed: int | None = None
-    """Per-case seed; overrides the spec's seed for this case."""
+    """Reserved for a per-case seed override. Accepted by the schema but
+    NOT yet consumed: the harness propagates only the spec-level seed to
+    providers (Phase 4 limitation, docs/_phase_handoffs/phase_4.md
+    deviation 3). Setting it today has no effect on the run."""
     skip: bool = False
     skip_reason: str | None = None
     """Marked but not run — keeps the case in version control while
