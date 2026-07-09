@@ -21,9 +21,10 @@ app = typer.Typer(
     help=(
         "agent-foundry — build, evaluate, version, and orchestrate "
         "multi-agent LLM systems from declarative configs.\n\n"
-        "`foundry run` (Phase 1), `foundry connections health` (Phase 2a) "
-        "and `foundry eval` (Phase 4) are live. Remaining subcommands land "
-        "in later phases; see docs/03-development-phases.md."
+        "`foundry run` (Phase 1), `foundry connections health` (Phase 2a), "
+        "`foundry eval` (Phase 4), and `foundry rollback` / `versions` / "
+        "`diff` / `catalog promote` (Phase 5) are live. Remaining "
+        "subcommands land in later phases; see docs/03-development-phases.md."
     ),
     no_args_is_help=True,
     add_completion=False,
@@ -124,9 +125,80 @@ def project() -> None:
     _not_yet_implemented("project", "Phase 6")
 
 
-@app.command(help="Catalog operations: list / show / promote. Lands in Phase 5.")
-def catalog() -> None:
-    _not_yet_implemented("catalog", "Phase 5")
+catalog_app = typer.Typer(
+    name="catalog",
+    help="Catalog operations. `promote` is live (Phase 5); list/show land "
+    "in Phase 9.",
+    no_args_is_help=True,
+)
+app.add_typer(catalog_app)
+
+_PROMOTE_TARGET_ARG = typer.Argument(
+    ...,
+    help="<project>/<kind>/<name>, e.g. hello/tool/word_stats or "
+    "hello/connection/time_api.",
+)
+_FLOOR_OPTION = typer.Option(
+    0.85,
+    "--floor",
+    help="Minimum standalone-eval score (tool) / health score (connection) "
+    "required to promote.",
+)
+_STRICT_SEMVER_OPTION = typer.Option(
+    False,
+    "--strict-semver",
+    help="BLOCK schema-breaking promotions instead of warning (docs/50).",
+)
+_ALLOW_BREAKING_OPTION = typer.Option(
+    False,
+    "--allow-breaking",
+    help="With --strict-semver: override the block for a breaking promotion.",
+)
+_YES_OPTION = typer.Option(
+    False, "--yes", help="Skip interactive confirmation prompts."
+)
+_NOTES_OPTION = typer.Option(
+    "", "--notes", help="Free-text 'why this version exists' for versions.json."
+)
+
+
+@catalog_app.command(
+    name="promote",
+    help="Promote a project-local tool/connection's latest version to the "
+    "catalog (human-gated; eval-score floor enforced).",
+)
+def catalog_promote(
+    target: str = _PROMOTE_TARGET_ARG,
+    floor: float = _FLOOR_OPTION,
+    strict_semver: bool = _STRICT_SEMVER_OPTION,
+    allow_breaking: bool = _ALLOW_BREAKING_OPTION,
+    yes: bool = _YES_OPTION,
+    notes: str = _NOTES_OPTION,
+) -> None:
+    from foundry.cli.catalog import execute_catalog_promote
+
+    raise typer.Exit(
+        code=execute_catalog_promote(
+            target,
+            floor=floor,
+            strict_semver=strict_semver,
+            allow_breaking=allow_breaking,
+            assume_yes=yes,
+            notes=notes,
+        )
+    )
+
+
+@catalog_app.command(name="list", help="List catalog artifacts. Lands in Phase 9.")
+def catalog_list() -> None:
+    _not_yet_implemented("catalog list", "Phase 9")
+
+
+@catalog_app.command(
+    name="show", help="Show an artifact's versions.json. Lands in Phase 9."
+)
+def catalog_show() -> None:
+    _not_yet_implemented("catalog show", "Phase 9")
 
 
 _EVAL_TARGET_ARG = typer.Argument(
@@ -205,9 +277,101 @@ def eval_(
     )
 
 
-@app.command(help="Per-artifact and per-project rollback. Lands in Phase 5.")
-def rollback() -> None:
-    _not_yet_implemented("rollback", "Phase 5")
+_ROLLBACK_PROJECT_ARG = typer.Argument(
+    ..., help="Project path (projects/hello) or name (hello)."
+)
+_ROLLBACK_TOOL_OPTION = typer.Option(
+    None, "--tool", help="Roll back ONE tool pin in system.yaml."
+)
+_ROLLBACK_PROMPT_OPTION = typer.Option(
+    None, "--prompt", help="Roll back ONE agent's prompt pin in agent.yaml."
+)
+_ROLLBACK_TO_OPTION = typer.Option(
+    None,
+    "--to",
+    help="Target: v<N> with --tool/--prompt; a commit ref for a whole-"
+    "project rollback.",
+)
+_FORCE_OPTION = typer.Option(
+    False,
+    "--force",
+    help="Bypass force-able pre-flight checks (dirty tree, schema "
+    "incompatibility). Logged loudly to the audit trail.",
+)
+_DRY_RUN_OPTION = typer.Option(
+    False, "--dry-run", help="Show the plan + pre-flight results; change nothing."
+)
+_ROLLBACK_YES_OPTION = typer.Option(
+    False, "--yes", help="Apply without the interactive confirmation prompt."
+)
+
+
+@app.command(
+    help="Per-tool / per-prompt / per-project rollback with pre-flight "
+    "checks (docs/52)."
+)
+def rollback(
+    project: str = _ROLLBACK_PROJECT_ARG,
+    tool: str | None = _ROLLBACK_TOOL_OPTION,
+    prompt: str | None = _ROLLBACK_PROMPT_OPTION,
+    to: str | None = _ROLLBACK_TO_OPTION,
+    force: bool = _FORCE_OPTION,
+    dry_run: bool = _DRY_RUN_OPTION,
+    yes: bool = _ROLLBACK_YES_OPTION,
+) -> None:
+    from foundry.cli.rollback import execute_rollback_command
+
+    raise typer.Exit(
+        code=execute_rollback_command(
+            project,
+            tool=tool,
+            prompt=prompt,
+            to=to,
+            force=force,
+            dry_run=dry_run,
+            assume_yes=yes,
+        )
+    )
+
+
+_VERSIONS_TOOL_OPTION = typer.Option(
+    None, "--tool", help="Show one tool's versions + pin only."
+)
+
+
+@app.command(
+    help="Recent commits + per-artifact version state for a project "
+    "(docs/52 § Listing versions)."
+)
+def versions(
+    project: str = _ROLLBACK_PROJECT_ARG,
+    tool: str | None = _VERSIONS_TOOL_OPTION,
+) -> None:
+    from foundry.cli.versions import execute_versions
+
+    raise typer.Exit(code=execute_versions(project, tool=tool))
+
+
+_DIFF_REF1_ARG = typer.Argument(..., help="Base ref (e.g. HEAD~3).")
+_DIFF_REF2_ARG = typer.Argument(..., help="Target ref (e.g. HEAD).")
+_DIFF_PATH_OPTION = typer.Option(
+    None, "--path", help="Restrict the diff to a subtree/file of the project."
+)
+
+
+@app.command(
+    name="diff",
+    help="git diff between two refs, scoped to the project subtree.",
+)
+def diff_(
+    project: str = _ROLLBACK_PROJECT_ARG,
+    ref1: str = _DIFF_REF1_ARG,
+    ref2: str = _DIFF_REF2_ARG,
+    path: str | None = _DIFF_PATH_OPTION,
+) -> None:
+    from foundry.cli.versions import execute_diff
+
+    raise typer.Exit(code=execute_diff(project, ref1, ref2, path=path))
 
 
 @app.command(help="Serve a configured project as a FastAPI app. Lands in Phase 8.")
