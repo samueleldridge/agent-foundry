@@ -17,6 +17,7 @@ serde's ``(type, bytes)`` pairs — this module never deserializes them.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 
 from foundry.storage.paths import foundry_home
@@ -89,13 +90,28 @@ class SqliteCheckpointStore:
         parent_checkpoint_id: str | None,
         ckpt: tuple[str, bytes],
         meta: tuple[str, bytes],
+        blobs: Iterable[tuple[str, str, tuple[str, bytes]]] | None = None,
     ) -> None:
-        self._conn.execute(
-            "INSERT OR REPLACE INTO checkpoints VALUES (?,?,?,?,?,?,?,?)",
-            (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
-             ckpt[0], ckpt[1], meta[0], meta[1]),
-        )
-        self._conn.commit()
+        """Persist a checkpoint row and its channel blobs in ONE transaction.
+
+        ``blobs`` is ``[(channel, version, (type, bytes)), ...]``. A crash
+        between the blob writes and the checkpoint row must never leave a
+        checkpoint whose channel values are missing — rehydration would
+        silently resume from a partial state (Phase 3 review finding 1) —
+        so the whole mirror commits atomically or not at all.
+        """
+        with self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO checkpoints VALUES (?,?,?,?,?,?,?,?)",
+                (thread_id, checkpoint_ns, checkpoint_id, parent_checkpoint_id,
+                 ckpt[0], ckpt[1], meta[0], meta[1]),
+            )
+            for channel, version, blob in blobs or []:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO blobs VALUES (?,?,?,?,?,?)",
+                    (thread_id, checkpoint_ns, channel, version,
+                     blob[0], blob[1]),
+                )
 
     def save_write(
         self,
@@ -112,20 +128,6 @@ class SqliteCheckpointStore:
             "INSERT OR REPLACE INTO writes VALUES (?,?,?,?,?,?,?,?,?)",
             (thread_id, checkpoint_ns, checkpoint_id, task_id, idx,
              channel, value[0], value[1], task_path),
-        )
-        self._conn.commit()
-
-    def save_blob(
-        self,
-        thread_id: str,
-        checkpoint_ns: str,
-        channel: str,
-        version: str,
-        blob: tuple[str, bytes],
-    ) -> None:
-        self._conn.execute(
-            "INSERT OR REPLACE INTO blobs VALUES (?,?,?,?,?,?)",
-            (thread_id, checkpoint_ns, channel, version, blob[0], blob[1]),
         )
         self._conn.commit()
 

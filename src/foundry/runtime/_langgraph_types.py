@@ -78,14 +78,21 @@ class FoundrySqliteSaver(InMemorySaver):
         thread_id = config["configurable"]["thread_id"]
         checkpoint_ns = config["configurable"]["checkpoint_ns"]
         ckpt, meta, parent = self.storage[thread_id][checkpoint_ns][checkpoint["id"]]
-        self._store.save_checkpoint(
-            thread_id, checkpoint_ns, checkpoint["id"], parent, ckpt, meta
-        )
-        for channel, version in new_versions.items():
-            blob = self.blobs[(thread_id, checkpoint_ns, channel, version)]
-            self._store.save_blob(
-                thread_id, checkpoint_ns, channel, str(version), blob
+        # Checkpoint row + channel blobs mirror in ONE SQLite transaction: a
+        # crash mid-mirror must never rehydrate a checkpoint whose channel
+        # values are missing (Phase 3 review finding 1).
+        blob_rows = [
+            (
+                channel,
+                str(version),
+                self.blobs[(thread_id, checkpoint_ns, channel, version)],
             )
+            for channel, version in new_versions.items()
+        ]
+        self._store.save_checkpoint(
+            thread_id, checkpoint_ns, checkpoint["id"], parent, ckpt, meta,
+            blobs=blob_rows,
+        )
         return result
 
     def put_writes(

@@ -28,10 +28,12 @@ from foundry.runtime.checkpointers import (
 def test_sqlite_store_roundtrips_rows_across_connections(tmp_path: Path) -> None:
     db = tmp_path / "cp.sqlite"
     store = SqliteCheckpointStore(db)
-    store.save_checkpoint("t1", "", "c1", None, ("json", b"{}"), ("json", b"m"))
+    store.save_checkpoint(
+        "t1", "", "c1", None, ("json", b"{}"), ("json", b"m"),
+        blobs=[("state", "v1", ("msgpack", b"\x01"))],
+    )
     store.save_checkpoint("t1", "", "c2", "c1", ("json", b"{2}"), ("json", b"m2"))
     store.save_write("t1", "", "c1", "task", 0, "state", ("json", b"1"), "p")
-    store.save_blob("t1", "", "state", "v1", ("msgpack", b"\x01"))
     store.close()
 
     reopened = SqliteCheckpointStore(db)
@@ -48,6 +50,38 @@ def test_sqlite_store_roundtrips_rows_across_connections(tmp_path: Path) -> None
     assert reopened.load_writes() == []
     assert reopened.load_blobs() == []
     reopened.close()
+
+
+@pytest.mark.unit
+def test_checkpoint_and_blobs_mirror_atomically(tmp_path: Path) -> None:
+    """A crash mid-mirror (simulated by a blob iterable that raises after
+    the checkpoint row + first blob were staged) must persist NOTHING —
+    otherwise a fresh process would rehydrate a silently-partial checkpoint
+    (Phase 3 review finding 1)."""
+    store = SqliteCheckpointStore(tmp_path / "cp.sqlite")
+
+    class _ExplodingBlobs:
+        def __iter__(self) -> Any:
+            yield ("state", "v1", ("msgpack", b"\x01"))
+            raise RuntimeError("simulated kill between blob writes")
+
+    with pytest.raises(RuntimeError, match="simulated kill"):
+        store.save_checkpoint(
+            "t1", "", "c1", None, ("json", b"{}"), ("json", b"m"),
+            blobs=_ExplodingBlobs(),  # type: ignore[arg-type]
+        )
+    # all-or-nothing: neither the checkpoint row nor the first blob survive
+    assert store.load_checkpoints() == []
+    assert store.load_blobs() == []
+
+    # and the connection is still usable for the next (complete) transaction
+    store.save_checkpoint(
+        "t1", "", "c1", None, ("json", b"{}"), ("json", b"m"),
+        blobs=[("state", "v1", ("msgpack", b"\x01"))],
+    )
+    assert len(store.load_checkpoints()) == 1
+    assert store.load_blobs() == [("t1", "", "state", "v1", ("msgpack", b"\x01"))]
+    store.close()
 
 
 @pytest.mark.unit
