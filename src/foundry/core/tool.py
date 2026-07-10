@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from foundry.core.cache import CacheScope, ResultCache, scoped_input_hash
 from foundry.core.connection import ConnectionAccessor
 from foundry.core.errors import (
+    ApprovalRequired,
     CacheError,
     ConnectionAuthError,
     FoundryError,
@@ -118,6 +119,27 @@ class RunContext(BaseModel):
     retrievers: RetrieverAccessor | None = None
     """Slot-name → Retriever accessor (docs/25 § RetrieverBinding). None when
     the agent declares no retrievers."""
+    approvals: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    """Resolved HITL approvals for this run, keyed by approval_id; each value
+    carries ``decision`` ('approved' | 'rejected') and ``reason``. The
+    runtime threads resolutions here so re-invoked handlers can check
+    ``approval_resolved()`` instead of re-raising (docs/32 § Re-execution
+    semantics)."""
+
+    def approval_resolved(self, approval_id: str) -> bool:
+        """Whether the operator has answered this approval."""
+        return approval_id in self.approvals
+
+    def approval_decision(self, approval_id: str) -> str:
+        """'approved' or 'rejected'. Raises KeyError while unresolved —
+        guard with ``approval_resolved`` first."""
+        return str(self.approvals[approval_id]["decision"])
+
+    def approval_reason(self, approval_id: str) -> str | None:
+        """The operator's reason, when one was given."""
+        record = self.approvals.get(approval_id) or {}
+        reason = record.get("reason")
+        return str(reason) if reason is not None else None
 
 
 class BaseTool:
@@ -341,6 +363,11 @@ class ToolRegistry:
         try:
             raw_output = await self._run_with_retries(tool, inputs, ctx, retries)
             output = self._validate_output(tool, raw_output)
+        except ApprovalRequired:
+            # Control flow, not a failure: the run pauses for a human.
+            # No tool.completed failure event — the audit trail records the
+            # pause via approval.required instead (docs/32 § Audit trail).
+            raise
         except FoundryError as exc:
             if emit is not None:
                 emit(
@@ -491,6 +518,8 @@ class ToolRegistry:
             retries.count = attempt - 1
             try:
                 return await self._one_attempt(tool, inputs, ctx, timeout_s)
+            except ApprovalRequired:
+                raise  # HITL pause — never retried, never delayed
             except ConnectionAuthError:
                 # on_auth_error refresh: evict + rebuild via the accessor,
                 # retry the handler ONCE. A second 401 propagates.
@@ -537,6 +566,7 @@ class ToolRegistry:
             FoundryConnectionError,
             ProviderError,
             RunCancelled,
+            ApprovalRequired,  # HITL control flow — never wrapped (docs/32)
             asyncio.CancelledError,
         ):
             raise

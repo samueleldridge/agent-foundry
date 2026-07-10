@@ -25,6 +25,10 @@ def _all_foundry_error_classes() -> list[type[FoundryError]]:
     "cls", _all_foundry_error_classes(), ids=lambda c: c.__name__
 )
 def test_to_dict_is_json_serialisable(cls: type[FoundryError]) -> None:
+    if cls is errors.ApprovalRequired:
+        # Typed control-flow signature (Phase 7, docs/32) — covered by
+        # test_approval_required_shape below.
+        pytest.skip("ApprovalRequired has a dedicated constructor test")
     cause = ValueError("inner cause")
     exc = cls("boom", context={"key": "value", "n": 3}, cause=cause)
     d = exc.to_dict()
@@ -33,6 +37,26 @@ def test_to_dict_is_json_serialisable(cls: type[FoundryError]) -> None:
     assert d["message"] == "boom"
     assert d["context"] == {"key": "value", "n": 3}
     assert d["cause_chain"] == [{"error_class": "ValueError", "message": "inner cause"}]
+
+
+@pytest.mark.unit
+def test_approval_required_shape() -> None:
+    """ApprovalRequired is typed control flow (Phase 7, docs/32): stable
+    approval_id + operator-facing prompt + audit context."""
+    exc = errors.ApprovalRequired(
+        approval_id="send-email-abc123",
+        prompt="Send email to external counterparty?",
+        context={"recipient": "x@example.com"},
+        timeout_s=900,
+        on_timeout="reject",
+    )
+    assert exc.approval_id == "send-email-abc123"
+    assert exc.prompt == "Send email to external counterparty?"
+    assert exc.approval_context == {"recipient": "x@example.com"}
+    d = exc.to_dict()
+    json.dumps(d)
+    assert d["context"]["approval_id"] == "send-email-abc123"
+    assert "approval required" in d["message"]
 
 
 @pytest.mark.unit

@@ -284,7 +284,39 @@ class MemoryConsolidateError(MemoryError):
 
 
 class ApprovalRequired(FoundryError):
-    """Control flow — raised to signal a HITL pause, not a true error."""
+    """Control flow — raised to signal a HITL pause, not a true error
+    (docs/32 § Three places approvals are raised).
+
+    Raised by tool handlers when an action needs a human decision. The
+    runtime catches it, persists the pending state in the checkpointer,
+    emits ``approval.required``, and pauses the run. The ``approval_id``
+    MUST be stable across re-invocation (hash the inputs and/or thread
+    ``ctx.run_id``) — after resolution the same handler re-runs and checks
+    ``ctx.approval_resolved(approval_id)`` instead of re-raising.
+
+    ``timeout_s`` / ``on_timeout`` are accepted for forward compatibility
+    with the docs/32 timeout contract; the framework-level timer lands
+    with the API layer (Phase 8) — v1 approvals wait indefinitely.
+    """
+
+    def __init__(
+        self,
+        *,
+        approval_id: str,
+        prompt: str,
+        context: dict[str, Any] | None = None,
+        timeout_s: float | None = None,
+        on_timeout: str = "reject",
+    ) -> None:
+        super().__init__(
+            f"approval required [{approval_id}]: {prompt}",
+            context={"approval_id": approval_id, **(context or {})},
+        )
+        self.approval_id = approval_id
+        self.prompt = prompt
+        self.approval_context: dict[str, Any] = dict(context or {})
+        self.timeout_s = timeout_s
+        self.on_timeout = on_timeout
 
 
 class RunCancelled(FoundryError):
