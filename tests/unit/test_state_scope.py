@@ -206,3 +206,43 @@ def test_field_spec_defaults_apply() -> None:
 def test_field_spec_roundtrip_model() -> None:
     field = FieldSpec(type="str", description="x")
     assert field.default is None
+
+
+@pytest.mark.unit
+def test_visibility_fuzz_projection_never_leaks() -> None:
+    """Phase 7 risk-register item: 'state visibility enforcement has false
+    negatives'. Seeded fuzz over random schemas + scopes: the projection an
+    agent receives is EXACTLY its read scope intersected with the present
+    state — never one field more."""
+    import random
+
+    rng = random.Random(2026_07)
+    for round_number in range(50):
+        n_fields = rng.randint(1, 12)
+        fields = [f"f{i}" for i in range(n_fields)]
+        read = sorted(rng.sample(fields, rng.randint(0, n_fields)))
+        write = sorted(rng.sample(fields, rng.randint(0, n_fields)))
+        if not read and not write:
+            read = [fields[0]]
+        spec = StateSpec.model_validate(
+            {
+                "schema": {name: {"type": "str | None"} for name in fields},
+                "visibility": {"fuzzed": {"read": read, "write": write}},
+            }
+        )
+        compiled = compile_state(spec, ["fuzzed"])
+        view = compiled.agent_views["fuzzed"]
+        present = {
+            name: f"v-{name}"
+            for name in rng.sample(fields, rng.randint(0, n_fields))
+        }
+        projection = view.project_input(present)
+        assert set(projection) == set(read) & set(present), (
+            f"round {round_number}: projection leaked "
+            f"{set(projection) - set(read)}"
+        )
+        # Write-side: a delta touching any non-write field is refused.
+        forbidden = sorted(set(fields) - set(write))
+        if forbidden:
+            with pytest.raises(StateVisibilityError):
+                view.validate_writes({forbidden[0]: "x"})
