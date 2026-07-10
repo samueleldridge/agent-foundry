@@ -16,14 +16,39 @@ serde's ``(type, bytes)`` pairs — this module never deserializes them.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
+from foundry.core.errors import CheckpointSchemaError
 from foundry.storage.paths import foundry_home
 
 CHECKPOINTER_CHOICES = ("memory", "sqlite", "none")
 """`foundry run --checkpoint` vocabulary. postgres lands with Tier 7 work."""
+
+CHECKPOINT_SCHEMA_VERSION = 1
+"""Bump when the persisted checkpoint LAYOUT itself changes shape. The
+graph-channel set is hashed separately per compile (see
+:func:`graph_schema_fingerprint`)."""
+
+
+def graph_schema_fingerprint(channel_names: Iterable[str]) -> str:
+    """Fingerprint of the compiled graph's channel set + the checkpoint
+    schema version. Stamped into the SQLite store at write; a resume whose
+    fingerprint differs fails LOUDLY instead of silently rehydrating stale
+    channels (Phase 7 review finding 4 — e.g. Phase 3's ``conv`` channel
+    vs Phase 7's ``conv__<agent>`` would otherwise resume with a fresh
+    conversation)."""
+    payload = json.dumps(
+        {
+            "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+            "channels": sorted(channel_names),
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def default_checkpoint_db(project: str) -> Path:
@@ -66,19 +91,71 @@ CREATE TABLE IF NOT EXISTS blobs (
     blob          BLOB NOT NULL,
     PRIMARY KEY (thread_id, checkpoint_ns, channel, version)
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
+
+_FINGERPRINT_KEY = "schema_fingerprint"
 
 
 class SqliteCheckpointStore:
     """Serialized-checkpoint persistence. One row per checkpoint / pending
     write / channel blob; ``(type, bytes)`` values pass through opaquely."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self, path: Path, schema_fingerprint: str | None = None
+    ) -> None:
+        """``schema_fingerprint`` (see :func:`graph_schema_fingerprint`)
+        binds the store to ONE graph channel schema: an empty store is
+        stamped with it; a store already holding checkpoints written under
+        a DIFFERENT (or pre-fingerprint) schema raises
+        :class:`CheckpointSchemaError` instead of resuming silently.
+        ``None`` skips the check (schema-agnostic access, e.g. tooling)."""
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(path))
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        if schema_fingerprint is not None:
+            self._enforce_schema_fingerprint(schema_fingerprint)
+
+    def _enforce_schema_fingerprint(self, fingerprint: str) -> None:
+        row = self._conn.execute(
+            "SELECT value FROM meta WHERE key = ?", (_FINGERPRINT_KEY,)
+        ).fetchone()
+        stored: str | None = row[0] if row else None
+        has_checkpoints = bool(
+            self._conn.execute(
+                "SELECT EXISTS(SELECT 1 FROM checkpoints)"
+            ).fetchone()[0]
+        )
+        if has_checkpoints and stored != fingerprint:
+            self._conn.close()
+            raise CheckpointSchemaError(
+                f"checkpoint database {self.path} holds checkpoints written "
+                "for a different graph schema (stored fingerprint: "
+                f"{stored or '(pre-fingerprint checkpoint)'}; current: "
+                f"{fingerprint}) — the checkpoint predates the current "
+                "graph schema and cannot be resumed. Rerun WITHOUT --run-id "
+                "to start a fresh run, or clear the stale checkpoints by "
+                f"deleting {self.path}",
+                context={
+                    "path": str(self.path),
+                    "stored_fingerprint": stored,
+                    "current_fingerprint": fingerprint,
+                    "checkpoint_schema_version": CHECKPOINT_SCHEMA_VERSION,
+                },
+            )
+        if stored != fingerprint:
+            # New database, or an EMPTY one whose schema moved on: (re)stamp
+            # — nothing can be lost while no checkpoint rows exist.
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta VALUES (?, ?)",
+                (_FINGERPRINT_KEY, fingerprint),
+            )
+            self._conn.commit()
 
     # --- writes ---------------------------------------------------------------
 
@@ -178,6 +255,8 @@ class SqliteCheckpointStore:
 
 __all__ = [
     "CHECKPOINTER_CHOICES",
+    "CHECKPOINT_SCHEMA_VERSION",
     "SqliteCheckpointStore",
     "default_checkpoint_db",
+    "graph_schema_fingerprint",
 ]

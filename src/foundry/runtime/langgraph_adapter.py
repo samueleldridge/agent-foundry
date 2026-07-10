@@ -92,7 +92,10 @@ from foundry.runtime._langgraph_types import (
     build_checkpointer,
     make_graph_state,
 )
-from foundry.runtime.checkpointers import default_checkpoint_db
+from foundry.runtime.checkpointers import (
+    default_checkpoint_db,
+    graph_schema_fingerprint,
+)
 from foundry.runtime.compiled import (
     CompiledAgent,
     CompiledFunction,
@@ -724,9 +727,16 @@ async def run_project(
     wiring = _Wiring(graph, compiled, runtimes, emitter, session)
     _wire_flow(wiring, plan)
 
+    # The fingerprint binds persisted checkpoints to THIS compile's channel
+    # set; resuming a checkpoint written under an older graph schema fails
+    # loudly instead of silently rehydrating stale channels (Phase 7
+    # review finding 4).
     saver = build_checkpointer(
         checkpointer,
         checkpoint_db or default_checkpoint_db(compiled.project.system.name),
+        schema_fingerprint=graph_schema_fingerprint(
+            state_schema.__annotations__
+        ),
     )
     if approval_response is not None and saver is None:
         raise CompileError(

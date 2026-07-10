@@ -175,15 +175,22 @@ class FoundrySqliteSaver(InMemorySaver):
 
 
 def build_checkpointer(
-    choice: str, db_path: Path
+    choice: str, db_path: Path, schema_fingerprint: str | None = None
 ) -> BaseCheckpointSaver[str] | None:
-    """``--checkpoint`` value → saver instance (None disables checkpointing)."""
+    """``--checkpoint`` value → saver instance (None disables checkpointing).
+
+    ``schema_fingerprint`` binds the SQLite store to the current graph's
+    channel schema — resuming checkpoints written under a different schema
+    raises ``CheckpointSchemaError`` loudly (Phase 7 review finding 4).
+    The in-memory saver never outlives the process, so it is unaffected."""
     if choice == "none":
         return None
     if choice == "memory":
         return InMemorySaver()
     if choice == "sqlite":
-        return FoundrySqliteSaver(SqliteCheckpointStore(db_path))
+        return FoundrySqliteSaver(
+            SqliteCheckpointStore(db_path, schema_fingerprint)
+        )
     raise CompileError(
         f"unknown checkpointer {choice!r}; valid: "
         f"{', '.join(CHECKPOINTER_CHOICES)}",

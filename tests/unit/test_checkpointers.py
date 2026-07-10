@@ -11,7 +11,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from foundry.core import FoundryMessage, MessageRole, TextBlock
-from foundry.core.errors import CompileError
+from foundry.core.errors import CheckpointSchemaError, CompileError
 from foundry.runtime._langgraph_types import (
     FoundrySqliteSaver,
     build_checkpointer,
@@ -19,6 +19,7 @@ from foundry.runtime._langgraph_types import (
 from foundry.runtime.checkpointers import (
     SqliteCheckpointStore,
     default_checkpoint_db,
+    graph_schema_fingerprint,
 )
 
 # --- store roundtrip -------------------------------------------------------------
@@ -91,6 +92,84 @@ def test_save_is_idempotent_per_primary_key(tmp_path: Path) -> None:
     store.save_write("t", "", "c", "task", 0, "state", ("json", b"2"), "")
     assert store.load_writes() == [("t", "", "c", "task", 0, "state", ("json", b"2"), "")]
     store.close()
+
+
+# --- schema fingerprint (Phase 7 review finding 4) -----------------------------------
+
+
+@pytest.mark.unit
+def test_schema_fingerprint_mismatch_fails_loudly(tmp_path: Path) -> None:
+    """Write a checkpoint under fingerprint A; reopening the store under
+    fingerprint B (a different graph channel set, e.g. Phase 3's ``conv``
+    vs Phase 7's ``conv__<agent>``) must raise a structured error instead
+    of silently resuming with fresh channels."""
+    db = tmp_path / "cp.sqlite"
+    fp_a = graph_schema_fingerprint(["state", "output", "conv"])
+    fp_b = graph_schema_fingerprint(["state", "output", "conv__qa_agent"])
+    assert fp_a != fp_b
+
+    store = SqliteCheckpointStore(db, fp_a)
+    store.save_checkpoint("t1", "", "c1", None, ("json", b"{}"), ("json", b"m"))
+    store.close()
+
+    with pytest.raises(CheckpointSchemaError) as excinfo:
+        SqliteCheckpointStore(db, fp_b)
+    message = str(excinfo.value)
+    assert "predates the current graph schema" in message
+    assert "--run-id" in message  # remediation: rerun fresh or clear
+    assert excinfo.value.context["stored_fingerprint"] == fp_a
+    assert excinfo.value.context["current_fingerprint"] == fp_b
+
+
+@pytest.mark.unit
+def test_schema_fingerprint_match_resumes(tmp_path: Path) -> None:
+    db = tmp_path / "cp.sqlite"
+    fp = graph_schema_fingerprint(["state", "output", "conv__qa_agent"])
+    store = SqliteCheckpointStore(db, fp)
+    store.save_checkpoint("t1", "", "c1", None, ("json", b"{}"), ("json", b"m"))
+    store.close()
+    reopened = SqliteCheckpointStore(db, fp)  # same schema: no complaint
+    assert len(reopened.load_checkpoints()) == 1
+    reopened.close()
+
+
+@pytest.mark.unit
+def test_pre_fingerprint_checkpoints_fail_loudly(tmp_path: Path) -> None:
+    """A legacy database (checkpoints written before fingerprinting, e.g.
+    Phase 3) carries no stamp; opening it under the current schema must
+    also fail loudly — that is the exact conv → conv__<agent> silent-resume
+    scenario the fingerprint exists to close."""
+    db = tmp_path / "cp.sqlite"
+    legacy = SqliteCheckpointStore(db)  # None: schema-agnostic writer
+    legacy.save_checkpoint("t1", "", "c1", None, ("json", b"{}"), ("json", b"m"))
+    legacy.close()
+    with pytest.raises(CheckpointSchemaError, match="pre-fingerprint"):
+        SqliteCheckpointStore(db, graph_schema_fingerprint(["state"]))
+
+
+@pytest.mark.unit
+def test_empty_store_restamps_instead_of_rejecting(tmp_path: Path) -> None:
+    """A database with NO checkpoint rows adopts the current fingerprint
+    (nothing can be lost) — only databases that already hold checkpoints
+    can mismatch. A schema change between two runs that never wrote a
+    checkpoint must not brick the file."""
+    db = tmp_path / "cp.sqlite"
+    SqliteCheckpointStore(db, graph_schema_fingerprint(["state", "output"])).close()
+    fp_new = graph_schema_fingerprint(["state"])
+    restamped = SqliteCheckpointStore(db, fp_new)  # empty → re-stamp, no error
+    restamped.save_checkpoint(
+        "t1", "", "c1", None, ("json", b"{}"), ("json", b"m")
+    )
+    restamped.close()
+    SqliteCheckpointStore(db, fp_new).close()  # sticks after a write
+
+
+@pytest.mark.unit
+def test_fingerprint_is_order_insensitive_and_channel_bound() -> None:
+    assert graph_schema_fingerprint(["b", "a"]) == graph_schema_fingerprint(
+        ["a", "b"]
+    )
+    assert graph_schema_fingerprint(["a"]) != graph_schema_fingerprint(["a", "b"])
 
 
 # --- selection ----------------------------------------------------------------------

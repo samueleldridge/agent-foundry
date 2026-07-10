@@ -171,6 +171,13 @@ class CheckpointReadError(CheckpointError):
     pass
 
 
+class CheckpointSchemaError(CheckpointError):
+    """A persisted checkpoint was written for a DIFFERENT graph schema
+    (channel set) than the one being resumed — e.g. checkpoints from an
+    older foundry version. Resuming would silently drop channels, so this
+    fails loudly instead."""
+
+
 # --- Connection -------------------------------------------------------------
 
 
@@ -361,6 +368,7 @@ __all__ = [
     "CatalogPromotionRefused",
     "CheckpointError",
     "CheckpointReadError",
+    "CheckpointSchemaError",
     "CheckpointWriteError",
     "CompileError",
     "ConfigError",
