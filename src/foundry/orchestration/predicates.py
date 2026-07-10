@@ -289,8 +289,12 @@ class _Validator(ast.NodeVisitor):
                 )
             self.visit(node.args[0])
             return
-        for arg in node.args:
-            self.visit(arg)
+        if len(node.args) != 1:
+            raise _forbid(
+                node, self.source,
+                f"{node.func.id} takes exactly one argument",
+            )
+        self.visit(node.args[0])
 
     # --- everything else is forbidden ------------------------------------------
 
