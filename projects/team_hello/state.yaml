@@ -1,0 +1,30 @@
+# State schema for the team_hello system (docs/22).
+# Visibility is deliberately narrow per worker: the drafter cannot see the
+# publish outcome; the publisher cannot see the raw request — only the
+# draft. This is the Phase 7 structural-visibility fixture.
+schema:
+  request:
+    type: str
+    description: What to greet about (from run input).
+  audience:
+    type: str
+    description: Who the greeting is for (from run input).
+  draft:
+    type: str | None
+    description: The drafter's greeting draft.
+  publish_status:
+    type: str | None
+    description: The publisher's outcome ("published" / "rejected..." ).
+  final_summary:
+    type: str | None
+    description: The coordinator's closing summary (system output).
+visibility:
+  coordinator:
+    read: [request, audience, draft, publish_status]
+    write: [final_summary]
+  drafter:
+    read: [request, audience]
+    write: [draft]
+  publisher:
+    read: [draft]
+    write: [publish_status]

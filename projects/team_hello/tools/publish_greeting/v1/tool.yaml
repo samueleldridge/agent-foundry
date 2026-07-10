@@ -1,0 +1,15 @@
+name: publish_greeting
+version: v1
+description: |
+  Publish a greeting to the team channel. Publishing is consequential, so
+  it ALWAYS requires a human approval (docs/32): the first call raises
+  ApprovalRequired and pauses the run; after `foundry resume --approve`
+  the re-invoked handler publishes; after --reject it returns the
+  operator's reason without publishing.
+input_schema: schemas.py::PublishIn
+output_schema: schemas.py::PublishOut
+handler: handler.py::handle
+timeout_s: 10.0
+tags: [messaging, hitl]
+standalone_eval: null
+schema_version: 1

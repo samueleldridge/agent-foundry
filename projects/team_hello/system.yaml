@@ -1,0 +1,31 @@
+# team_hello — the multi-agent example system (Phase 7 shape).
+# A supervisor (coordinator) drives two workers: drafter writes a greeting
+# draft; publisher "publishes" it via an HITL-gated local tool (the run
+# PAUSES for a human approval mid-run; `foundry resume --approve|--reject`
+# continues it). The coordinator hands off via compile-generated
+# transfer_to_* tools and finishes with transfer_to_end + a final summary.
+name: team_hello
+description: Supervisor + two workers that draft and (with human approval) publish a greeting.
+agents: [coordinator, drafter, publisher]
+state: state.yaml
+flow:
+  type: supervisor
+  supervisor: coordinator
+  workers: [drafter, publisher]
+  handoff_policy:
+    mode: llm
+    force_return_to_supervisor: true
+    allowed_handoffs:
+      coordinator: [drafter, publisher, END]
+      drafter: [coordinator]
+      publisher: [coordinator]
+  termination:
+    max_hops: 10
+    on_max_hops: error
+tools:
+  publish_greeting:
+    ref: local/publish_greeting
+    version: v1
+guardrails:
+  max_iterations: 12
+  max_hops: 12

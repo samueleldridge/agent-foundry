@@ -1,0 +1,20 @@
+name: publish_greeting_standalone
+description: |
+  Standalone eval placeholder. publish_greeting is HITL-gated — every
+  fresh invocation raises ApprovalRequired, so it cannot be exercised by
+  the unattended eval harness; the case is kept skipped for the record
+  (integration coverage lives in tests/integration/test_run_team_hello.py).
+scope: tool
+target: local/publish_greeting@v1
+cases:
+  - id: hitl_gated_cannot_run_unattended
+    input: { text: "hello team" }
+    expected: { published: true }
+    skip: true
+    skip_reason: HITL-gated tool; requires a human approval mid-call.
+scorers:
+  - kind: exact
+    name: published_match
+    config: { field: published }
+threshold: 1.0
+schema_version: 1
