@@ -29,32 +29,75 @@ from foundry.providers import ModelBinding
 from foundry.providers.embedders import EmbedderBinding
 
 # --- Flow (discriminated union over pattern types) ---------------------------
+#
+# Nesting (docs/30 § Composition): a sequential step, a parallel branch, or a
+# supervisor worker may be a NESTED flow declared inline as a one-key mapping
+# `{<name>: <FlowSpec>}`. The name enters the flow-node namespace (it names
+# the sub-flow's enter/exit nodes and is the handoff-tool target when the
+# sub-flow is a supervisor worker). Graph nodes stay plain agent/function
+# references in v1 (Phase 7 handoff deviation).
+
+
+def _check_nested_refs(refs: list[Any], what: str) -> None:
+    for ref in refs:
+        if isinstance(ref, dict) and len(ref) != 1:
+            raise ValueError(
+                f"a nested flow in {what} must be a one-key mapping "
+                f"{{<name>: <flow>}}; got {len(ref)} keys: "
+                f"{', '.join(sorted(str(k) for k in ref))}"
+            )
 
 
 class HandoffPolicy(BaseModel):
-    """Stub — full spec in docs/30 (Phase 7)."""
+    """docs/30 § supervisor. v1 implements ``mode: llm``; ``rule`` /
+    ``hybrid`` parse but are refused at compile with a structured deferral
+    error (Phase 7 handoff deviation)."""
 
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["llm", "rule", "hybrid"] = "llm"
+    force_return_to_supervisor: bool = True
+    allowed_handoffs: dict[str, list[str]] = Field(default_factory=dict)
+    """Per-node allowed targets. Omitted → compile defaults: the supervisor
+    may hand to every worker + END; workers return to the supervisor.
+    ``END`` is the terminal sentinel."""
 
 
 class TerminationRule(BaseModel):
-    """Stub — full spec in docs/30 (Phase 7)."""
+    """docs/30 § supervisor termination."""
 
     model_config = ConfigDict(extra="forbid")
 
+    when: str | None = None
+    """Sandboxed predicate over state (docs/30 § Predicate language);
+    true → END. Evaluated after every worker returns and before every
+    supervisor dispatch."""
     max_hops: int = Field(default=20, ge=1, le=1000)
+    on_max_hops: Literal["error", "return_partial", "escalate"] = "error"
+    escalate_to: str | None = None
+    """Required when on_max_hops == 'escalate': the worker that receives
+    the forced final handoff."""
+
+    @model_validator(mode="after")
+    def _escalate_needs_target(self) -> TerminationRule:
+        if self.on_max_hops == "escalate" and self.escalate_to is None:
+            raise ValueError(
+                "on_max_hops: escalate requires escalate_to naming the "
+                "escalation worker (docs/30 § supervisor termination)"
+            )
+        return self
 
 
 class GraphEdge(BaseModel):
-    """Stub — full spec in docs/30 (Phase 3/7)."""
+    """One conditional transition (docs/30 § graph)."""
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     from_: str = Field(alias="from")
     to: str
     when: str | None = None
+    """Sandboxed predicate; None = unconditional (the 'else' edge). Edges
+    from one node evaluate in declaration order; first match wins."""
 
 
 class SingleFlow(BaseModel):
@@ -68,16 +111,27 @@ class SequentialFlow(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["sequential"] = "sequential"
-    steps: list[str] = Field(min_length=1)
+    steps: list[str | dict[str, FlowSpec]] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _nested_shape(self) -> SequentialFlow:
+        _check_nested_refs(self.steps, "flow.steps")
+        return self
 
 
 class ParallelFlow(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["parallel"] = "parallel"
-    parallel_branches: list[str] = Field(min_length=2)
+    parallel_branches: list[str | dict[str, FlowSpec]] = Field(min_length=2)
     join: str | None = None
-    then: list[str] = Field(default_factory=list)
+    then: list[str | dict[str, FlowSpec]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _nested_shape(self) -> ParallelFlow:
+        _check_nested_refs(self.parallel_branches, "flow.parallel_branches")
+        _check_nested_refs(self.then, "flow.then")
+        return self
 
 
 class SupervisorFlow(BaseModel):
@@ -85,9 +139,14 @@ class SupervisorFlow(BaseModel):
 
     type: Literal["supervisor"] = "supervisor"
     supervisor: str
-    workers: list[str] = Field(min_length=1)
+    workers: list[str | dict[str, FlowSpec]] = Field(min_length=1)
     handoff_policy: HandoffPolicy = Field(default_factory=HandoffPolicy)
     termination: TerminationRule = Field(default_factory=TerminationRule)
+
+    @model_validator(mode="after")
+    def _nested_shape(self) -> SupervisorFlow:
+        _check_nested_refs(self.workers, "flow.workers")
+        return self
 
 
 class GraphFlow(BaseModel):
@@ -96,12 +155,21 @@ class GraphFlow(BaseModel):
     type: Literal["graph"] = "graph"
     start: str
     edges: list[GraphEdge] = Field(min_length=1)
+    cycles_allowed: bool = False
+    """Off by default: a cycle in the edge graph is a compile error unless
+    explicitly opted into (Guardrails.max_hops caps the traversals)."""
 
 
 FlowSpec = Annotated[
     SingleFlow | SequentialFlow | ParallelFlow | SupervisorFlow | GraphFlow,
     Field(discriminator="type"),
 ]
+
+# Resolve the forward references in the nested-flow unions now that
+# FlowSpec exists.
+SequentialFlow.model_rebuild()
+ParallelFlow.model_rebuild()
+SupervisorFlow.model_rebuild()
 
 
 # --- Guardrails + observability ----------------------------------------------
@@ -114,6 +182,9 @@ class Guardrails(BaseModel):
     max_hops: int = Field(default=20, ge=1, le=1000)
     max_cost_usd: Decimal | None = None
     max_wall_time_s: float | None = None
+    max_flow_nesting_depth: int = Field(default=4, ge=1, le=8)
+    """Cap on inline flow nesting (docs/30 § Composition). Deeper
+    structures suggest the system should be split into projects."""
 
 
 class ObservabilityConfig(BaseModel):
