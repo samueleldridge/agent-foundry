@@ -30,6 +30,29 @@
 #   opentelemetry-sdk ==1.42.1          — All three OTel pkgs MUST move
 #   opentelemetry-exporter-otlp ==1.42.1  together; matching exact pins.
 #
+# Phase 8 additions (chosen 2026-07-10 via `uv add`; rationale also in
+# docs/_phase_handoffs/phase_8.md):
+#   fastapi >=0.139,<1                  — the docs/70 API layer. Range pin
+#                                         (same policy as pydantic/httpx):
+#                                         FastAPI 0.x's Pydantic-v2 route +
+#                                         OpenAPI surface is stable; cap <1
+#                                         against the eventual 1.0
+#                                         re-architecture. 0.139.0 in uv.lock.
+#   uvicorn >=0.51,<1                   — ASGI server behind `foundry serve`.
+#                                         Plain (non-[standard]) install: no
+#                                         uvloop/httptools compiled extras;
+#                                         wsproto added explicitly below.
+#   wsproto >=1.2                       — uvicorn's pure-Python WebSocket
+#                                         protocol backend for WS /ws.
+#                                         Chosen over `websockets` to keep
+#                                         the dependency pure-Python.
+#
+#   redis / asyncpg are deliberately NOT pinned: the Redis-backed rate
+#   limiter (foundry.providers.rate_limit) lazy-imports redis with a
+#   structured error when absent — same policy as foundry.cache's optional
+#   backends. Postgres checkpointing is a documented prod shape, not yet a
+#   shipped backend (docs/_phase_handoffs/phase_8.md).
+#
 # Dev deps:
 #   ruff >=0.15.15                      — lint + import-boundary enforcement
 #                                         (flake8-tidy-imports banned-api).
@@ -61,6 +84,9 @@ dependencies = [
     "opentelemetry-api==1.42.1",
     "opentelemetry-sdk==1.42.1",
     "opentelemetry-exporter-otlp==1.42.1",
+    "fastapi>=0.139,<1",
+    "uvicorn>=0.51,<1",
+    "wsproto>=1.2",
 ]
 
 [project.scripts]
