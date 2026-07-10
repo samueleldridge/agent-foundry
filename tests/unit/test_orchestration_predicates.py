@@ -75,6 +75,18 @@ def test_state_field_references_are_recorded_and_validated() -> None:
         "getattr(state, 'x')",                    # reflection
         "state := 1",                             # walrus
         "b'bytes' == state.a",                    # bytes literal
+        # Dunder reflection (Phase 7 review finding 3): each of these is
+        # rooted at `state`, so the root check alone let them compile AND
+        # evaluate (__class__ resolves on the proxy's TYPE, sidestepping
+        # __getattr__). Any dunder anywhere in the chain is forbidden.
+        "state.__class__ is not None",            # bare dunder
+        "state.__class__.__mro__[1] is not None", # nested dunder chain
+        "state.__dict__ is not None",             # instance dict
+        "state.__init__.__globals__ is None",     # globals escape chain
+        "len(state.__class__.__mro__) > 0",       # dunder inside a call
+        "state.__slots__ == ()",                  # slots reflection
+        "state.field.__class__ is not None",      # dunder mid-chain
+        "state['k'].__class__ is not None",       # dunder after subscript
     ],
 )
 def test_forbidden_constructs_raise_compile_error(source: str) -> None:
@@ -93,6 +105,16 @@ def test_forbidden_constructs_raise_compile_error(source: str) -> None:
 def test_syntax_error_is_compile_error() -> None:
     with pytest.raises(CompileError, match="not a valid expression"):
         compile_predicate("state.a ==")
+
+
+@pytest.mark.unit
+def test_dunder_reflection_names_the_attribute() -> None:
+    """The dunder refusal is specific (Phase 7 review finding 3): the
+    error names the offending attribute, not just 'forbidden'."""
+    with pytest.raises(CompileError, match="dunder attribute '__class__'"):
+        compile_predicate("state.__class__ is not None")
+    with pytest.raises(CompileError, match="dunder attribute '__mro__'"):
+        compile_predicate("state.__class__.__mro__[1] is not None")
 
 
 # --- runtime behaviour -----------------------------------------------------------
