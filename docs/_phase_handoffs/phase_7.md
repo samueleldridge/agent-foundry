@@ -239,3 +239,42 @@ One `fix(configurator)` commit:
 
 **Phase 7 is COMPLETE pending review + operator manual smoke test. Next
 session starts Phase 8 (API layer + streaming) fresh.**
+
+## Post-review fixes (2026-07-10)
+
+The Phase 7 review found four gaps; all four are closed on `main`:
+
+1. **provider_overrides `extends` bypass (high)** — the Phase 6 raw-text
+   guard in `write_file` validated agent.yaml text by filename, so a
+   meta-written `agent.yaml` + `extends: base.yaml` pair (overrides in the
+   base file) compiled with the smuggled block. The authoritative check now
+   lives at the load/compile boundary: `load_agent_spec` / `load_project` /
+   `compile_project` / `compare_project_pin_sets` take `meta_authored`;
+   every forge compile/eval path (run_eval, compare_versions, the session's
+   own baseline/fallback eval) passes `True`, and the VALIDATED spec —
+   post-`apply_extends` — rejects `model_binding.provider_overrides` with a
+   structured `ConfigValidationError`. Human-authored projects keep the
+   field (legal, human-only escape hatch). The raw-text guard remains as
+   write-time defense in depth.
+2. **Case-insensitive filename bypass (medium)** — `Agent.yaml` /
+   `AGENT.YAML` on darwin slipped past the raw-text guard's exact-match
+   filename check. The comparison is now case-folded, and the compile-
+   boundary check above makes filename tricks irrelevant regardless.
+3. **Predicate sandbox dunder reflection (medium)** —
+   `state.__class__.__mro__` / `__init__.__globals__` chains compiled and
+   evaluated (rooted at `state`; `__class__` resolves on the proxy's type,
+   sidestepping `__getattr__`). Any attribute starting AND ending with
+   `__`, anywhere in a chain, is now a `CompileError`; adversarial matrix
+   extended (bare/nested/mid-chain/post-subscript dunders, `__dict__`,
+   `__slots__`, globals chains, dunder-inside-call).
+4. **Checkpoint schema fingerprint (low)** — cross-version checkpoints
+   (Phase 3's `conv` → Phase 7's `conv__<agent>`) resumed silently with a
+   fresh conversation. The SQLite store is now stamped with a fingerprint
+   (sha256 of sorted channel names + `CHECKPOINT_SCHEMA_VERSION`); opening
+   a database whose checkpoints were written under a different (or
+   pre-fingerprint) schema raises `CheckpointSchemaError` telling the user
+   to rerun without `--run-id` or clear the checkpoint db. Empty databases
+   re-stamp; the in-memory saver is unaffected.
+
+Suite after fixes: **744 passed, 1 skipped** (722+1 baseline intact + 22
+new tests); ruff and `mypy --strict` clean; langgraph imports unchanged.
