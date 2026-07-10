@@ -241,6 +241,134 @@ async def test_superseded_version_dir_is_frozen_but_latest_writable(
     )
 
 
+async def test_write_into_dot_foundry_is_violation(
+    mctx: MetaToolContext, session: Session
+) -> None:
+    """Phase 6 review finding 2: the audit log + runtime state under
+    .foundry/ cannot be overwritten silently."""
+    dot_foundry = mctx.project_dir / ".foundry"
+    dot_foundry.mkdir()
+    (dot_foundry / "audit.jsonl").write_text('{"kind": "human"}\n')
+    handle = make_write_file(mctx)
+    with pytest.raises(ConfigError, match=r"\.foundry"):
+        await handle(
+            WriteFileIn(
+                path="projects/qa_bot/.foundry/audit.jsonl", content="{}"
+            ),
+            _ctx(session),
+        )
+    assert (dot_foundry / "audit.jsonl").read_text() == '{"kind": "human"}\n'
+    assert session.cancel_token.cancelled()
+    assert mctx.records.violations
+
+
+async def test_agent_yaml_provider_overrides_refused_via_write_file(
+    mctx: MetaToolContext, session: Session
+) -> None:
+    """Phase 6 review finding 1: hand-writing agent.yaml with
+    model_binding.provider_overrides is refused — the build_agent guard
+    cannot be bypassed through the free-form write path."""
+    handle = make_write_file(mctx)
+    target = mctx.project_dir / "agents" / "a" / "agent.yaml"
+    content = (
+        "name: a\n"
+        "model_binding:\n"
+        "  provider: anthropic\n"
+        "  model: claude-haiku-4-5\n"
+        "  provider_overrides:\n"
+        "    extra_headers: {anthropic-beta: something}\n"
+    )
+    with pytest.raises(ConfigError, match="provider_overrides"):
+        await handle(
+            WriteFileIn(
+                path="projects/qa_bot/agents/a/agent.yaml", content=content
+            ),
+            _ctx(session),
+        )
+    assert not target.exists()
+    # Recoverable mistake (like build_agent's refusal), NOT a violation.
+    assert not session.cancel_token.cancelled()
+    assert not mctx.records.violations
+    # Without the escape hatch the same write goes through.
+    result = await handle(
+        WriteFileIn(
+            path="projects/qa_bot/agents/a/agent.yaml",
+            content=(
+                "name: a\n"
+                "model_binding:\n"
+                "  provider: anthropic\n"
+                "  model: claude-haiku-4-5\n"
+            ),
+        ),
+        _ctx(session),
+    )
+    assert result.is_new is True
+
+
+async def test_superseded_prompt_versions_frozen_but_latest_writable(
+    mctx: MetaToolContext, session: Session
+) -> None:
+    """Phase 6 review finding 3: prompts/v<N>.md freezes once superseded
+    (N below the pinned/latest version); the latest version stays open for
+    iteration."""
+    prompts = mctx.project_dir / "agents" / "qa" / "prompts"
+    prompts.mkdir(parents=True)
+    (prompts / "v1.md").write_text("one\n")
+    (prompts / "v2.md").write_text("two\n")
+    (mctx.project_dir / "agents" / "qa" / "agent.yaml").write_text(
+        "name: qa\nprompt: {version: v2, path: prompts/v2.md}\n"
+    )
+    handle = make_write_file(mctx)
+    with pytest.raises(ConfigError, match="superseded"):
+        await handle(
+            WriteFileIn(
+                path="projects/qa_bot/agents/qa/prompts/v1.md",
+                content="rewritten\n",
+            ),
+            _ctx(session),
+        )
+    assert (prompts / "v1.md").read_text() == "one\n"
+    assert not session.cancel_token.cancelled()  # recoverable, not violation
+    # Latest stays writable — the iterate-then-pin loop.
+    result = await handle(
+        WriteFileIn(
+            path="projects/qa_bot/agents/qa/prompts/v2.md",
+            content="two improved\n",
+        ),
+        _ctx(session),
+    )
+    assert result.is_overwrite is True
+    # A NEW version (v3, above the floor) is writable too.
+    await handle(
+        WriteFileIn(
+            path="projects/qa_bot/agents/qa/prompts/v3.md", content="three\n"
+        ),
+        _ctx(session),
+    )
+
+
+async def test_prompt_freeze_honours_pin_above_latest_file(
+    mctx: MetaToolContext, session: Session
+) -> None:
+    """The freeze floor is max(pinned, latest-on-disk): a pin at v3 with
+    only v1/v2 on disk freezes both files."""
+    prompts = mctx.project_dir / "agents" / "qb" / "prompts"
+    prompts.mkdir(parents=True)
+    (prompts / "v1.md").write_text("one\n")
+    (prompts / "v2.md").write_text("two\n")
+    (mctx.project_dir / "agents" / "qb" / "agent.yaml").write_text(
+        "name: qb\nprompt: {version: v3, path: prompts/v3.md}\n"
+    )
+    handle = make_write_file(mctx)
+    with pytest.raises(ConfigError, match="superseded"):
+        await handle(
+            WriteFileIn(
+                path="projects/qa_bot/agents/qb/prompts/v2.md", content="x\n"
+            ),
+            _ctx(session),
+        )
+
+
 # --- read_file sandbox -----------------------------------------------------------
 
 

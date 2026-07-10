@@ -10,7 +10,9 @@ from __future__ import annotations
 import os
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 
+import yaml
 from pydantic import BaseModel, ConfigDict
 
 from foundry.configurator.tools.context import (
@@ -102,6 +104,7 @@ def make_write_file(
                 "meta-agent writes text configs and code only",
                 context={"path": str(path)},
             )
+        _guard_agent_yaml_content(path, inputs.content)
         existed = path.is_file()
         prior = path.read_text() if existed else None
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,6 +127,37 @@ def make_write_file(
         )
 
     return handle
+
+
+def _guard_agent_yaml_content(path: Path, content: str) -> None:
+    """Meta-write-path content validation (Phase 6 review finding 1):
+    ``build_agent`` refuses ``provider_overrides``, so hand-writing an
+    agent.yaml through ``write_file`` must refuse them too — otherwise the
+    scaffold guard is a speed bump, not a boundary. Unparseable YAML is
+    allowed through (it can never compile, so the override can never take
+    effect); the guard fires only on content that WOULD load."""
+    if path.name != "agent.yaml":
+        return
+    try:
+        data = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return
+    if not isinstance(data, dict):
+        return
+    binding = data.get("model_binding")
+    if isinstance(binding, dict) and binding.get("provider_overrides"):
+        raise ConfigError(
+            "write_file: agent.yaml sets model_binding.provider_overrides — "
+            "provider-specific escape hatches are human-only (docs/61 "
+            "§ build_agent); remove the block and use provider-neutral "
+            "ModelSettings",
+            context={
+                "path": str(path),
+                "provider_overrides": sorted(binding["provider_overrides"])
+                if isinstance(binding["provider_overrides"], dict)
+                else str(binding["provider_overrides"]),
+            },
+        )
 
 
 __all__ = [

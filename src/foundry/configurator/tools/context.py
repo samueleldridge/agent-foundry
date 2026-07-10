@@ -11,18 +11,23 @@ The sandbox checks here are the structural safety boundary (docs/60
 § Defense in depth): prompt rules are belt; these functions are braces.
 A write outside the scoped project (including catalog roots and the
 framework tree) — or any write into the project's ``evals/`` (the eval is
-the target; the target doesn't move) — is a VIOLATION: it is recorded,
-the forge session's cancel token fires, and the run aborts. Recoverable
-mistakes (immutable version dir, missing file) raise plain ``ConfigError``
-for the meta-agent to read and adapt to.
+the target; the target doesn't move) or ``.foundry/`` (the audit log +
+runtime state are the framework's record of what happened; the record
+doesn't move either) — is a VIOLATION: it is recorded, the forge
+session's cancel token fires, and the run aborts. Recoverable mistakes
+(immutable version dir, superseded prompt version, missing file) raise
+plain ``ConfigError`` for the meta-agent to read and adapt to.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
+
+import yaml
 
 from foundry.config.refs import FoundryRoots
 from foundry.core.errors import ConfigError
@@ -188,8 +193,9 @@ def check_read_path(
 def check_write_path(
     ctx: MetaToolContext, session: Session, raw: str, *, tool: str
 ) -> Path:
-    """Writes: STRICTLY inside the scoped project; never ``evals/``;
-    never a superseded (frozen) artifact version directory."""
+    """Writes: STRICTLY inside the scoped project; never ``evals/``; never
+    ``.foundry/``; never a superseded (frozen) artifact version directory
+    or a superseded prompt version file."""
     path = resolve_path(ctx, raw)
     project_dir = ctx.project_dir
     if not _is_under(path, project_dir):
@@ -210,7 +216,18 @@ def check_write_path(
             detail=f"write into the eval set refused: {path} — the eval is "
             "the target; the target doesn't move (docs/60)",
         )
+    if relative.parts and relative.parts[0] == ".foundry":
+        violation(
+            ctx,
+            session,
+            tool=tool,
+            detail=f"write into the project's .foundry/ refused: {path} — "
+            "the audit log and runtime state are the framework's record of "
+            "what happened; the meta-agent cannot rewrite its own audit "
+            "trail (Phase 6 review finding 2)",
+        )
     _check_version_immutability(ctx, path, relative, tool=tool)
+    _check_prompt_immutability(ctx, path, relative, tool=tool)
     return path
 
 
@@ -246,6 +263,73 @@ def _check_version_immutability(
             "the next version instead (docs/61 § Path immutability)",
             context={"path": str(path), "latest": f"v{latest}"},
         )
+
+
+_PROMPT_FILE_RE = re.compile(r"^v(\d+)\.md$")
+
+
+def _check_prompt_immutability(
+    ctx: MetaToolContext, path: Path, relative: Path, *, tool: str
+) -> None:
+    """Frozen prompt rule (Phase 6 review finding 3, mirroring the frozen
+    ``v<N>/`` rule): a prompt version file ``agents/<a>/prompts/v<N>.md``
+    is immutable once superseded — N below the LATEST version on disk (or
+    below the agent.yaml pin, whichever is higher) refuses the write. The
+    latest version stays writable: that is how the meta-agent iterates a
+    prompt before pinning it."""
+    parts = relative.parts
+    if len(parts) != 4 or parts[0] != "agents" or parts[2] != "prompts":
+        return
+    match = _PROMPT_FILE_RE.match(parts[3])
+    if match is None:
+        return
+    number = int(match.group(1))
+    prompts_root = ctx.project_dir / parts[0] / parts[1] / "prompts"
+    existing = [
+        int(m.group(1))
+        for child in (
+            prompts_root.iterdir() if prompts_root.is_dir() else ()
+        )
+        if child.is_file() and (m := _PROMPT_FILE_RE.match(child.name))
+    ]
+    floor = max(existing, default=0)
+    pinned = _pinned_prompt_number(ctx, parts[1])
+    if pinned is not None:
+        floor = max(floor, pinned)
+    if floor and number < floor:
+        raise ConfigError(
+            f"{tool}: {path} is a superseded (frozen) prompt version "
+            f"(v{number} < v{floor}, the pinned/latest version for agent "
+            f"{parts[1]!r}); prompt versions are immutable once superseded "
+            "— create the next version with new_prompt_version instead",
+            context={
+                "path": str(path),
+                "agent": parts[1],
+                "frozen_version": f"v{number}",
+                "floor": f"v{floor}",
+            },
+        )
+
+
+def _pinned_prompt_number(ctx: MetaToolContext, agent: str) -> int | None:
+    """The agent.yaml prompt pin as an int, or None when unreadable —
+    the freeze must not depend on a parseable agent.yaml."""
+    agent_yaml = ctx.project_dir / "agents" / agent / "agent.yaml"
+    if not agent_yaml.is_file():
+        return None
+    try:
+        data = yaml.safe_load(agent_yaml.read_text())
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    prompt = data.get("prompt")
+    if not isinstance(prompt, dict):
+        return None
+    version = str(prompt.get("version", ""))
+    if version.startswith("v") and version[1:].isdigit():
+        return int(version[1:])
+    return None
 
 
 __all__ = [
