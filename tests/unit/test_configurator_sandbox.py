@@ -305,6 +305,83 @@ async def test_agent_yaml_provider_overrides_refused_via_write_file(
     assert result.is_new is True
 
 
+async def test_agent_yaml_guard_is_filename_case_insensitive(
+    mctx: MetaToolContext, session: Session
+) -> None:
+    """Phase 7 review finding 2: `Agent.yaml` / `AGENT.YAML` on a
+    case-insensitive filesystem (darwin) IS agent.yaml — the raw-text
+    guard's filename comparison is case-folded. (The authoritative
+    compile-boundary check is filename-independent either way.)"""
+    handle = make_write_file(mctx)
+    content = (
+        "name: a\n"
+        "model_binding:\n"
+        "  provider: anthropic\n"
+        "  model: claude-haiku-4-5\n"
+        "  provider_overrides:\n"
+        "    extra_headers: {anthropic-beta: something}\n"
+    )
+    for name in ("Agent.yaml", "AGENT.YAML"):
+        with pytest.raises(ConfigError, match="provider_overrides"):
+            await handle(
+                WriteFileIn(
+                    path=f"projects/qa_bot/agents/a/{name}", content=content
+                ),
+                _ctx(session),
+            )
+    assert not (mctx.project_dir / "agents" / "a").exists()
+    assert not session.cancel_token.cancelled()  # recoverable, not violation
+
+
+async def test_extends_smuggled_overrides_rejected_at_meta_load_boundary(
+    mctx: MetaToolContext, session: Session
+) -> None:
+    """Phase 7 review B1, reproduced through the REAL meta write path:
+    agent.yaml (extends, no overrides inline) and base.yaml (carrying
+    provider_overrides; name != agent.yaml) BOTH pass the raw-text write
+    guard — and the compile/load boundary then rejects the merged spec
+    for meta-authored projects, while the human load path accepts it."""
+    from foundry.config import load_agent_spec
+    from foundry.core.errors import ConfigValidationError
+
+    handle = make_write_file(mctx)
+    base = (
+        "model_binding:\n"
+        "  provider: anthropic\n"
+        "  model: claude-haiku-4-5\n"
+        "  provider_overrides:\n"
+        "    extra_headers: {anthropic-beta: something}\n"
+    )
+    agent = (
+        "extends: base.yaml\n"
+        "name: a\n"
+        "prompt: {version: v1, path: prompts/v1.md}\n"
+        "output: {schema: output_schema.py::Out}\n"
+        "state_visibility: {read: [q], write: [a]}\n"
+    )
+    # Both writes pass the write-time guard — the bypass is real...
+    await handle(
+        WriteFileIn(
+            path="projects/qa_bot/agents/a/base.yaml", content=base
+        ),
+        _ctx(session),
+    )
+    await handle(
+        WriteFileIn(
+            path="projects/qa_bot/agents/a/agent.yaml", content=agent
+        ),
+        _ctx(session),
+    )
+    agent_yaml = mctx.project_dir / "agents" / "a" / "agent.yaml"
+    # ...but the authoritative boundary (every forge compile/eval path
+    # loads with meta_authored=True) rejects the merged spec.
+    with pytest.raises(ConfigValidationError, match="provider_overrides"):
+        load_agent_spec(agent_yaml, meta_authored=True)
+    # Human-authored loading of the SAME project stays legal.
+    spec = load_agent_spec(agent_yaml)
+    assert spec.model_binding.provider_overrides
+
+
 async def test_superseded_prompt_versions_frozen_but_latest_writable(
     mctx: MetaToolContext, session: Session
 ) -> None:

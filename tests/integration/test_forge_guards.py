@@ -112,6 +112,73 @@ async def test_sandbox_violation_aborts_forge(repo: Path) -> None:
     )
 
 
+# --- provider_overrides extends-bypass closed at the compile boundary --------------
+
+
+def _plant_extends_bypass(repo: Path) -> Path:
+    """Rewrite qa_agent's agent.yaml to the Phase 7 review B1 shape: no
+    provider_overrides inline (passes the raw-text write guard), but an
+    `extends:` base file smuggles them into the merged spec."""
+    project_dir = write_scaffolded_project(repo)
+    agent_dir = project_dir / "agents" / "qa_agent"
+    (agent_dir / "base.yaml").write_text(
+        "model_binding:\n"
+        "  provider: anthropic\n"
+        "  model: claude-haiku-4-5\n"
+        "  settings:\n"
+        "    max_tokens: 256\n"
+        "    temperature: 0.0\n"
+        "  provider_overrides:\n"
+        "    extra_headers: {anthropic-beta: something}\n"
+    )
+    (agent_dir / "agent.yaml").write_text(
+        "extends: base.yaml\n"
+        "name: qa_agent\n"
+        "description: Answers numeric questions with tools.\n"
+        "prompt:\n"
+        "  version: v1\n"
+        "  path: prompts/v1.md\n"
+        "output:\n"
+        "  schema: output_schema.py::Output\n"
+        "tools: [word_count, digit_sum]\n"
+        "iteration_limit: 6\n"
+        "state_visibility:\n"
+        "  read: [question]\n"
+        "  write: [answer]\n"
+        "schema_version: 1\n"
+    )
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "fixture: extends bypass (B1)")
+    return project_dir
+
+
+async def test_extends_provider_overrides_rejected_at_forge_compile(
+    repo: Path,
+) -> None:
+    """Phase 7 review finding 1 (B1): an agent.yaml + extends base.yaml
+    pair that slips provider_overrides past the write-time text guard is
+    rejected when the FORGE compiles the project (meta_authored=True) —
+    here via the session's own baseline eval, before any meta-agent turn.
+    The same project loads fine as a human-authored project."""
+    project_dir = _plant_extends_bypass(repo)
+
+    # Human path: provider_overrides is a legal field.
+    from foundry.config import load_project
+
+    human = load_project(project_dir)
+    assert human.agents["qa_agent"].spec.model_binding.provider_overrides
+
+    # Forge path: the session's baseline project eval compiles with
+    # meta_authored=True and must refuse to run the smuggled overrides.
+    transport = ForgeTransport([])  # no meta turn may ever fire
+    session = _session(repo, transport, ForgeGuardrails(max_iter=3))
+    result = await session.run()
+    assert result.termination_reason == "eval_infrastructure_failure"
+    assert "provider_overrides" in result.termination_detail
+    assert result.threshold_met is False
+    assert transport.meta_index == 0
+
+
 # --- cost budget --------------------------------------------------------------------
 
 

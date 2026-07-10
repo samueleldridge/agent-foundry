@@ -262,8 +262,40 @@ def load_state_spec(path: Path) -> StateSpec:
     return _load(StateSpec, path)
 
 
-def load_agent_spec(path: Path) -> AgentSpec:
-    return _load(AgentSpec, path)
+def load_agent_spec(path: Path, *, meta_authored: bool = False) -> AgentSpec:
+    """Load an AgentSpec. ``meta_authored=True`` marks the spec as written
+    by the meta-agent (forge-scoped project): ``model_binding.
+    provider_overrides`` is then rejected HERE, on the VALIDATED spec after
+    ``extends`` resolution — so neither an ``extends:`` base file carrying
+    the overrides nor a filename trick (``Agent.yaml`` on a
+    case-insensitive filesystem) can smuggle them past the write-path text
+    guard (Phase 7 review finding 1/2). Human-authored projects load the
+    field freely; it is a legal, human-only escape hatch (docs/61)."""
+    spec = _load(AgentSpec, path)
+    if meta_authored:
+        _reject_meta_provider_overrides(spec, path)
+    return spec
+
+
+def _reject_meta_provider_overrides(spec: AgentSpec, path: Path) -> None:
+    overrides = spec.model_binding.provider_overrides
+    if not overrides:
+        return
+    raise ConfigValidationError(
+        f"agent {spec.name!r} resolves to model_binding.provider_overrides "
+        f"({', '.join(sorted(overrides))}) in a meta-authored (forge-scoped) "
+        f"project — provider-specific escape hatches are human-only "
+        f"(docs/61 § build_agent). Remove the block (check {path} AND any "
+        "`extends:` base file it merges) and use provider-neutral "
+        "ModelSettings instead",
+        context={
+            "file": str(path),
+            "pointer": "/model_binding/provider_overrides",
+            "agent": spec.name,
+            "provider_overrides": sorted(overrides),
+            "meta_authored": True,
+        },
+    )
 
 
 def load_function_node_spec(path: Path) -> FunctionNodeSpec:
@@ -318,10 +350,18 @@ class LoadedProject:
     functions: dict[str, LoadedFunction] = field(default_factory=dict)
 
 
-def load_project(project_dir: Path) -> LoadedProject:
+def load_project(
+    project_dir: Path, *, meta_authored: bool = False
+) -> LoadedProject:
     """Load a whole project: system.yaml + state spec + every agent's
     agent.yaml and pinned prompt file + every function node's function.yaml
-    and source file."""
+    and source file.
+
+    ``meta_authored=True`` (forge-scoped projects: the forge session and
+    the meta-tool eval/compile wrappers) rejects
+    ``model_binding.provider_overrides`` on every VALIDATED agent spec,
+    post-``extends`` — the authoritative boundary behind the write-path
+    text guard (Phase 7 review finding 1)."""
     project_dir = project_dir.resolve()
     if not project_dir.is_dir():
         raise ConfigLoadError(
@@ -334,7 +374,9 @@ def load_project(project_dir: Path) -> LoadedProject:
     agents: dict[str, LoadedAgent] = {}
     for agent_name in system.agents:
         agent_dir = project_dir / "agents" / agent_name
-        spec = load_agent_spec(agent_dir / "agent.yaml")
+        spec = load_agent_spec(
+            agent_dir / "agent.yaml", meta_authored=meta_authored
+        )
         prompt_path = agent_dir / spec.prompt.path
         if not prompt_path.exists():
             raise ConfigLoadError(

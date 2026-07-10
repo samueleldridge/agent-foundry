@@ -356,10 +356,14 @@ class ForgeSession:
         from foundry.orchestration.compiler import compile_project
 
         spec = load_eval_spec(spec_path)
+        # meta_authored: this project is forge-scoped — provider_overrides
+        # smuggled past the write-path guard (extends / filename case) are
+        # rejected at this compile boundary (Phase 7 review finding 1/2).
         compiled = compile_project(
             project_dir,
             secrets=self.meta_agent.secrets,
             transport=self.meta_agent.transport,
+            meta_authored=True,
         )
         result = await harness_run_eval(
             spec,

@@ -135,8 +135,17 @@ def _guard_agent_yaml_content(path: Path, content: str) -> None:
     agent.yaml through ``write_file`` must refuse them too — otherwise the
     scaffold guard is a speed bump, not a boundary. Unparseable YAML is
     allowed through (it can never compile, so the override can never take
-    effect); the guard fires only on content that WOULD load."""
-    if path.name != "agent.yaml":
+    effect); the guard fires only on content that WOULD load.
+
+    This raw-text check is DEFENSE IN DEPTH only (fast feedback at write
+    time). The authoritative boundary is the compile/load-time rejection
+    on the validated AgentSpec (``load_agent_spec(meta_authored=True)``,
+    exercised by every forge compile/eval path) — that one also catches
+    overrides merged in via ``extends:`` base files and is immune to
+    filename tricks (Phase 7 review finding 1/2). The name comparison is
+    case-folded so ``Agent.yaml`` on a case-insensitive filesystem does
+    not slip past this early check either."""
+    if path.name.casefold() != "agent.yaml":
         return
     try:
         data = yaml.safe_load(content)

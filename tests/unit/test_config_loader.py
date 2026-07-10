@@ -152,3 +152,82 @@ def test_round_trip_agent_spec(tmp_path: Path) -> None:
     from foundry.config import AgentSpec
 
     assert AgentSpec.model_validate(dumped) == spec
+
+
+# --- meta-authored provider_overrides boundary (Phase 7 review finding 1/2) ------
+
+OVERRIDES_BLOCK = """\
+  provider_overrides:
+    extra_headers: {anthropic-beta: something}
+"""
+
+AGENT_YAML_WITH_OVERRIDES = VALID_AGENT_YAML.replace(
+    "  settings:\n", OVERRIDES_BLOCK + "  settings:\n"
+)
+
+
+@pytest.mark.unit
+def test_human_authored_provider_overrides_load_fine(tmp_path: Path) -> None:
+    """provider_overrides is a LEGAL field for human authors — the default
+    (non-meta) load path must keep accepting it."""
+    path = tmp_path / "agent.yaml"
+    path.write_text(AGENT_YAML_WITH_OVERRIDES)
+    spec = load_agent_spec(path)
+    assert spec.model_binding.provider_overrides == {
+        "extra_headers": {"anthropic-beta": "something"}
+    }
+
+
+@pytest.mark.unit
+def test_meta_authored_provider_overrides_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "agent.yaml"
+    path.write_text(AGENT_YAML_WITH_OVERRIDES)
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load_agent_spec(path, meta_authored=True)
+    assert "provider_overrides" in str(excinfo.value)
+    assert excinfo.value.context["pointer"] == "/model_binding/provider_overrides"
+    assert excinfo.value.context["meta_authored"] is True
+
+
+@pytest.mark.unit
+def test_meta_authored_extends_bypass_rejected_post_merge(
+    tmp_path: Path,
+) -> None:
+    """Phase 7 review B1: agent.yaml carries no provider_overrides itself —
+    an `extends:` base file does. The write-path text guard cannot see the
+    merge; the load boundary validates the spec POST-apply_extends, so the
+    smuggled overrides are rejected exactly where they would take effect."""
+    (tmp_path / "base.yaml").write_text(
+        "model_binding:\n"
+        "  provider: anthropic\n"
+        "  model: claude-haiku-4-5\n"
+        + OVERRIDES_BLOCK
+    )
+    agent_yaml = tmp_path / "agent.yaml"
+    agent_yaml.write_text(
+        "extends: base.yaml\n"
+        + VALID_AGENT_YAML.replace(
+            "model_binding:\n"
+            "  provider: anthropic\n"
+            "  model: claude-haiku-4-5\n"
+            "  settings:\n"
+            "    max_tokens: 512\n",
+            "",
+        )
+    )
+    # Human load: the merged overrides are present and legal.
+    human = load_agent_spec(agent_yaml)
+    assert human.model_binding.provider_overrides
+    # Meta-authored load: the SAME file is rejected at the boundary.
+    with pytest.raises(ConfigValidationError, match="provider_overrides"):
+        load_agent_spec(agent_yaml, meta_authored=True)
+
+
+@pytest.mark.unit
+def test_meta_authored_check_ignores_filename_case(tmp_path: Path) -> None:
+    """The boundary validates the PARSED spec, so filename tricks
+    (Agent.yaml on a case-insensitive filesystem) are irrelevant."""
+    path = tmp_path / "Agent.YAML"
+    path.write_text(AGENT_YAML_WITH_OVERRIDES)
+    with pytest.raises(ConfigValidationError, match="provider_overrides"):
+        load_agent_spec(path, meta_authored=True)

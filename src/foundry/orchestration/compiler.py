@@ -102,6 +102,7 @@ def compile_project(
     *,
     secrets: SecretsProvider | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    meta_authored: bool = False,
 ) -> CompiledProject:
     """Load + validate a project; resolve provider, tools, connections,
     functions, state, retrievers, caches, memory.
@@ -111,9 +112,14 @@ def compile_project(
     hole → StateVisibilityError; missing version → RefResolutionError;
     namespace collision / dangling flow ref / memory-scope hole →
     CompileError; memory field misconfiguration → MemoryConfigError.
+
+    ``meta_authored=True`` (forge compile/eval paths only) additionally
+    rejects ``model_binding.provider_overrides`` on every agent spec after
+    ``extends`` resolution — the authoritative provider-overrides boundary
+    for meta-authored projects (Phase 7 review finding 1).
     """
     secrets = secrets or EnvSecretsProvider()
-    project = load_project(project_dir)
+    project = load_project(project_dir, meta_authored=meta_authored)
     system_file = project.directory / "system.yaml"
 
     validate_namespace(project, system_file)

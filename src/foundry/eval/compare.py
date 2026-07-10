@@ -220,13 +220,16 @@ async def compare_project_pin_sets(
     secrets: SecretsProvider | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     event_sink: EventSink | None = None,
+    meta_authored: bool = False,
 ) -> EvalComparison:
     """Run ONE project eval against the project as it existed at each git
     ref. Each ref's project subtree (plus the repo ``catalog/`` when
     present at that ref) is materialized read-only into a temp overlay via
     ``git archive`` and compiled from there; the eval spec comes from the
     CURRENT tree so every run shares one spec hash. The special ref
-    ``worktree`` compiles the live project directory instead."""
+    ``worktree`` compiles the live project directory instead.
+    ``meta_authored=True`` (the forge's compare_versions wrapper) makes
+    every compile reject meta-forbidden ``provider_overrides``."""
     from foundry.orchestration.compiler import compile_project
 
     if len(pin_set_refs) < 2:
@@ -247,7 +250,10 @@ async def compare_project_pin_sets(
                 dest = Path(tmp) / f"pinset_{index}"
                 materialized = _materialize_ref(project_dir, ref, dest)
             compiled = compile_project(
-                materialized, secrets=secrets, transport=transport
+                materialized,
+                secrets=secrets,
+                transport=transport,
+                meta_authored=meta_authored,
             )
             result = await run_eval(
                 spec,

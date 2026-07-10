@@ -222,10 +222,15 @@ def make_run_eval(
         else:
             from foundry.orchestration.compiler import compile_project
 
+            # meta_authored: the scoped project is forge-written — the
+            # compile boundary rejects provider_overrides even when they
+            # arrive via an `extends:` base file or a case-folded filename
+            # (Phase 7 review finding 1/2).
             compiled = compile_project(
                 mctx.project_dir,
                 secrets=mctx.secrets,
                 transport=mctx.transport,
+                meta_authored=True,
             )
             if inputs.scope == "project":
                 if inputs.target != mctx.scoped_project:
@@ -375,6 +380,7 @@ def make_compare_versions(
                 list(inputs.refs),
                 secrets=mctx.secrets,
                 transport=mctx.transport,
+                meta_authored=True,
             )
         return _comparison_out(mctx, ctx, comparison)
 
