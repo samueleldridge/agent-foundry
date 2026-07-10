@@ -1,17 +1,33 @@
 """Step execution: node-sized slices of the agent step (with optional
 memory) + the function-node step + shared event emission.
 
-Phase 3 shape: :class:`AgentStepRuntime` splits the agent step into graph-
-node-sized async methods (``begin`` → ``llm_round`` ⇄ ``dispatch_tools`` →
-``finish``, with ``start_turn`` / ``end_turn`` wrapping the loop for
-memory-enabled agents). The LangGraph adapter wires them as StateGraph
-nodes, so the LLM ⇄ tool loop and the docs/26 memory turn loop are
-checkpointed at every boundary — a killed run resumes mid-loop instead of
-restarting the whole step.
+Phase 3 shape, grown multi-agent in Phase 7: one :class:`AgentStepRuntime`
+per agent instance slices the agent step into graph-node-sized async
+methods (``begin`` → ``llm_round`` ⇄ ``dispatch_tools`` → ``finish``, with
+``start_turn`` / ``end_turn`` wrapping the loop for memory-enabled
+agents). The LangGraph adapter wires them as StateGraph nodes, so the
+LLM ⇄ tool loop and the docs/26 memory turn loop are checkpointed at
+every boundary.
 
-No langgraph imports — graph wiring lives in ``langgraph_adapter``; every
-method here takes plain ``(conv, run_state)`` dicts and returns a partial
-graph-state update (keys: ``conv`` / ``state`` / ``output``).
+Phase 7 changes:
+
+- Node methods return state DELTAS (``{"state": <delta>}``), not merged
+  state — the graph's ``state`` channel merges deltas through the
+  compiled per-field reducers, which is what makes concurrent parallel
+  branches merge correctly (docs/22 § Reducers).
+- Each method receives the agent's READ-SCOPED state projection (the
+  adapter projects before invoking) — an agent literally cannot see
+  fields outside its visibility (docs/22; Phase 7 exit gate).
+- Supervisors carry compiler-synthesised handoff tools; the dispatcher
+  intercepts ``transfer_to_*`` calls, records the route in the
+  conversation bundle, and the flow router acts on it (docs/30).
+- ``Guardrails.max_iterations`` caps total agent invocations per run.
+- HITL: ``ApprovalRequired`` raised by a tool propagates OUT of the node
+  method; the adapter converts it into a LangGraph interrupt. Resolved
+  approvals are threaded back in via ``AgentStepRuntime.approvals`` →
+  ``RunContext.approvals``.
+
+No langgraph imports — graph wiring lives in ``langgraph_adapter``.
 """
 
 from __future__ import annotations
@@ -63,21 +79,26 @@ from foundry.core.errors import (
 from foundry.core.tool import RunContext
 from foundry.memory import DefaultMemory, build_memory, weave
 from foundry.observability.tracing import foundry_span, set_span_attributes
+from foundry.orchestration.handoff import HandoffInput, HandoffOutput
+from foundry.orchestration.patterns import END_SENTINEL
 from foundry.orchestration.state_scope import AgentStateView
 from foundry.providers import ToolSchema
 from foundry.retrieval import MappingRetrieverAccessor
-from foundry.runtime.compiled import CompiledFunction, CompiledProject
+from foundry.runtime.compiled import (
+    CompiledAgent,
+    CompiledFunction,
+    CompiledProject,
+)
 
 EventSink = Callable[[BaseModel], None]
 
 NodeUpdate = dict[str, Any]
-"""A partial graph-state update: any of ``conv`` / ``state`` / ``output``."""
+"""A partial graph-state update: any of ``conv`` / ``state`` (a DELTA) /
+``output`` / ``outputs`` / ``route``."""
 
 _TURNS_FIELD = "turns"
 """Phase 2c multi-turn convention: a memory-enabled agent whose read scope
-projects a list-of-strings field named ``turns`` converses once per item.
-Phase 3 checkpoints the loop (kill mid-turn → resume); the API-level
-conversation surface remains Phase 8."""
+projects a list-of-strings field named ``turns`` converses once per item."""
 
 
 class EventEmitter:
@@ -117,9 +138,9 @@ class EventEmitter:
 class RunCounters:
     """Mutable per-run tallies shared across steps.
 
-    Token/cost totals ACCUMULATE across every LLM call in the run (a
-    2-round tool run reports the sum of both calls, not the last call's
-    values — Phase 3 review finding 2)."""
+    Token/cost totals ACCUMULATE across every LLM call in the run.
+    ``agent_invocations`` counts agent steps against
+    ``Guardrails.max_iterations`` (docs/30 § Termination semantics)."""
 
     def __init__(self) -> None:
         self.llm_call_count = 0
@@ -127,6 +148,7 @@ class RunCounters:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_cost_estimate_usd: Decimal | None = None
+        self.agent_invocations = 0
 
     def record(self, response: ModelResponse) -> None:
         """Tally one completed LLM call."""
@@ -164,6 +186,10 @@ def apply_delta(
     delta: dict[str, Any],
     reducers: dict[str, Reducer],
 ) -> dict[str, Any]:
+    """Merge a state delta through the compiled per-field reducers. This
+    is the graph's ``state`` channel reducer — LangGraph applies it once
+    per node update, sequentially, which is what gives APPEND/MERGE their
+    accumulate-under-concurrency semantics (docs/22)."""
     new_state = dict(state)
     for field_name, value in delta.items():
         new_state[field_name] = apply_reducer(
@@ -177,10 +203,10 @@ def apply_delta(
 # --- prompt helpers ---------------------------------------------------------------
 
 
-def _system_text(compiled: CompiledProject, tool_descriptions: str) -> str:
-    schema_json = json.dumps(compiled.output_model.model_json_schema(), indent=2)
+def _system_text(ca: CompiledAgent, tool_descriptions: str) -> str:
+    schema_json = json.dumps(ca.output_model.model_json_schema(), indent=2)
     return (
-        compiled.agent.prompt_text.rstrip()
+        ca.loaded.prompt_text.rstrip()
         + (
             "\n\nYou can call the following tools when they help:\n"
             + tool_descriptions
@@ -195,14 +221,14 @@ def _system_text(compiled: CompiledProject, tool_descriptions: str) -> str:
 
 
 def build_messages(
-    compiled: CompiledProject,
+    ca: CompiledAgent,
     agent_input: dict[str, Any],
     tool_descriptions: str,
 ) -> list[FoundryMessage]:
     return [
         FoundryMessage(
             role=MessageRole.SYSTEM,
-            content=[TextBlock(text=_system_text(compiled, tool_descriptions))],
+            content=[TextBlock(text=_system_text(ca, tool_descriptions))],
         ),
         FoundryMessage(
             role=MessageRole.USER,
@@ -211,7 +237,7 @@ def build_messages(
     ]
 
 
-def parse_output(compiled: CompiledProject, response: ModelResponse) -> BaseModel:
+def parse_output(ca: CompiledAgent, response: ModelResponse) -> BaseModel:
     text = "".join(
         b.text for b in response.message.content if isinstance(b, TextBlock)
     ).strip()
@@ -221,22 +247,26 @@ def parse_output(compiled: CompiledProject, response: ModelResponse) -> BaseMode
             text = text[4:]
         text = text.strip()
     try:
-        return compiled.output_model.model_validate_json(text)
+        return ca.output_model.model_validate_json(text)
     except ValidationError as exc:
         raise OrchestrationError(
-            f"agent {compiled.agent_name!r} output failed validation against "
-            f"output schema {compiled.output_model.__name__!r}",
+            f"agent {ca.name!r} output failed validation against "
+            f"output schema {ca.output_model.__name__!r}",
             context={
-                "agent": compiled.agent_name,
-                "output_schema": compiled.output_model.__name__,
+                "agent": ca.name,
+                "output_schema": ca.output_model.__name__,
                 "response_preview": text[:500],
             },
             cause=exc,
         ) from exc
 
 
-def tool_schemas(compiled: CompiledProject) -> list[ToolSchema]:
-    allow = set(compiled.agent.spec.tools)
+def tool_schemas(
+    compiled: CompiledProject, ca: CompiledAgent
+) -> list[ToolSchema]:
+    """The agent's allowlisted tools plus its compiler-synthesised handoff
+    tools (handoff tools are NOT in the allowlist — docs/30)."""
+    allow = set(ca.loaded.spec.tools)
     schemas: list[ToolSchema] = []
     for descriptor in compiled.tool_registry.list_all():
         if descriptor.name not in allow:
@@ -248,6 +278,14 @@ def tool_schemas(compiled: CompiledProject) -> list[ToolSchema]:
                 name=descriptor.name,
                 description=descriptor.description,
                 input_schema=registered.input_schema.model_json_schema(),
+            )
+        )
+    for handoff in ca.handoff_tools:
+        schemas.append(
+            ToolSchema(
+                name=handoff.name,
+                description=handoff.description,
+                input_schema=HandoffInput.model_json_schema(),
             )
         )
     return schemas
@@ -262,27 +300,30 @@ def tool_descriptions(schemas: list[ToolSchema]) -> str:
 
 async def _dispatch_one(
     compiled: CompiledProject,
+    ca: CompiledAgent,
     pool: InProcessConnectionPool,
     session: Session,
     emitter: EventEmitter,
     block: ToolUseBlock,
     retrievers: MappingRetrieverAccessor | None = None,
+    approvals: dict[str, dict[str, Any]] | None = None,
 ) -> ToolResultBlock:
     """One tool call → one tool_result block. Tool-layer errors become
     structured is_error results the LLM can recover from (docs/20 § Error
-    semantics); non-tool errors (cost budget, cancellation) propagate."""
+    semantics); non-tool errors (cost budget, cancellation, HITL pause)
+    propagate."""
     registered = compiled.tool_registry.get(block.name)
     accessor = SlotConnectionAccessor(
         pool,
         compiled.project.system.name,
         compiled.tool_slots.get(block.name, {}),
         ConnectionContext(http_transport=compiled.transport),
-        agent_name=compiled.agent_name,
+        agent_name=ca.name,
         emit=emitter.emit,
     )
     ctx = RunContext(
         run_id=str(session.run_id),
-        agent_name=compiled.agent_name,
+        agent_name=ca.name,
         session=session,
         tool_ref=(
             f"{registered.descriptor.ref}@{registered.descriptor.version}"
@@ -295,11 +336,12 @@ async def _dispatch_one(
         ),
         connections=accessor,
         retrievers=retrievers,
+        approvals=dict(approvals or {}),
     )
     try:
         output = await compiled.tool_registry.dispatch(
             block.name,
-            compiled.agent.spec.tools,
+            ca.loaded.spec.tools,
             block.input,
             ctx,
             emit=emitter.emit,
@@ -346,7 +388,7 @@ def _response_text(response: ModelResponse) -> str:
 
 
 class AgentStepRuntime:
-    """The agent step, sliced into graph nodes.
+    """One agent's step, sliced into graph nodes.
 
     Routing vocabulary returned by the ``route_after_*`` methods (the
     adapter maps labels onto graph node names):
@@ -354,13 +396,13 @@ class AgentStepRuntime:
     - ``begin`` → ``turn`` (memory) | ``llm`` | ``finish`` (cache hit)
     - ``llm``   → ``tools`` (tool_use blocks) | ``turn_end`` (memory) |
       ``finish``
-    - ``tools`` → ``llm`` (unconditional loop edge)
+    - ``tools`` → ``finish`` (worker handoff recorded) | ``llm``
     - ``turn_end`` → ``turn`` (more turns) | ``finish``
 
-    All conversation state lives in the ``conv`` dict inside the graph
-    state (checkpointed); this object holds only process-scoped plumbing
-    (provider, pool, emitter, lazily-built memory coordinator) so a fresh
-    process can resume a checkpointed conv.
+    All conversation state lives in the agent's ``conv`` channel inside
+    the graph state (checkpointed); this object holds only process-scoped
+    plumbing (provider, pool, emitter, lazily-built memory coordinator,
+    resolved approvals) so a fresh process can resume a checkpointed conv.
     """
 
     def __init__(
@@ -370,21 +412,34 @@ class AgentStepRuntime:
         emitter: EventEmitter,
         pool: InProcessConnectionPool,
         counters: RunCounters,
+        agent: CompiledAgent | None = None,
     ) -> None:
         self.compiled = compiled
+        self.ca = (
+            agent
+            if agent is not None
+            else compiled.agent_map()[compiled.agent_name]
+        )
         self.session = session
         self.emitter = emitter
         self.pool = pool
         self.counters = counters
         self.retrievers: MappingRetrieverAccessor | None = None
+        self.approvals: dict[str, dict[str, Any]] = {}
+        """Resolved HITL approvals — set by the adapter before each node
+        invocation from the run's ``approvals`` channel + interrupt
+        resolutions; threaded into every RunContext."""
         self._memory_obj: DefaultMemory | None = None
-        self.view = compiled.compiled_state.agent_views[compiled.agent_name]
+        self.view = compiled.compiled_state.agent_views[self.ca.name]
         self.reducers = compiled.compiled_state.reducers
-        self.schemas = tool_schemas(compiled)
+        self.schemas = tool_schemas(compiled, self.ca)
         self.descriptions = tool_descriptions(self.schemas)
+        self.handoff_targets = {
+            tool.name: tool.target for tool in self.ca.handoff_tools
+        }
         self.message_fields: list[str] = []
-        if compiled.memory is not None:
-            memory_config = compiled.memory.spec.memory
+        if self.ca.memory is not None:
+            memory_config = self.ca.memory.spec.memory
             assert memory_config is not None
             schema_types = {
                 name: field_spec.type.replace(" ", "")
@@ -406,12 +461,12 @@ class AgentStepRuntime:
         """Built lazily: a resumed process may enter mid-turn without ever
         running ``begin``, and the retriever accessor is attached to this
         runtime only just before graph invocation."""
-        assert self.compiled.memory is not None
+        assert self.ca.memory is not None
         if self._memory_obj is None:
             self._memory_obj = build_memory(
-                self.compiled.memory,
-                agent_name=self.compiled.agent_name,
-                provider=self.compiled.provider,
+                self.ca.memory,
+                agent_name=self.ca.name,
+                provider=self.ca.provider,
                 retrievers=self.retrievers,
                 emit=self.emitter.emit,
             )
@@ -428,12 +483,11 @@ class AgentStepRuntime:
             if field_name not in self.view.write:
                 self.emitter.emit(
                     WarningEvent,
-                    agent_name=self.compiled.agent_name,
+                    agent_name=self.ca.name,
                     category="memory.out_of_scope_write",
                     message=(
                         f"memory write to state field {field_name!r} dropped: "
-                        f"outside agent {self.compiled.agent_name!r}'s write "
-                        "scope"
+                        f"outside agent {self.ca.name!r}'s write scope"
                     ),
                     error_class=None,
                 )
@@ -443,7 +497,7 @@ class AgentStepRuntime:
 
         return MemoryContext(
             run_id=self.session.run_id,
-            agent_name=self.compiled.agent_name,
+            agent_name=self.ca.name,
             session=self.session,
             state_view=self.view.project_input(local),
             state_writer=write_field,
@@ -459,13 +513,26 @@ class AgentStepRuntime:
         """Emit agent.started; seed the conversation bundle. Non-memory
         agents also consult the semantic cache here (docs/24 § Layer 2:
         keyed by the step's INITIAL input; a hit skips the whole loop)."""
-        spec = self.compiled.agent.spec
+        spec = self.ca.loaded.spec
+        max_iterations = self.compiled.project.system.guardrails.max_iterations
+        self.counters.agent_invocations += 1
+        if self.counters.agent_invocations > max_iterations:
+            raise IterationLimitError(
+                f"run exceeded guardrails.max_iterations "
+                f"({max_iterations} agent invocations) at agent "
+                f"{self.ca.name!r}; a pathological flow configuration is "
+                "consuming unbounded agent steps (docs/30 § Termination)",
+                context={
+                    "agent": self.ca.name,
+                    "max_iterations": max_iterations,
+                },
+            )
         self.emitter.emit(
             AgentStarted,
-            agent_name=self.compiled.agent_name,
+            agent_name=self.ca.name,
             agent_version=spec.prompt.version,
         )
-        if self.compiled.memory is not None:
+        if self.ca.memory is not None:
             turns = _extract_turns(self.view.project_input(run_state))
             return {
                 "conv": {
@@ -480,23 +547,24 @@ class AgentStepRuntime:
                 }
             }
         agent_input = self.view.project_input(run_state)
-        messages = build_messages(self.compiled, agent_input, self.descriptions)
+        messages = build_messages(self.ca, agent_input, self.descriptions)
         new_conv: dict[str, Any] = {
             "mode": "plain",
             "messages": messages,
             "round": 0,
             "response": None,
+            "route": None,
             "cache_hit": False,
             "cache_key": None,
         }
-        semantic = self.compiled.semantic_cache
+        semantic = self.ca.semantic_cache
         if semantic is not None:
             await ensure_version_marker(
-                semantic, self.compiled.agent_name, self.emitter.emit
+                semantic, self.ca.name, self.emitter.emit
             )
             response, cache_key = await semantic_lookup(
                 semantic,
-                agent_name=self.compiled.agent_name,
+                agent_name=self.ca.name,
                 model_binding=spec.model_binding,
                 tools=self.schemas,
                 messages=messages,
@@ -516,8 +584,8 @@ class AgentStepRuntime:
         self, conv: dict[str, Any], run_state: dict[str, Any]
     ) -> NodeUpdate:
         """docs/26 per-turn head: memory.read → weave → turn messages."""
-        assert self.compiled.memory is not None
-        memory_config = self.compiled.memory.spec.memory
+        assert self.ca.memory is not None
+        memory_config = self.ca.memory.spec.memory
         assert memory_config is not None
         turn_text: str = conv["turns"][conv["turn_index"]]
         local = dict(run_state)
@@ -525,7 +593,7 @@ class AgentStepRuntime:
         ctx = self._make_ctx(local, writes, conv["turn_index"], conv["recent"])
         envelope = await self._memory().read(turn_text, ctx)
         woven = weave(
-            _system_text(self.compiled, self.descriptions), envelope, memory_config
+            _system_text(self.ca, self.descriptions), envelope, memory_config
         )
         user_text = (
             f"{woven.user_prefix}\n\n{turn_text}" if woven.user_prefix else turn_text
@@ -542,29 +610,29 @@ class AgentStepRuntime:
             "conv": {**conv, "messages": messages, "round": 0, "response": None}
         }
         if writes:
-            update["state"] = apply_delta(run_state, writes, self.reducers)
+            update["state"] = writes
         return update
 
     async def llm_round(
         self, conv: dict[str, Any], run_state: dict[str, Any]
     ) -> NodeUpdate:
         """One LLM call, wrapped in a ``foundry.llm`` span (docs/01 attrs)."""
-        spec = self.compiled.agent.spec
+        spec = self.ca.loaded.spec
         if conv["round"] >= spec.iteration_limit:
             raise IterationLimitError(
-                f"agent {self.compiled.agent_name!r} exceeded its "
+                f"agent {self.ca.name!r} exceeded its "
                 f"iteration_limit of {spec.iteration_limit} LLM rounds "
                 "without a terminal response",
-                context={"agent": self.compiled.agent_name,
+                context={"agent": self.ca.name,
                          "iteration_limit": spec.iteration_limit},
             )
         capture = self.compiled.project.system.observability.capture_inputs
         messages: list[FoundryMessage] = list(conv["messages"])
         self.emitter.emit(
             LLMCallStarted,
-            agent_name=self.compiled.agent_name,
-            provider=self.compiled.provider.name,
-            model=self.compiled.provider.model,
+            agent_name=self.ca.name,
+            provider=self.ca.provider.name,
+            model=self.ca.provider.model,
             prompt_messages=list(messages) if capture else None,
         )
         with foundry_span(
@@ -572,13 +640,13 @@ class AgentStepRuntime:
             {
                 "run_id": str(self.session.run_id),
                 "project": self.compiled.project.system.name,
-                "agent": self.compiled.agent_name,
-                "provider": self.compiled.provider.name,
-                "model": self.compiled.provider.model,
+                "agent": self.ca.name,
+                "provider": self.ca.provider.name,
+                "model": self.ca.provider.model,
                 "tool_schemas_count": len(self.schemas),
             },
         ) as span:
-            response = await self.compiled.provider.generate(
+            response = await self.ca.provider.generate(
                 messages,
                 self.schemas,
                 spec.model_binding.settings,
@@ -597,7 +665,7 @@ class AgentStepRuntime:
         self.counters.record(response)
         self.emitter.emit(
             LLMCallCompleted,
-            agent_name=self.compiled.agent_name,
+            agent_name=self.ca.name,
             usage=response.usage,
             cost_estimate_usd=response.cost_estimate_usd,
             latency_ms=response.latency_ms,
@@ -618,28 +686,85 @@ class AgentStepRuntime:
         self, conv: dict[str, Any], run_state: dict[str, Any]
     ) -> NodeUpdate:
         """Dispatch every tool_use block of the round in parallel (docs/21)
-        and grow the conversation with the results."""
+        and grow the conversation with the results. Handoff tools are
+        intercepted here (docs/30 § Handoff tool generation): the call
+        records the route decision instead of touching the registry."""
         response: ModelResponse = conv["response"]
         tool_uses = [
             b for b in response.message.content if isinstance(b, ToolUseBlock)
         ]
-        results = list(
+        route: str | None = conv.get("route")
+        results_by_id: dict[str, ToolResultBlock] = {}
+
+        real_blocks = [
+            b for b in tool_uses if b.name not in self.handoff_targets
+        ]
+        real_results = list(
             await asyncio.gather(
                 *(
                     _dispatch_one(
-                        self.compiled, self.pool, self.session, self.emitter,
-                        block, self.retrievers,
+                        self.compiled, self.ca, self.pool, self.session,
+                        self.emitter, block, self.retrievers, self.approvals,
                     )
-                    for block in tool_uses
+                    for block in real_blocks
                 )
             )
         )
+        for block, result in zip(real_blocks, real_results, strict=True):
+            results_by_id[block.id] = result
+
+        for block in tool_uses:
+            if block.name not in self.handoff_targets:
+                continue
+            if route is not None:
+                results_by_id[block.id] = ToolResultBlock(
+                    tool_use_id=block.id,
+                    is_error=True,
+                    content=[TextBlock(
+                        text="HandoffAlreadyRecorded: this turn already "
+                        f"handed off to {route!r}; one handoff per turn"
+                    )],
+                )
+                continue
+            try:
+                HandoffInput.model_validate(block.input)
+            except ValidationError as exc:
+                results_by_id[block.id] = ToolResultBlock(
+                    tool_use_id=block.id,
+                    is_error=True,
+                    content=[TextBlock(
+                        text="ToolInputValidationError: "
+                        f"{exc.errors()[0]['msg']} (field: reason)"
+                    )],
+                )
+                continue
+            route = self.handoff_targets[block.name]
+            results_by_id[block.id] = ToolResultBlock(
+                tool_use_id=block.id,
+                content=[TextBlock(text=HandoffOutput().model_dump_json())],
+            )
+
         messages = [
             *conv["messages"],
             response.message,
-            FoundryMessage(role=MessageRole.USER, content=list(results)),
+            FoundryMessage(
+                role=MessageRole.USER,
+                content=[results_by_id[b.id] for b in tool_uses],
+            ),
         ]
-        return {"conv": {**conv, "messages": messages, "response": None}}
+        return {
+            "conv": {**conv, "messages": messages, "response": None,
+                     "route": route}
+        }
+
+    def route_after_tools(self, conv: dict[str, Any]) -> str:
+        """A recorded WORKER handoff short-circuits to finish; an END
+        handoff loops back for one more round so the supervisor produces
+        its final structured answer (docs/31 § Output contract)."""
+        route = conv.get("route")
+        if route is not None and route != END_SENTINEL:
+            return "finish"
+        return "llm"
 
     async def end_turn(
         self, conv: dict[str, Any], run_state: dict[str, Any]
@@ -647,7 +772,7 @@ class AgentStepRuntime:
         """docs/26 per-turn tail: state append + memory.write (episodic
         ingest) → periodic consolidation."""
         response: ModelResponse = conv["response"]
-        output = parse_output(self.compiled, response)
+        output = parse_output(self.ca, response)
         turn_text: str = conv["turns"][conv["turn_index"]]
         assistant_text = _response_text(response)
         turn_messages = [
@@ -694,7 +819,7 @@ class AgentStepRuntime:
         }
         return {
             "conv": new_conv,
-            "state": apply_delta(run_state, {**delta, **writes}, self.reducers),
+            "state": {**delta, **writes},
         }
 
     def route_after_turn_end(self, conv: dict[str, Any]) -> str:
@@ -704,7 +829,22 @@ class AgentStepRuntime:
         self, conv: dict[str, Any], run_state: dict[str, Any]
     ) -> NodeUpdate:
         """Terminal slice: semantic-cache store (miss path), output parse +
-        write-scope projection, agent.completed."""
+        write-scope projection, agent.completed, and — for supervisors —
+        the route decision handed to the flow router."""
+        route: str | None = conv.get("route")
+        is_router = bool(self.handoff_targets)
+
+        if route is not None and route != END_SENTINEL:
+            # Worker handoff: the turn ended in a transfer_to_* call — no
+            # structured output this round; the worker produces the next
+            # state change, and the supervisor speaks again afterwards.
+            self.emitter.emit(
+                AgentCompleted,
+                agent_name=self.ca.name,
+                output_summary=f"handoff to {route}",
+            )
+            return {"conv": None, "route": route}
+
         if conv.get("mode") == "memory":
             output_dump: dict[str, Any] = conv["output_dump"]
             final_writes = {
@@ -715,16 +855,21 @@ class AgentStepRuntime:
             }
             self.emitter.emit(
                 AgentCompleted,
-                agent_name=self.compiled.agent_name,
-                output_summary=f"{self.compiled.output_model.__name__} produced",
+                agent_name=self.ca.name,
+                output_summary=f"{self.ca.output_model.__name__} produced",
             )
-            return {
+            update: NodeUpdate = {
                 "conv": None,
-                "state": apply_delta(run_state, final_writes, self.reducers),
+                "state": final_writes,
                 "output": output_dump,
+                "outputs": {self.ca.name: output_dump},
             }
+            if is_router:
+                update["route"] = route
+            return update
+
         response: ModelResponse = conv["response"]
-        semantic = self.compiled.semantic_cache
+        semantic = self.ca.semantic_cache
         if (
             semantic is not None
             and conv.get("cache_key") is not None
@@ -734,21 +879,24 @@ class AgentStepRuntime:
             # future hit replays the final answer without the tool loop.
             await semantic_store(
                 semantic, conv["cache_key"], response,
-                agent_name=self.compiled.agent_name, emit=self.emitter.emit,
+                agent_name=self.ca.name, emit=self.emitter.emit,
             )
-        output = parse_output(self.compiled, response)
+        output = parse_output(self.ca, response)
+        output_dump = output.model_dump(mode="json")
         self.emitter.emit(
             AgentCompleted,
-            agent_name=self.compiled.agent_name,
-            output_summary=f"{self.compiled.output_model.__name__} produced",
+            agent_name=self.ca.name,
+            output_summary=f"{self.ca.output_model.__name__} produced",
         )
-        return {
+        update = {
             "conv": None,
-            "state": apply_delta(
-                run_state, _output_delta(output, self.view), self.reducers
-            ),
-            "output": output.model_dump(mode="json"),
+            "state": _output_delta(output, self.view),
+            "output": output_dump,
+            "outputs": {self.ca.name: output_dump},
         }
+        if is_router:
+            update["route"] = route
+        return update
 
 
 # --- function-node step ----------------------------------------------------------------

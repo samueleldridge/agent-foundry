@@ -83,6 +83,7 @@ from foundry.runtime.execution import (
     EventEmitter,
     EventSink,
     RunCounters,
+    apply_delta,
     seed_state,
 )
 from foundry.storage.paths import run_dir
@@ -355,7 +356,13 @@ def _agent_invoke(compiled: CompiledProject) -> Invoke:
                 if "conv" in update:
                     conv = update["conv"] or {}
                 if "state" in update:
-                    state = update["state"]
+                    # Phase 7: node methods return DELTAS; merge through
+                    # the compiled reducers (mirrors the graph channel).
+                    state = apply_delta(
+                        state,
+                        update["state"],
+                        compiled.compiled_state.reducers,
+                    )
                 if "output" in update:
                     output = update["output"]
 

@@ -512,8 +512,9 @@ def test_graph_flow_refs_resolve_across_agents_and_functions(
     tmp_path: Path,
 ) -> None:
     """A graph flow whose from/to mix agents + functions passes reference
-    validation (it fails later ONLY on the Phase-7 execution stub); a
-    dangling reference fails on the reference itself."""
+    validation; Phase 7 then applies the STRUCTURAL graph checks (this
+    fixture graph never reaches END, so it fails on that — not on refs). A
+    dangling reference still fails on the reference itself."""
     project = _copy_project(tmp_path, "memory_graph")
     system_yaml = project / "system.yaml"
     original = system_yaml.read_text()
@@ -521,7 +522,7 @@ def test_graph_flow_refs_resolve_across_agents_and_functions(
     system_yaml.write_text(original.replace(_SEQ_FLOW, _GRAPH_FLOW_OK))
     with pytest.raises(CompileError) as valid_refs:
         compile_project(project)
-    assert "Phase 7" in str(valid_refs.value)          # execution gap only
+    assert "no path to END" in str(valid_refs.value)    # structural check
     assert "unknown node" not in str(valid_refs.value)  # refs resolved fine
 
     system_yaml.write_text(original.replace(_SEQ_FLOW, _GRAPH_FLOW_DANGLING))

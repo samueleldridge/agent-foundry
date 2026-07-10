@@ -8,8 +8,10 @@ rest of the runtime stays langgraph-free.
 
 from __future__ import annotations
 
+import operator
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Annotated, Any, TypedDict, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -26,21 +28,70 @@ from foundry.runtime.checkpointers import (
     SqliteCheckpointStore,
 )
 
+GraphState = dict[str, Any]
+"""Phase 7: the graph-state schema is built per compile by
+:func:`make_graph_state` (per-agent conv channels + reducer-backed shared
+channels); this alias is the value shape nodes see."""
 
-class GraphState(TypedDict, total=False):
-    """State schema for the Phase 3 StateGraph.
 
-    ``state`` is the project's declared state dict (nodes merge their deltas
-    via the compiled reducers before returning). ``output`` carries the flow
-    agent's final parsed output. ``conv`` is the in-flight agent-step
-    conversation bundle (messages, turn/round counters, pending response) —
-    checkpointed at every node boundary so a killed run resumes mid tool
-    loop / mid memory turn instead of restarting the whole agent step.
+def _take_last(current: Any, incoming: Any) -> Any:
+    """Last-value reducer that TOLERATES concurrent writers (LangGraph's
+    bare LastValue channel refuses two updates in one superstep; parallel
+    branches finishing together both write ``output``)."""
+    return incoming
+
+
+def _merge_dicts(
+    current: dict[str, Any] | None, incoming: dict[str, Any] | None
+) -> dict[str, Any]:
+    merged = dict(current or {})
+    merged.update(incoming or {})
+    return merged
+
+
+def make_graph_state(
+    agent_names: list[str],
+    owner_names: list[str],
+    state_merger: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
+) -> type:
+    """Build the run's graph-state schema (Phase 7).
+
+    Channels:
+
+    - ``state`` — the project state; nodes return DELTAS and the channel
+      reducer merges them through the compiled per-field reducers
+      (docs/22). Sequential application per update is what gives APPEND /
+      MERGE their accumulate-under-concurrency semantics.
+    - ``output`` — the last finished agent's parsed output (take-last).
+    - ``outputs`` — per-agent last outputs (dict-merge).
+    - ``conv__<agent>`` — one PRIVATE conversation channel per agent
+      (checkpointed mid tool-loop). Structural isolation: an agent's
+      slices can only be handed their own channel.
+    - ``route__<owner>`` / ``decision__<owner>`` — supervisor/graph
+      routing state, namespaced per owner so nested flows running in
+      parallel branches never collide.
+    - ``hops`` — total edge traversals (operator.add increments).
+    - ``approvals`` — resolved HITL approvals by approval_id (dict-merge).
+    - ``escalated`` / ``flow_status`` — supervisor max-hops bookkeeping.
     """
-
-    state: dict[str, Any]
-    output: Any
-    conv: dict[str, Any] | None
+    fields: dict[str, Any] = {
+        "state": Annotated[dict[str, Any], state_merger],
+        "output": Annotated[Any, _take_last],
+        "outputs": Annotated[dict[str, Any], _merge_dicts],
+        "hops": Annotated[int, operator.add],
+        "approvals": Annotated[dict[str, Any], _merge_dicts],
+        "escalated": Annotated[bool, operator.or_],
+        "flow_status": Annotated[Any, _take_last],
+    }
+    for agent in agent_names:
+        fields[f"conv__{agent}"] = Annotated[Any, _take_last]
+    for owner in owner_names:
+        fields[f"route__{owner}"] = Annotated[Any, _take_last]
+        fields[f"decision__{owner}"] = Annotated[Any, _take_last]
+    schema = TypedDict(  # type: ignore[misc]
+        "FoundryGraphState", fields, total=False
+    )
+    return cast(type, schema)
 
 
 class FoundrySqliteSaver(InMemorySaver):
@@ -144,4 +195,5 @@ __all__ = [
     "FoundrySqliteSaver",
     "GraphState",
     "build_checkpointer",
+    "make_graph_state",
 ]

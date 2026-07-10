@@ -27,6 +27,8 @@ from foundry.connections import PreparedConnection
 from foundry.core import ModelResponse, ToolRegistry
 from foundry.core.tool import RunContext
 from foundry.memory import PreparedMemory
+from foundry.orchestration.handoff import HandoffTool
+from foundry.orchestration.patterns import FlowPlan, LeafNode
 from foundry.orchestration.state_scope import CompiledState
 from foundry.providers import ProviderAdapter
 from foundry.retrieval import PreparedRetriever
@@ -57,9 +59,33 @@ class CompiledFunction:
 
 
 @dataclass(frozen=True)
+class CompiledAgent:
+    """One fully-resolved agent node: spec + prompt + provider + output
+    schema + its own retrievers / semantic cache / memory, plus any
+    compiler-synthesised handoff tools (supervisors only)."""
+
+    name: str
+    loaded: LoadedAgent
+    output_model: type[BaseModel]
+    provider: ProviderAdapter
+    retrievers: dict[str, PreparedRetriever] = field(default_factory=dict)
+    semantic_cache: PreparedSemanticCache | None = None
+    memory: PreparedMemory | None = None
+    handoff_tools: tuple[HandoffTool, ...] = ()
+    """Non-empty only for a supervisor: the compile-generated
+    ``transfer_to_*`` tool set (docs/30 § Handoff tool generation)."""
+
+
+@dataclass(frozen=True)
 class CompiledProject:
-    """A Phase 2 compiled system: one agent (plus any function nodes in a
-    sequential flow), its tools + connections + state + caches + memory."""
+    """A compiled system: agents (one per flow node), function nodes,
+    tools + connections + state + caches + memory, and the flow plan.
+
+    The single-agent fields (``agent_name`` / ``agent`` / ``output_model``
+    / ``provider`` / ``retrievers`` / ``semantic_cache`` / ``memory``)
+    mirror the PRIMARY (terminal/output) agent so every Phase 1-6 call
+    site keeps working; ``compiled_agents`` + ``plan`` carry the Phase 7
+    multi-agent shape."""
 
     project: LoadedProject
     agent_name: str
@@ -88,6 +114,59 @@ class CompiledProject:
     """The flow agent's validated memory config (None = memory off)."""
     compile_warnings: tuple[CompileWarning, ...] = ()
     """Non-fatal compile-time findings (e.g. semantic-cache bypass)."""
+    compiled_agents: dict[str, CompiledAgent] = field(default_factory=dict)
+    """Every agent by name (Phase 7). Empty for synthetic single-agent
+    projects built outside the compiler (the meta-agent) — use
+    :meth:`agent_map`, which synthesises the primary entry."""
+    plan: FlowPlan | None = None
+    """The compiled flow plan (Phase 7). None for synthetic projects —
+    use :meth:`flow_plan`."""
+
+    def agent_map(self) -> dict[str, CompiledAgent]:
+        """``compiled_agents``, or the legacy single-agent synthesis."""
+        if self.compiled_agents:
+            return self.compiled_agents
+        return {
+            self.agent_name: CompiledAgent(
+                name=self.agent_name,
+                loaded=self.agent,
+                output_model=self.output_model,
+                provider=self.provider,
+                retrievers=self.retrievers,
+                semantic_cache=self.semantic_cache,
+                memory=self.memory,
+            )
+        }
+
+    def flow_plan(self) -> FlowPlan:
+        """``plan``, or the legacy single/sequential synthesis."""
+        if self.plan is not None:
+            return self.plan
+        if self.flow_steps:
+            from foundry.orchestration.patterns import SequentialPlan
+
+            steps = tuple(
+                LeafNode(
+                    kind="agent" if step == self.agent_name else "function",
+                    name=step,
+                )
+                for step in self.flow_steps
+            )
+            return FlowPlan(
+                pattern="sequential",
+                root=SequentialPlan(name="", steps=steps),
+                primary_agent=self.agent_name,
+                agents=(self.agent_name,),
+                subflow_names=(),
+                steps=self.flow_steps,
+            )
+        return FlowPlan(
+            pattern="single",
+            root=LeafNode(kind="agent", name=self.agent_name),
+            primary_agent=self.agent_name,
+            agents=(self.agent_name,),
+            subflow_names=(),
+        )
 
     @property
     def pins(self) -> dict[str, Any]:
@@ -115,10 +194,15 @@ class RunResult:
     """The run's final state projection (written to final_state.json)."""
     resumed: bool = False
     """True when this invocation resumed an interrupted checkpointed run."""
+    status: str = "success"
+    """'success' | 'approval_pending' | 'max_hops' (return_partial)."""
+    pending_approval: dict[str, Any] | None = None
+    """The InterruptPayload dict while status == 'approval_pending'."""
 
 
 __all__ = [
     "CompileWarning",
+    "CompiledAgent",
     "CompiledFunction",
     "CompiledProject",
     "FunctionHandler",

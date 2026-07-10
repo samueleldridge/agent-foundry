@@ -7,14 +7,18 @@ langgraph imports — graph wiring is the runtime adapter's job
 validation and is reusable by the eval harness (Phase 4) and the API layer
 (Phase 8).
 
-Phase 3 compiles the ``single`` pattern (plus the Phase 2c one-agent
-``sequential`` shape). parallel / supervisor / graph / multi-agent
-sequential are stubbed in ``foundry.orchestration.patterns`` with
-structured Phase 7 compile errors.
+Phase 7 compiles all five patterns (single / sequential / parallel /
+supervisor / graph) including inline nesting: every agent in the project
+is resolved into a :class:`CompiledAgent` (its own provider, output
+schema, retrievers, caches, memory), supervisor patterns get their typed
+handoff tools synthesised here, and the FlowPlan tree rides on the
+CompiledProject for the adapter to expand. The single-agent legacy fields
+mirror the plan's PRIMARY agent.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import importlib.util
 import inspect
@@ -56,7 +60,20 @@ from foundry.core.errors import (
     StateVisibilityError,
 )
 from foundry.memory import prepare_memory
+from foundry.orchestration.handoff import (
+    build_handoff_tools,
+    check_no_user_handoff_tools,
+)
 from foundry.orchestration.patterns import (
+    GraphPlan as GraphPlanNode,
+)
+from foundry.orchestration.patterns import (
+    ParallelPlan as ParallelPlanNode,
+)
+from foundry.orchestration.patterns import (
+    PlanNode,
+    SequentialPlan,
+    SupervisorPlan,
     plan_flow,
     validate_flow_refs,
     validate_namespace,
@@ -65,6 +82,7 @@ from foundry.orchestration.state_scope import CompiledState, compile_state
 from foundry.providers import resolve
 from foundry.retrieval import prepare_retrievers
 from foundry.runtime.compiled import (
+    CompiledAgent,
     CompiledFunction,
     CompiledProject,
     CompileWarning,
@@ -100,13 +118,13 @@ def compile_project(
 
     validate_namespace(project, system_file)
     validate_flow_refs(project, system_file)
+    check_no_user_handoff_tools(
+        list(project.system.tools), where=str(system_file)
+    )
     plan = plan_flow(project, system_file)
-    agent_name, flow_steps = plan.agent_name, plan.steps
+    agent_name, flow_steps = plan.primary_agent, plan.steps
 
     agent = project.agents[agent_name]
-    agent_yaml = agent.directory / "agent.yaml"
-
-    output_model = _load_output_schema(agent.directory, agent.spec.output.schema_ref)
 
     # State: compile + validate visibility (docs/22) for EVERY node — agents
     # and functions share the same structural enforcement. Each node's own
@@ -201,84 +219,130 @@ def compile_project(
                 },
             )
 
-    # Phase 2b compile-time wiring: retriever bindings (slot wiring, config
-    # validation, embedder dimension check) + semantic cache preparation.
-    # Every failure below is a load-time error — nothing has been called yet.
-    prepared_retrievers = prepare_retrievers(
-        agent.spec.retrievers,
-        roots,
-        prepared_connections,
-        config_file=agent_yaml,
-    )
-    prepared_semantic_cache = prepare_semantic_cache(
-        agent.spec,
-        agent.prompt_text,
-        project=project.system.name,
-        secrets=secrets,
-        transport=transport,
-    )
-
-    # An agent configuring BOTH memory and a semantic cache gets the cache
-    # BYPASSED at runtime (its key covers the step's initial input, not the
-    # evolving memory envelope — a hit could replay a response that ignores
-    # state). Make the bypass visible at compile time (Phase 2c deviation 4).
+    # Per-agent resolution (Phase 7): output schema, retriever bindings
+    # (slot wiring, config validation, embedder dimension check), semantic
+    # cache, memory, provider. Every failure below is load-time — nothing
+    # has been called yet.
     compile_warnings: list[CompileWarning] = []
-    if agent.spec.memory is not None and prepared_semantic_cache is not None:
-        compile_warnings.append(
-            CompileWarning(
-                agent_name=agent_name,
-                category="cache.semantic.bypassed_by_memory",
-                message=(
-                    f"agent {agent_name!r} configures BOTH memory and "
-                    "semantic_cache; the semantic cache is bypassed for "
-                    "memory-enabled agents (its key covers the step's initial "
-                    "input, not the evolving memory envelope). Remove "
-                    "`semantic_cache:` from agent.yaml or drop `memory:` to "
-                    "silence this warning."
-                ),
-            )
+    compiled_agents: dict[str, CompiledAgent] = {}
+    for name, loaded_agent in project.agents.items():
+        loaded_agent_yaml = loaded_agent.directory / "agent.yaml"
+        agent_output_model = _load_output_schema(
+            loaded_agent.directory, loaded_agent.spec.output.schema_ref
         )
-
-    # Phase 2c: memory config validation — state-field existence + type
-    # (MemoryConfigError), read/write scope + retriever-slot binding
-    # (CompileError), consolidator prompt on disk (MemoryConfigError).
-    agent_view = compiled_state.agent_views[agent_name]
-    prepared_memory = prepare_memory(
-        agent.spec,
-        agent_dir=agent.directory,
-        state_field_types={
-            name: field_spec.type
-            for name, field_spec in project.state.state_schema.items()
-        },
-        read_scope=agent_view.read,
-        write_scope=agent_view.write,
-    )
-
-    try:
-        provider = resolve(
-            agent.spec.model_binding,
-            secrets,
+        agent_retrievers = prepare_retrievers(
+            loaded_agent.spec.retrievers,
+            roots,
+            prepared_connections,
+            config_file=loaded_agent_yaml,
+        )
+        agent_semantic_cache = prepare_semantic_cache(
+            loaded_agent.spec,
+            loaded_agent.prompt_text,
+            project=project.system.name,
+            secrets=secrets,
             transport=transport,
         )
-    except ProviderConfigError as exc:
-        # Preserve the registry's message; append the file + field context the
-        # CLI user needs (exit gate: error identifies file and field).
-        raise ProviderConfigError(
-            f"{exc}\n  file: {agent_yaml}\n  pointer: /model_binding/provider",
-            context={
-                **exc.context,
-                "file": str(agent_yaml),
-                "pointer": "/model_binding/provider",
-            },
-            cause=exc,
-        ) from exc
 
+        # An agent configuring BOTH memory and a semantic cache gets the
+        # cache BYPASSED at runtime (its key covers the step's initial
+        # input, not the evolving memory envelope — a hit could replay a
+        # response that ignores state). Visible at compile time (Phase 2c
+        # deviation 4).
+        if (
+            loaded_agent.spec.memory is not None
+            and agent_semantic_cache is not None
+        ):
+            compile_warnings.append(
+                CompileWarning(
+                    agent_name=name,
+                    category="cache.semantic.bypassed_by_memory",
+                    message=(
+                        f"agent {name!r} configures BOTH memory and "
+                        "semantic_cache; the semantic cache is bypassed for "
+                        "memory-enabled agents (its key covers the step's "
+                        "initial input, not the evolving memory envelope). "
+                        "Remove `semantic_cache:` from agent.yaml or drop "
+                        "`memory:` to silence this warning."
+                    ),
+                )
+            )
+
+        # Phase 2c: memory config validation — state-field existence + type
+        # (MemoryConfigError), read/write scope + retriever-slot binding
+        # (CompileError), consolidator prompt on disk (MemoryConfigError).
+        agent_view = compiled_state.agent_views[name]
+        agent_memory = prepare_memory(
+            loaded_agent.spec,
+            agent_dir=loaded_agent.directory,
+            state_field_types={
+                field_name: field_spec.type
+                for field_name, field_spec in (
+                    project.state.state_schema.items()
+                )
+            },
+            read_scope=agent_view.read,
+            write_scope=agent_view.write,
+        )
+
+        try:
+            agent_provider = resolve(
+                loaded_agent.spec.model_binding,
+                secrets,
+                transport=transport,
+            )
+        except ProviderConfigError as exc:
+            # Preserve the registry's message; append the file + field
+            # context the CLI user needs.
+            raise ProviderConfigError(
+                f"{exc}\n  file: {loaded_agent_yaml}\n"
+                "  pointer: /model_binding/provider",
+                context={
+                    **exc.context,
+                    "file": str(loaded_agent_yaml),
+                    "pointer": "/model_binding/provider",
+                },
+                cause=exc,
+            ) from exc
+
+        compiled_agents[name] = CompiledAgent(
+            name=name,
+            loaded=loaded_agent,
+            output_model=agent_output_model,
+            provider=agent_provider,
+            retrievers=agent_retrievers,
+            semantic_cache=agent_semantic_cache,
+            memory=agent_memory,
+        )
+
+    # Handoff tools for every supervisor pattern in the plan (docs/30
+    # § Handoff tool generation): synthesised HERE, never user-authored.
+    for supervisor_plan in _walk_supervisors(plan.root):
+        descriptions: dict[str, str] = {}
+        for target, worker_plan in supervisor_plan.workers:
+            if target in project.agents:
+                descriptions[target] = project.agents[target].spec.description
+            elif target in project.functions:
+                descriptions[target] = project.functions[target].spec.description
+            else:  # nested sub-flow
+                descriptions[target] = (
+                    f"Runs the nested "
+                    f"{type(worker_plan).__name__.removesuffix('Plan').lower()}"
+                    f" sub-flow {target!r}."
+                )
+        supervisor_agent = compiled_agents[supervisor_plan.supervisor]
+        compiled_agents[supervisor_plan.supervisor] = dataclasses.replace(
+            supervisor_agent,
+            handoff_tools=build_handoff_tools(supervisor_plan, descriptions),
+        )
+
+    primary = compiled_agents[agent_name]
     return CompiledProject(
         project=project,
         agent_name=agent_name,
         agent=agent,
-        output_model=output_model,
-        provider=provider,
+        output_model=primary.output_model,
+        provider=primary.provider,
         pin_set_hash=_pin_set_hash(project),
         system_version=_git_sha(project.directory),
         roots=roots,
@@ -288,14 +352,35 @@ def compile_project(
         prepared_connections=prepared_connections,
         transport=transport,
         secrets=secrets,
-        retrievers=prepared_retrievers,
-        semantic_cache=prepared_semantic_cache,
+        retrievers=primary.retrievers,
+        semantic_cache=primary.semantic_cache,
         uses_tool_cache=uses_tool_cache,
         functions=functions,
         flow_steps=flow_steps,
-        memory=prepared_memory,
+        memory=primary.memory,
         compile_warnings=tuple(compile_warnings),
+        compiled_agents=compiled_agents,
+        plan=plan,
     )
+
+
+def _walk_supervisors(node: PlanNode) -> list[SupervisorPlan]:
+    found: list[SupervisorPlan] = []
+    if isinstance(node, SupervisorPlan):
+        found.append(node)
+        for _target, worker_plan in node.workers:
+            found.extend(_walk_supervisors(worker_plan))
+    elif isinstance(node, SequentialPlan):
+        for step in node.steps:
+            found.extend(_walk_supervisors(step))
+    elif isinstance(node, ParallelPlanNode):
+        for branch in node.branches:
+            found.extend(_walk_supervisors(branch))
+        for step in node.then:
+            found.extend(_walk_supervisors(step))
+    elif isinstance(node, GraphPlanNode):
+        pass  # graph nodes are leaves in v1
+    return found
 
 
 compile_system = compile_project
