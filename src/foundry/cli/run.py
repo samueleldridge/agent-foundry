@@ -162,6 +162,50 @@ def execute_run(
 
     if result.final_state is not None:
         writer.write_final_state(result.final_state)
+
+    if result.status == "approval_pending":
+        # HITL pause (docs/32): the checkpointer holds the durable pending
+        # state; record it in the artifact so `foundry approvals list` and
+        # `foundry resume` can find it without recompiling anything.
+        writer.write_metadata(
+            project=compiled.project.system.name,
+            status="approval_pending",
+            provider=compiled.provider.name,
+            model=compiled.provider.model,
+            extra={
+                "pins": compiled.pins,
+                "checkpointer": checkpoint,
+                "resumed": result.resumed,
+                "project_path": str(project_path.resolve()),
+                "pending_approval": result.pending_approval,
+                **_budget_extra(),
+            },
+        )
+        pending = result.pending_approval or {}
+        logger.info(
+            "run.approval_pending",
+            approval_id=pending.get("approval_id"),
+            artifact_dir=str(writer.directory),
+        )
+        print("run paused: approval required", file=sys.stderr)
+        print(f"  run_id:      {resolved_run_id}", file=sys.stderr)
+        print(f"  approval_id: {pending.get('approval_id')}", file=sys.stderr)
+        print(f"  agent:       {pending.get('agent_name')}", file=sys.stderr)
+        print(f"  prompt:      {pending.get('prompt')}", file=sys.stderr)
+        if checkpoint != "sqlite":
+            print(
+                "  WARNING: the checkpointer is not sqlite — this pause "
+                "does not survive the process. Re-run with --checkpoint "
+                "sqlite for a resumable approval.",
+                file=sys.stderr,
+            )
+        print(
+            f"resume with:  foundry resume {resolved_run_id} --approve"
+            "  (or --reject --reason '...')",
+            file=sys.stderr,
+        )
+        return 0
+
     writer.write_metadata(
         project=compiled.project.system.name,
         status="completed",
@@ -174,6 +218,7 @@ def execute_run(
             "llm_call_count": result.llm_call_count,
             "checkpointer": checkpoint,
             "resumed": result.resumed,
+            "run_status": result.status,
             **_budget_extra(),
         },
     )

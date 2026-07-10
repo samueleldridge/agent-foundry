@@ -89,6 +89,74 @@ def run(
     )
 
 
+_RESUME_RUN_ID_ARG = typer.Argument(
+    ..., help="The paused run's id (printed when the run paused)."
+)
+_APPROVE_OPTION = typer.Option(
+    False, "--approve", help="Approve the pending approval and continue."
+)
+_REJECT_OPTION = typer.Option(
+    False,
+    "--reject",
+    help="Reject the pending approval (requires --reason); the agent sees "
+    "the rejection and continues.",
+)
+_REASON_OPTION = typer.Option(
+    None, "--reason", help="Operator reason (required with --reject)."
+)
+_RESUME_PROJECT_OPTION = typer.Option(
+    None,
+    "--project",
+    help="Project path override (default: the path recorded in the run "
+    "artifact).",
+)
+
+
+@app.command(
+    help="Resume a paused run: show the pending approval, or resolve it "
+    "with --approve / --reject --reason (docs/32)."
+)
+def resume(
+    run_id: str = _RESUME_RUN_ID_ARG,
+    approve: bool = _APPROVE_OPTION,
+    reject: bool = _REJECT_OPTION,
+    reason: str | None = _REASON_OPTION,
+    project: Path | None = _RESUME_PROJECT_OPTION,
+) -> None:
+    from foundry.cli.resume import execute_resume
+
+    raise typer.Exit(
+        code=execute_resume(
+            run_id,
+            approve=approve,
+            reject=reject,
+            reason=reason,
+            project=project,
+        )
+    )
+
+
+approvals_app = typer.Typer(
+    name="approvals",
+    help="Pending HITL approvals across local runs.",
+    no_args_is_help=True,
+)
+app.add_typer(approvals_app)
+
+_APPROVALS_PROJECT_ARG = typer.Argument(
+    None, help="Optional project name filter."
+)
+
+
+@approvals_app.command(
+    name="list", help="List runs paused on a pending approval."
+)
+def approvals_list(project: str | None = _APPROVALS_PROJECT_ARG) -> None:
+    from foundry.cli.resume import execute_approvals_list
+
+    raise typer.Exit(code=execute_approvals_list(project))
+
+
 connections_app = typer.Typer(
     name="connections",
     help="Inspect and health-check a project's bound connections.",
