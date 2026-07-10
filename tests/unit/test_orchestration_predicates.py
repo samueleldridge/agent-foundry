@@ -87,6 +87,16 @@ def test_state_field_references_are_recorded_and_validated() -> None:
         "state.__slots__ == ()",                  # slots reflection
         "state.field.__class__ is not None",      # dunder mid-chain
         "state['k'].__class__ is not None",       # dunder after subscript
+        # Single-underscore internals (Phase 8 pre-work): `state._data` is
+        # the proxy's own slot — it hands back the RAW state dict,
+        # sidestepping the read-only projection. Forbidden anywhere in a
+        # chain, same as dunders.
+        "state._data is not None",                # the proxy's slot itself
+        "state._data['k'] == 1",                  # raw-dict subscript escape
+        "state.field._private == 1",              # underscore mid-chain
+        "state['k']._data is not None",           # underscore after subscript
+        "len(state._data) > 0",                   # underscore inside a call
+        "state._data.__class__ is not None",      # underscore then dunder
     ],
 )
 def test_forbidden_constructs_raise_compile_error(source: str) -> None:
@@ -115,6 +125,21 @@ def test_dunder_reflection_names_the_attribute() -> None:
         compile_predicate("state.__class__ is not None")
     with pytest.raises(CompileError, match="dunder attribute '__mro__'"):
         compile_predicate("state.__class__.__mro__[1] is not None")
+
+
+@pytest.mark.unit
+def test_single_underscore_attribute_names_the_attribute() -> None:
+    """`state._data` would return the proxy's raw dict (its __slots__
+    entry, resolved before __getattr__ ever runs) — the refusal names the
+    attribute so the operator sees exactly what tripped (Phase 8 pre-work)."""
+    with pytest.raises(
+        CompileError, match="underscore-leading attribute '_data'"
+    ):
+        compile_predicate("state._data is not None")
+    with pytest.raises(
+        CompileError, match="underscore-leading attribute '_private'"
+    ):
+        compile_predicate("state.field._private == 1")
 
 
 # --- runtime behaviour -----------------------------------------------------------

@@ -14,9 +14,10 @@ minus, and whitelisted calls (``len``, ``isinstance``, ``bool``, ``str``,
 Forbidden (``CompileError`` at compile time, with line/column): any other
 function call, imports, lambdas, comprehensions, assignments/mutation,
 f-strings, dict displays, walrus, starred args, keywords args, attribute
-chains NOT rooted at ``state``, any dunder attribute anywhere in a chain
-(``state.__class__.__mro__``-style reflection), and names outside the
-whitelist.
+chains NOT rooted at ``state``, any underscore-leading attribute anywhere
+in a chain (dunder reflection like ``state.__class__.__mro__`` AND
+single-underscore internals like ``state._data``, which would hand back
+the proxy's raw dict), and names outside the whitelist.
 
 Evaluation is ``eval`` over the validated AST with empty builtins and a
 read-only state proxy; a missing state field surfaces as
@@ -226,20 +227,31 @@ class _Validator(ast.NodeVisitor):
                 node, self.source,
                 "attribute access not rooted at 'state'",
             )
-        # Dunder reflection is forbidden ANYWHERE in the chain (Phase 7
-        # review finding 3): `state.__class__.__mro__` or
+        # Underscore-leading attributes are forbidden ANYWHERE in the chain.
+        # Dunders (Phase 7 review finding 3): `state.__class__.__mro__` or
         # `state.__init__.__globals__` would compile and evaluate —
         # __class__ resolves on the proxy's TYPE, sidestepping __getattr__
-        # — handing the predicate the interpreter's object graph.
+        # — handing the predicate the interpreter's object graph. Single
+        # underscores (Phase 8 pre-work): `state._data` reads the proxy's
+        # own slot, handing back the RAW state dict (mutable, unprojected),
+        # and any `_private` attribute is implementation surface, never a
+        # state field — the "state fields only" contract must be airtight.
         checked: ast.expr = node
         while isinstance(checked, (ast.Attribute, ast.Subscript)):
-            if isinstance(checked, ast.Attribute) and (
-                checked.attr.startswith("__") and checked.attr.endswith("__")
+            if isinstance(checked, ast.Attribute) and checked.attr.startswith(
+                "_"
             ):
+                kind = (
+                    "dunder"
+                    if checked.attr.startswith("__")
+                    and checked.attr.endswith("__")
+                    else "underscore-leading"
+                )
                 raise _forbid(
                     checked, self.source,
-                    f"dunder attribute {checked.attr!r} (reflection is "
-                    "forbidden; predicates read state fields only)",
+                    f"{kind} attribute {checked.attr!r} (reflection and "
+                    "implementation internals are forbidden; predicates "
+                    "read state fields only)",
                 )
             checked = checked.value
         # Record the TOP-LEVEL field: the attribute applied directly to
