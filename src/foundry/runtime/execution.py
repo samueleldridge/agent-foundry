@@ -54,6 +54,7 @@ from foundry.core import (
     FunctionNodeStarted,
     LLMCallCompleted,
     LLMCallStarted,
+    LLMDelta,
     MemoryContext,
     MemoryWrite,
     MessageRole,
@@ -78,7 +79,11 @@ from foundry.core.errors import (
 )
 from foundry.core.tool import RunContext
 from foundry.memory import DefaultMemory, build_memory, weave
-from foundry.observability.tracing import foundry_span, set_span_attributes
+from foundry.observability.tracing import (
+    foundry_span,
+    set_span_attributes,
+    worker_id,
+)
 from foundry.orchestration.handoff import HandoffInput, HandoffOutput
 from foundry.orchestration.patterns import END_SENTINEL
 from foundry.orchestration.state_scope import AgentStateView
@@ -123,6 +128,7 @@ class EventEmitter:
             run_id=self._session.run_id,
             sequence=self._sequence,
             timestamp=datetime.now(UTC),
+            worker_id=worker_id(),
             **fields,
         )
         self._sequence += 1
@@ -663,6 +669,20 @@ class AgentStepRuntime:
                 },
             )
         self.counters.record(response)
+        # Progressive-streaming wire contract (docs/10 § Streaming events,
+        # docs/70 § POST /stream): every LLM round contributes llm.delta
+        # events between llm.started and llm.completed. Granularity tracks
+        # the provider adapter's streaming capability — current adapters
+        # complete the call and synthesise ONE delta per text block
+        # (native incremental deltas are the documented upgrade path).
+        for index, block in enumerate(response.message.content):
+            if isinstance(block, TextBlock) and block.text:
+                self.emitter.emit(
+                    LLMDelta,
+                    agent_name=self.ca.name,
+                    content_block_index=index,
+                    delta=block,
+                )
         self.emitter.emit(
             LLMCallCompleted,
             agent_name=self.ca.name,

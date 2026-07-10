@@ -29,6 +29,10 @@ class _RunEventBase(BaseModel):
     run_id: RunId
     sequence: int
     timestamp: datetime
+    worker_id: str = ""
+    """``hostname:pid`` of the emitting worker (docs/85 § Worker
+    identification). Stamped by the runtime's EventEmitter; defaults empty
+    so events persisted before Phase 8 still parse."""
 
 
 class RunStarted(_RunEventBase):
@@ -448,8 +452,20 @@ class ResumeRun(_InboundBase):
     kind: Literal["resume"] = "resume"
 
 
+class InitRun(BaseModel):
+    """Start a NEW run over an already-open WebSocket (docs/70 § Initiating
+    a new run via WebSocket). Unlike the other inbound kinds it carries no
+    ``run_id`` — the server mints one and attaches the socket to it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["init_run"] = "init_run"
+    client_sequence: int
+    input: dict[str, Any] = Field(default_factory=dict)
+
+
 InboundMessage = Annotated[
-    InjectInput | ApprovalResponse | CancelRun | PauseRun | ResumeRun,
+    InjectInput | ApprovalResponse | CancelRun | PauseRun | ResumeRun | InitRun,
     Field(discriminator="kind"),
 ]
 
@@ -472,6 +488,7 @@ __all__ = [
     "FunctionNodeStarted",
     "Handoff",
     "InboundMessage",
+    "InitRun",
     "InjectInput",
     "LLMCallCompleted",
     "LLMCallStarted",
