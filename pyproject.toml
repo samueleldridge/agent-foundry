@@ -118,6 +118,10 @@ markers = [
 ]
 filterwarnings = [
     "error",
+    # starlette 1.3 deprecates its httpx-backed TestClient in favour of the
+    # (unpinned) httpx2 package. The repo standardises on httpx; the swap is
+    # tracked for whichever phase next bumps starlette (phase_8 handoff).
+    "ignore:Using `httpx` with `starlette.testclient`:UserWarning",
 ]
 
 [tool.mypy]

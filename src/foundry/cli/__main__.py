@@ -527,9 +527,54 @@ def diff_(
     raise typer.Exit(code=execute_diff(project, ref1, ref2, path=path))
 
 
-@app.command(help="Serve a configured project as a FastAPI app. Lands in Phase 8.")
-def serve() -> None:
-    _not_yet_implemented("serve", "Phase 8")
+_SERVE_HOST_OPTION = typer.Option("127.0.0.1", "--host", help="Bind address.")
+_SERVE_PORT_OPTION = typer.Option(8000, "--port", help="Bind port.")
+_SERVE_WORKERS_OPTION = typer.Option(
+    1,
+    "--workers",
+    help="uvicorn worker processes. >1 requires --checkpoint sqlite "
+    "(shared on one host); the multi-host prod shape is documented in "
+    "docs/85.",
+)
+_SERVE_CHECKPOINT_OPTION = typer.Option(
+    "sqlite",
+    "--checkpoint",
+    help="Checkpointer for served runs: 'sqlite' (default; enables "
+    "kill+resume and HITL pauses), 'memory', or 'none'.",
+)
+_SERVE_PREFIX_OPTION = typer.Option(
+    "",
+    "--route-prefix",
+    help="URL prefix for all routes (docs/70 versioning Pattern 2, "
+    "e.g. /v1).",
+)
+
+
+@app.command(
+    help="Serve a configured project as an auto-generated FastAPI app "
+    "(docs/70): POST /run /stream /batch, WS /ws, run status + resume, "
+    "health, config."
+)
+def serve(
+    project_path: Path = _PROJECT_PATH_ARG,
+    host: str = _SERVE_HOST_OPTION,
+    port: int = _SERVE_PORT_OPTION,
+    workers: int = _SERVE_WORKERS_OPTION,
+    checkpoint: str = _SERVE_CHECKPOINT_OPTION,
+    route_prefix: str = _SERVE_PREFIX_OPTION,
+) -> None:
+    from foundry.cli.serve import execute_serve
+
+    raise typer.Exit(
+        code=execute_serve(
+            project_path,
+            host=host,
+            port=port,
+            workers=workers,
+            checkpoint=checkpoint,
+            route_prefix=route_prefix,
+        )
+    )
 
 
 @app.command(help="Query observability store: cost, p95, failures. Lands in Phase 9.")
