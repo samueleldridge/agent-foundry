@@ -363,3 +363,46 @@ async def test_provider_generate_consults_the_limiter_per_call(
         "anthropic:claude-haiku-4-5",
         "anthropic:claude-haiku-4-5",
     ]
+
+
+@pytest.mark.unit
+async def test_retried_attempts_reacquire_a_permit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 9 pre-work: a 429-retry loop must go back through the rate
+    gate for every attempt — retries without a permit hammer a provider
+    that just told us to slow down."""
+    calls = itertools.count()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if next(calls) < 2:
+            return httpx.Response(
+                429, json={"error": {"message": "slow down"}}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "content": [{"type": "text", "text": '{"greeting": "hi"}'}],
+                "stop_reason": "end_turn",
+                "model": "claude-haiku-4-5",
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        )
+
+    adapter = resolve(
+        ModelBinding(provider="anthropic", model="claude-haiku-4-5"),
+        _FakeSecrets(),
+        transport=httpx.MockTransport(handler),
+    )
+    adapter._retry_policy = adapter._retry_policy.model_copy(  # type: ignore[attr-defined]
+        update={"max_attempts": 3, "initial_delay_s": 0.01, "jitter": False}
+    )
+    limiter = _RecordingLimiter()
+    adapter._rate_limiter = limiter  # type: ignore[attr-defined]
+    messages = [
+        FoundryMessage(role=MessageRole.USER, content=[TextBlock(text="hi")])
+    ]
+    response = await adapter.generate(messages, [])
+    assert response.stop_reason.value == "end_turn"
+    # 2 rate-limited attempts + the success: three permits, not one.
+    assert limiter.keys == ["anthropic:claude-haiku-4-5"] * 3

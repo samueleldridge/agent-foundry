@@ -146,17 +146,19 @@ class ProviderAdapter(ABC):
             if self._rate_limiter is not None
             else default_rate_limiter()
         )
-        if limiter is not None:
-            # The docs/85 gate: keyed <provider>:<model>, shared across
-            # workers when Redis-backed. Blocks until a permit is granted;
-            # cancellation wins over the deferred wait.
-            await limiter.acquire(
-                f"{self.name}:{self.model}", session=session
-            )
-
         attempt = 0
         while True:
             attempt += 1
+            if limiter is not None:
+                # The docs/85 gate: keyed <provider>:<model>, shared across
+                # workers when Redis-backed. Blocks until a permit is
+                # granted; cancellation wins over the deferred wait. Each
+                # ATTEMPT takes a permit — a 429-retry loop that skipped
+                # the gate would hammer an already-limited provider and
+                # steal budget from sibling workers.
+                await limiter.acquire(
+                    f"{self.name}:{self.model}", session=session
+                )
             try:
                 response = await self._attempt(messages, tools, resolved)
                 break
