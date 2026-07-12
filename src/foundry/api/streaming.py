@@ -226,7 +226,21 @@ async def handle_websocket(
 
         try:
             while True:
-                raw = await ws.receive_json()
+                try:
+                    raw = await ws.receive_json()
+                except json.JSONDecodeError:
+                    # A malformed text frame must not tear the socket
+                    # down — reply with the structured error shape and
+                    # keep serving (docs/70 § failure modes).
+                    await send(
+                        _error_frame("inbound frame is not valid JSON")
+                    )
+                    continue
+                if not isinstance(raw, dict):
+                    await send(
+                        _error_frame("inbound frame must be a JSON object")
+                    )
+                    continue
                 try:
                     message = _parse_inbound(raw)
                 except ValidationError as exc:
@@ -249,6 +263,25 @@ async def handle_websocket(
                             for k, v in exc.context.items()
                             if isinstance(v, str | int | float | bool)
                         })
+                    )
+                except ValidationError as exc:
+                    # init_run / inject_input input that fails the
+                    # project input model: a client mistake, not a
+                    # server fault — same structured error shape.
+                    errors = exc.errors()
+                    detail = str(errors[0].get("msg", "")) if errors else ""
+                    field = (
+                        ".".join(str(part) for part in errors[0].get("loc", ()))
+                        if errors
+                        else ""
+                    )
+                    await send(
+                        _error_frame(
+                            "input failed validation against the "
+                            "project input model",
+                            detail=detail,
+                            field=field,
+                        )
                     )
         except WebSocketDisconnect:
             pass

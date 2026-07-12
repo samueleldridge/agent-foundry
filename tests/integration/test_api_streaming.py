@@ -402,3 +402,78 @@ def test_websocket_error_frames_for_bad_inbound(tmp_path: Path) -> None:
         )
         frame = ws.receive_json()
         assert "not active" in frame["error"]["message"]
+
+
+@pytest.mark.integration
+def test_websocket_survives_malformed_frames(tmp_path: Path) -> None:
+    """Phase 8 review fix: malformed frames must produce a structured
+    error frame (same shape as the unknown-kind error) and leave the
+    socket serving — not tear it down with a server traceback."""
+    app = create_app(HELLO_DIR, transport=hello_transport())
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        welcome = ws.receive_json()
+        next_run_id = welcome["welcome"]["next_run_id"]
+
+        # (1) init_run whose input fails the project input model.
+        ws.send_json(
+            {
+                "direction": "inbound",
+                "message": {
+                    "kind": "init_run",
+                    "client_sequence": 0,
+                    "input": {"wrong_field": 1},
+                },
+            }
+        )
+        frame = ws.receive_json()
+        assert frame["direction"] == "outbound"
+        assert "input model" in frame["error"]["message"]
+
+        # (2) inject_input whose JSON text fails the input model.
+        ws.send_json(
+            {
+                "direction": "inbound",
+                "message": {
+                    "kind": "inject_input",
+                    "run_id": next_run_id,
+                    "client_sequence": 1,
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": '{"wrong_field": 1}'}
+                        ],
+                    },
+                },
+            }
+        )
+        frame = ws.receive_json()
+        assert frame["direction"] == "outbound"
+        assert "input model" in frame["error"]["message"]
+
+        # (3) a non-JSON text frame.
+        ws.send_text("this is not json {")
+        frame = ws.receive_json()
+        assert frame["direction"] == "outbound"
+        assert "not valid JSON" in frame["error"]["message"]
+
+        # (4) a JSON frame that is not an object.
+        ws.send_text('["not", "an", "object"]')
+        frame = ws.receive_json()
+        assert frame["direction"] == "outbound"
+        assert "JSON object" in frame["error"]["message"]
+
+        # The socket still works: a valid init_run runs to completion.
+        ws.send_json(
+            {
+                "direction": "inbound",
+                "message": {
+                    "kind": "init_run",
+                    "client_sequence": 2,
+                    "input": {"name": "Survivor"},
+                },
+            }
+        )
+        frames = _recv_until(ws, lambda f: _is_event(f, "run.completed"))
+        assert frames[-1]["event"]["final_output"] == {
+            "greeting": "Hello, Survivor!"
+        }
