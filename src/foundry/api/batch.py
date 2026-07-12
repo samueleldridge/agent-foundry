@@ -198,6 +198,32 @@ class _BatchExecutor:
                     _synthetic_cancelled(state, item.item_id, reason)
                 )
                 return
+            # Per-item admission (Phase 9 pre-work): batch items are normal
+            # runs and must respect the worker's max_concurrent_runs and
+            # drain state — the batch's own semaphore does not exempt them.
+            # At capacity we WAIT (bounded by the per-item timeout);
+            # draining fast-fails the item resumably.
+            admission_deadline = (
+                time.monotonic() + self.request.policy.per_item_timeout_s
+            )
+            while not self.manager.can_accept():
+                if self.manager.worker_state.draining:
+                    state.cancelled += 1
+                    state.completed_items += 1
+                    await self._emit(
+                        _synthetic_cancelled(
+                            state, item.item_id, "worker_drain"
+                        )
+                    )
+                    return
+                if time.monotonic() >= admission_deadline:
+                    state.cancelled += 1
+                    state.completed_items += 1
+                    await self._emit(
+                        _synthetic_cancelled(state, item.item_id, "timeout")
+                    )
+                    return
+                await anyio.sleep(0.02)
             live = self.manager.start_run(item.input)
             run_key = str(live.run_id)
             self._inflight.add(run_key)
