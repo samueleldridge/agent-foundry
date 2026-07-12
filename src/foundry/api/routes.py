@@ -224,6 +224,24 @@ def build_routers(
     async def batch_endpoint(body: BatchRequest) -> Any:
         if not manager.can_accept():
             return _unavailable(manager)
+        if len(body.items) > manager.max_batch_items:
+            # Batch-size cap (Phase 9 pre-work): one request must not be
+            # able to enqueue unbounded work. Env: FOUNDRY_MAX_BATCH_ITEMS.
+            return JSONResponse(
+                status_code=413,
+                content={
+                    "error_class": "RequestTooLarge",
+                    "message": (
+                        f"batch has {len(body.items)} items; this worker "
+                        f"caps batches at {manager.max_batch_items} "
+                        "(FOUNDRY_MAX_BATCH_ITEMS)"
+                    ),
+                    "context": {
+                        "items": len(body.items),
+                        "max_batch_items": manager.max_batch_items,
+                    },
+                },
+            )
         for item in body.items:
             try:
                 input_model.model_validate(item.input)
@@ -312,11 +330,10 @@ def build_routers(
                 after = max(after, int(last_event_id))
             except ValueError:
                 pass
-        if (
-            manager.get(run_id) is None
-            and manager.read_artifact_metadata(run_id) is None
-            and not manager.read_artifact_events(run_id)
-        ):
+        if not manager.owns_artifact(run_id):
+            # Unknown run OR another project's artifact under a shared
+            # FOUNDRY_HOME — both read as not-found (no cross-project
+            # event leakage; Phase 9 pre-work).
             return JSONResponse(
                 status_code=404, content={"error": "run_id not found"}
             )
@@ -360,7 +377,10 @@ def build_routers(
                     },
                 )
             metadata = manager.read_artifact_metadata(run_id)
-            if metadata is None:
+            if metadata is None or metadata.get("project") != manager.project:
+                # Another project's run under a shared FOUNDRY_HOME is not
+                # resumable here — and reads as not-found (no existence
+                # leakage across projects; mirrors deliver_approval).
                 return JSONResponse(
                     status_code=404, content={"error": "run_id not found"}
                 )

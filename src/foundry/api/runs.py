@@ -187,6 +187,9 @@ class RunManager:
             if drain_timeout_s is not None
             else float(os.environ.get("FOUNDRY_DRAIN_TIMEOUT_S", "120"))
         )
+        self.max_batch_items = int(
+            os.environ.get("FOUNDRY_MAX_BATCH_ITEMS", "1000")
+        )
         self._runs: dict[str, LiveRun] = {}
         self._tg: Any = None
 
@@ -502,6 +505,24 @@ class RunManager:
 
     # --- status + replay surface ----------------------------------------------------
 
+    def owns_artifact(self, run_id: str) -> bool:
+        """Shared-FOUNDRY_HOME guard (Phase 9 pre-work): a run belongs to
+        this manager when it is live here, or its persisted artifact names
+        this served project (metadata, else the run.started event for
+        in-flight runs another worker of the same project is driving).
+        Anything else — including another project's runs under the same
+        FOUNDRY_HOME — is not ours and must read as not-found."""
+        live = self._runs.get(run_id)
+        if live is not None:
+            return True
+        metadata = self.read_artifact_metadata(run_id)
+        if metadata is not None:
+            return metadata.get("project") == self.project
+        for data in self.read_artifact_events(run_id):
+            if data.get("event") == "run.started":
+                return data.get("project") == self.project
+        return False
+
     def read_artifact_metadata(self, run_id: str) -> dict[str, Any] | None:
         path = run_dir(run_id) / "metadata.json"
         if not path.is_file():
@@ -540,6 +561,9 @@ class RunManager:
             return live.status_response(self.compiled.system_version)
         metadata = self.read_artifact_metadata(run_id)
         if metadata is None:
+            return None
+        if metadata.get("project") != self.project:
+            # Another project's run under a shared FOUNDRY_HOME: not ours.
             return None
         pending = metadata.get("pending_approval")
         return RunStatusResponse(
