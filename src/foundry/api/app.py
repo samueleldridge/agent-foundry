@@ -53,6 +53,94 @@ from foundry.runtime.langgraph_adapter import compile_project
 
 _FRAMEWORK_VERSION = "0.1.0"  # mirrors pyproject [project].version
 
+_DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MiB
+
+
+class _BodyTooLarge(BaseException):
+    """BaseException on purpose: FastAPI's body parsing catches Exception
+    (→ 400 'error parsing the body'), which would mask the 413. Raised by
+    the counting receive wrapper; caught by _BodySizeLimit only."""
+
+
+class _BodySizeLimit:
+    """Request-size guard (Phase 9 pre-work): rejects oversized bodies with
+    a structured 413 — declared Content-Length first (cheap), then the
+    actually-received byte count (chunked bodies can't lie their way past
+    the header check). Env: FOUNDRY_MAX_BODY_BYTES."""
+
+    def __init__(self, app: Any, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    def _too_large(self, received: int | None) -> JSONResponse:
+        return JSONResponse(
+            status_code=413,
+            content={
+                "error_class": "RequestTooLarge",
+                "message": (
+                    "request body exceeds this worker's "
+                    f"{self.max_bytes}-byte cap (FOUNDRY_MAX_BODY_BYTES)"
+                ),
+                "context": {
+                    "max_body_bytes": self.max_bytes,
+                    **({"received_bytes": received} if received else {}),
+                },
+            },
+        )
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared: int | None = None
+        for name, value in scope.get("headers", []):
+            if name == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError:
+                    declared = None
+        if declared is not None and declared > self.max_bytes:
+            await self._too_large(declared)(scope, receive, send)
+            return
+
+        received = 0
+        response_started = False
+
+        async def counting_receive() -> Any:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    raise _BodyTooLarge
+            return message
+
+        async def tracking_send(message: Any) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, counting_receive, tracking_send)
+        except _BodyTooLarge:
+            if not response_started:
+                await self._too_large(received)(scope, receive, send)
+        except BaseExceptionGroup as group:
+            rest, matched = _split_body_too_large(group)
+            if matched and rest is None:
+                if not response_started:
+                    await self._too_large(received)(scope, receive, send)
+            else:
+                raise
+
+
+def _split_body_too_large(
+    group: BaseExceptionGroup,
+) -> tuple[BaseException | None, bool]:
+    matched, rest = group.split(_BodyTooLarge)
+    return rest, matched is not None
+
 
 def create_app(
     project_path: Path | str,
@@ -65,6 +153,7 @@ def create_app(
     max_concurrent_runs: int | None = None,
     drain_timeout_s: float | None = None,
     route_prefix: str = "",
+    max_body_bytes: int | None = None,
 ) -> FastAPI:
     """Compile ``project_path`` and return a uvicorn-runnable FastAPI app.
 
@@ -115,6 +204,17 @@ def create_app(
     )
     app.include_router(protected, prefix=route_prefix)
     app.include_router(open_router, prefix=route_prefix)
+
+    resolved_max_body = (
+        max_body_bytes
+        if max_body_bytes is not None
+        else int(
+            os.environ.get(
+                "FOUNDRY_MAX_BODY_BYTES", str(_DEFAULT_MAX_BODY_BYTES)
+            )
+        )
+    )
+    app.add_middleware(_BodySizeLimit, max_bytes=resolved_max_body)
 
     if cors_origins:
         from fastapi.middleware.cors import CORSMiddleware
