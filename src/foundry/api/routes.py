@@ -14,9 +14,9 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request, WebSocket
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from foundry.api.auth import AuthBackend, AuthContext
 from foundry.api.batch import BatchRequest, execute_batch
@@ -225,7 +225,32 @@ def build_routers(
         if not manager.can_accept():
             return _unavailable(manager)
         for item in body.items:
-            input_model.model_validate(item.input)
+            try:
+                input_model.model_validate(item.input)
+            except ValidationError as exc:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "error_class": "ConfigValidationError",
+                        "message": (
+                            f"batch item {item.item_id!r} does not match "
+                            "the project input schema: "
+                            f"{exc.errors()[0]['msg']}"
+                        ),
+                        "context": {
+                            "item_id": item.item_id,
+                            "errors": [
+                                {
+                                    "field": ".".join(
+                                        str(p) for p in e["loc"]
+                                    ),
+                                    "reason": e["msg"],
+                                }
+                                for e in exc.errors()
+                            ],
+                        },
+                    },
+                )
         batch_id = body.resolved_batch_id()
         body = body.model_copy(update={"batch_id": batch_id})
         return StreamingResponse(
@@ -245,9 +270,17 @@ def build_routers(
     # --- WS /ws --------------------------------------------------------------------
 
     async def ws_endpoint(websocket: WebSocket) -> None:
+        # WebSockets can't use the HTTP Request dependency; authenticate
+        # explicitly against the same backend (headers duck-type). A
+        # rejected handshake closes with 1008 (policy violation).
+        try:
+            await auth_backend.authenticate(websocket)  # type: ignore[arg-type]
+        except HTTPException:
+            await websocket.close(code=1008, reason="authentication failed")
+            return
         await handle_websocket(websocket, manager, input_model)
 
-    protected.add_api_websocket_route("/ws", ws_endpoint)
+    open_router.add_api_websocket_route("/ws", ws_endpoint)
 
     # --- GET /runs/{run_id} -----------------------------------------------------
 
