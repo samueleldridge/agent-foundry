@@ -235,6 +235,40 @@ Adversarial matrix extended.
 - Scope check: no OTel exporters/metrics store, no review TUI, no
   security-guardrails module, no deployment artifacts (all Phase 9).
 
+## Post-review fixes (2026-07-12)
+
+Three confirmed defects from the Phase 8 AI review, fixed in follow-up
+commits (baseline 787+1 intact; now 791 passed + 1 skipped):
+
+1. **Batch client disconnect now cancels in-flight item runs**
+   (`api/batch.py`, high). Closing the batch SSE stream only surfaced
+   `_ClientGone` at the next `_emit`; items parked in `subscribe_events`
+   never saw it, and the first item that did tore its siblings down via
+   task cancellation WITHOUT `manager.cancel` — hung runs stayed
+   `in_progress` until the per-item timeout. `execute_batch`'s `finally`
+   now runs `executor.abort()`: every started-but-unfinished item run is
+   cancelled with `reason="user_abort"` (synchronously, before any item
+   task can unwind) and awaited to a terminal state — the module
+   docstring's disconnect contract is now true. Also hardened
+   `drive()`'s stream close against a stale post-teardown cancellation
+   (sync `send_nowait` instead of an awaited send).
+2. **WebSocket dispatch survives malformed frames**
+   (`api/streaming.py`, medium). Pydantic `ValidationError` from
+   init_run/inject_input input validation and non-JSON (or non-object)
+   text frames crashed the socket with a server traceback. Both now
+   reply with the structured error frame (same shape as unknown-kind)
+   and keep the socket serving.
+3. **Redis token bucket: server time, monotonic `last`, key TTL**
+   (`providers/rate_limit.py`, medium). The Lua script trusted
+   client-supplied `now` and rewrote `last` even when `elapsed <= 0` —
+   a slow-clock worker rewound `last` and fast-clock workers
+   re-credited the same refill window. The script now reads `redis.call
+   ('TIME')` (server clock; effect replication makes TIME-before-write
+   safe on Redis >= 5), only ever advances `last`, and SETs both keys
+   with `EX ttl` (`ceil(burst/rate) + 60s`). The in-test fake mirrors
+   the new semantics; a regression test swings client clocks +/-1h and
+   asserts admission stays within rate*span + burst.
+
 **Phase 8 is COMPLETE pending review + operator manual smoke test. Next
 session starts Phase 9 (observability + dev UX + security + deploy)
 fresh.**
