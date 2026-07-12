@@ -13,8 +13,10 @@ import pytest
 from api_helpers import (
     HELLO_DIR,
     REPO_ROOT,
+    GatedTransport,
     hello_transport,
     parse_sse,
+    read_artifact_events,
 )
 from starlette.testclient import TestClient
 
@@ -134,6 +136,64 @@ def test_batch_cost_budget_fast_fails_remaining_items(tmp_path: Path) -> None:
         if f["data"].get("event") == "run.started"
     }
     assert started_items == {"item_000"}
+
+
+@pytest.mark.integration
+async def test_batch_client_disconnect_cancels_in_flight_item_runs(
+    tmp_path: Path,
+) -> None:
+    """Phase 8 review fix: closing the batch SSE stream mid-flight (client
+    disconnect) must cancel EVERY started item run with
+    run.cancelled(reason=user_abort) — the module-docstring contract.
+    Before the fix, items parked in subscribe_events never saw the closed
+    stream and their runs stayed in_progress until the per-item timeout.
+
+    Mirrors the /stream disconnect test (deviation 1): in-process
+    transports buffer SSE bodies, so the disconnect is exercised at the
+    layer starlette drives on a real drop — aclose() on the response-body
+    generator."""
+    import anyio
+
+    from foundry.api.batch import BatchRequest, execute_batch
+
+    gate = GatedTransport(hang_calls=99)  # every item hangs at its LLM call
+    app = create_app(HELLO_DIR, transport=gate.build())
+    async with app.router.lifespan_context(app):
+        manager = app.state.manager
+        request = BatchRequest.model_validate(
+            {
+                "items": _items(4),
+                "policy": {"max_parallel": 4, "per_item_timeout_s": 300.0},
+            }
+        )
+        generator = execute_batch(manager, request)
+        started_run_ids: set[str] = set()
+        async for chunk in generator:
+            for frame in parse_sse(chunk):
+                if frame["data"].get("event") == "run.started":
+                    started_run_ids.add(frame["data"]["run_id"])
+            if len(started_run_ids) == 4:
+                break
+        assert len(started_run_ids) == 4
+        # "Kill the client": close the body generator mid-flight. The
+        # teardown inside aclose() must leave no run in_progress.
+        with anyio.fail_after(5.0):
+            await generator.aclose()
+
+        for run_id in started_run_ids:
+            live = manager.get(run_id)
+            assert live is not None
+            assert live.status == "cancelled", (
+                f"run {run_id} is {live.status!r} after batch disconnect — "
+                "in-flight item runs must be cancelled, not left running"
+            )
+            assert live.cancel_reason == "user_abort"
+
+    # The artifacts persist the terminal event (checkpoints survive).
+    for run_id in started_run_ids:
+        events = read_artifact_events(tmp_path, run_id)
+        assert events[-1]["event"] == "run.cancelled"
+        assert events[-1]["reason"] == "user_abort"
 
 
 @pytest.mark.integration

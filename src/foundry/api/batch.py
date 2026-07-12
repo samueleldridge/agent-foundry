@@ -145,6 +145,9 @@ class _BatchExecutor:
         ](max_buffer_size=float("inf"))
         self._send = send
         self.receive = receive
+        self._inflight: set[str] = set()
+        """run_ids of started-but-unfinished item runs (abort targets)."""
+        self._aborted = False
 
     async def _emit(self, frame: dict[str, Any]) -> None:
         try:
@@ -179,6 +182,10 @@ class _BatchExecutor:
     ) -> None:
         state = self.state
         async with limiter:
+            if self._aborted:
+                # Client already gone: nobody is listening and abort()
+                # has run — do not start a run that would leak.
+                return
             if state.budget_exceeded or state.failure_tripped:
                 reason = (
                     "batch_budget_exceeded"
@@ -192,13 +199,15 @@ class _BatchExecutor:
                 )
                 return
             live = self.manager.start_run(item.input)
+            run_key = str(live.run_id)
+            self._inflight.add(run_key)
             terminal: str | None = None
             try:
                 with anyio.move_on_after(
                     self.request.policy.per_item_timeout_s
                 ):
                     async for data in subscribe_events(
-                        self.manager, str(live.run_id), live.base_sequence
+                        self.manager, run_key, live.base_sequence
                     ):
                         if data.get("event") == "llm.completed":
                             await self._record_cost(data)
@@ -209,12 +218,14 @@ class _BatchExecutor:
                             terminal = str(data.get("event"))
                             break
             except _ClientGone:
-                self.manager.cancel(str(live.run_id), "user_abort")
+                self.manager.cancel(run_key, "user_abort")
                 raise
+            finally:
+                self._inflight.discard(run_key)
             if terminal is None:
                 # Per-item timeout: cancel the run (checkpoint persists);
                 # summarise on the batch stream.
-                self.manager.cancel(str(live.run_id), "timeout")
+                self.manager.cancel(run_key, "timeout")
                 state.cancelled += 1
                 await self._emit(
                     _synthetic_cancelled(state, item.item_id, "timeout")
@@ -237,6 +248,26 @@ class _BatchExecutor:
                     }
                 )
 
+    async def abort(self) -> None:
+        """Client-disconnect teardown (the module-docstring contract):
+        cancel every started-but-unfinished item run with
+        ``reason="user_abort"`` and wait for each to reach a terminal
+        state. Items parked inside ``subscribe_events`` with no events
+        flowing never observe the closed stream on their own, and the
+        first item to catch ``_ClientGone`` task-cancels its siblings
+        WITHOUT ``manager.cancel`` — so the teardown must hit the runs
+        directly. The cancel loop is synchronous (no await), so every
+        in-flight run is cancelled before any sibling task can unwind."""
+        self._aborted = True
+        run_ids = list(self._inflight)
+        for run_id in run_ids:
+            self.manager.cancel(run_id, "user_abort")
+        with anyio.move_on_after(10.0):
+            for run_id in run_ids:
+                live = self.manager.get(run_id)
+                if live is not None:
+                    await live.done.wait()
+
     async def drive(self) -> None:
         """Runs on the app-lifespan task group (manager.spawn)."""
         limiter = anyio.Semaphore(self.request.policy.max_parallel)
@@ -249,9 +280,18 @@ class _BatchExecutor:
             if rest is not None:
                 raise rest from None
         finally:
+            # Synchronous close: the buffer is unbounded, so send_nowait
+            # never blocks — and unlike ``await send(...)`` it offers no
+            # checkpoint for a stale cancellation (the item-group
+            # teardown after a client disconnect) to hijack, which would
+            # skip the close() and leak the stream.
             try:
-                await self._send.send(None)
-            except (anyio.BrokenResourceError, anyio.ClosedResourceError):
+                self._send.send_nowait(None)
+            except (
+                anyio.BrokenResourceError,
+                anyio.ClosedResourceError,
+                anyio.WouldBlock,
+            ):
                 pass
             self._send.close()
 
@@ -276,7 +316,11 @@ async def execute_batch(
     """The SSE body generator for POST /batch. The executor is a sibling
     task on the app nursery; this generator only consumes its stream, so
     closing the response mid-flight (client disconnect) tears the batch
-    down through the stream, not through a suspended task group."""
+    down through the stream, not through a suspended task group. The
+    ``finally`` (starlette runs it on disconnect via ``aclose()``) closes
+    the stream and then cancels every in-flight item run — the batch's
+    disconnect contract: ``run.cancelled(reason=user_abort)``, checkpoints
+    persist."""
     started = time.monotonic()
     executor = _BatchExecutor(manager, request)
     manager.spawn(executor.drive)
@@ -288,6 +332,7 @@ async def execute_batch(
         yield _sse(executor.summary(started))
     finally:
         executor.receive.close()
+        await executor.abort()
 
 
 __all__ = [
