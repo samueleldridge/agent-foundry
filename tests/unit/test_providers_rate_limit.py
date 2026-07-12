@@ -9,6 +9,8 @@ variant is the operator's manual step (docs/_manual_tests/phase_8.md).
 from __future__ import annotations
 
 import asyncio
+import itertools
+import math
 import time
 from typing import Any
 
@@ -106,34 +108,59 @@ class FakeRedis:
     """Minimal fake of the ONE operation RedisTokenBucket uses: ``eval`` of
     the refill-and-take script. Executes the same token-bucket semantics in
     Python, atomically under a lock, over a store shared by every client
-    ('worker') pointing at this instance."""
+    ('worker') pointing at this instance. Mirrors the script's contract:
+    time comes from the SERVER clock (this instance's monotonic clock —
+    client wall clocks never enter), ``last`` only ever advances, and both
+    keys carry a TTL (expired keys read as missing → full bucket)."""
 
     def __init__(self) -> None:
         self.store: dict[str, float] = {}
+        self.ttls: dict[str, float] = {}
+        """key → TTL seconds from the most recent SET ... EX."""
+        self._expires_at_ms: dict[str, float] = {}
         self._lock = asyncio.Lock()
         self.eval_calls = 0
+
+    def _server_now_ms(self) -> float:
+        return time.monotonic() * 1000.0
+
+    def _get(self, key: str, now_ms: float) -> float | None:
+        if key in self.store and now_ms >= self._expires_at_ms.get(
+            key, float("inf")
+        ):
+            del self.store[key]  # TTL expiry: reads as missing
+        return self.store.get(key)
+
+    def _set(self, key: str, value: float, ttl_s: float, now_ms: float) -> None:
+        self.store[key] = value
+        self.ttls[key] = ttl_s
+        self._expires_at_ms[key] = now_ms + ttl_s * 1000.0
 
     async def eval(
         self, script: str, numkeys: int, *keys_and_args: Any
     ) -> list[int]:
         assert numkeys == 2
         tokens_key, last_key = keys_and_args[0], keys_and_args[1]
-        rate_ms, capacity, cost, now_ms = (
+        rate_ms, capacity, cost, ttl_s = (
             float(a) for a in keys_and_args[2:6]
         )
         async with self._lock:
             self.eval_calls += 1
-            tokens = self.store.get(tokens_key, capacity)
-            last = self.store.get(last_key, now_ms)
+            now_ms = self._server_now_ms()
+            stored_tokens = self._get(tokens_key, now_ms)
+            tokens = capacity if stored_tokens is None else stored_tokens
+            stored_last = self._get(last_key, now_ms)
+            last = now_ms if stored_last is None else stored_last
             elapsed = now_ms - last
             if elapsed > 0:
                 tokens = min(capacity, tokens + elapsed * rate_ms)
+                last = now_ms  # advances only — never rewinds
             if tokens >= cost:
-                self.store[tokens_key] = tokens - cost
-                self.store[last_key] = now_ms
+                self._set(tokens_key, tokens - cost, ttl_s, now_ms)
+                self._set(last_key, last, ttl_s, now_ms)
                 return [1, 0]
-            self.store[tokens_key] = tokens
-            self.store[last_key] = now_ms
+            self._set(tokens_key, tokens, ttl_s, now_ms)
+            self._set(last_key, last, ttl_s, now_ms)
             wait_ms = int((cost - tokens) / rate_ms) + 1
             return [0, wait_ms]
 
@@ -179,6 +206,62 @@ async def test_three_workers_share_one_redis_bucket_under_load() -> None:
     for i, t0 in enumerate(grants):
         in_window = [t for t in grants[i:] if t - t0 <= window]
         assert len(in_window) <= rate * window + capacity + 2
+
+
+@pytest.mark.unit
+async def test_skewed_client_clocks_cannot_over_admit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (Phase 8 review): the old script trusted client-supplied
+    ``now`` and rewrote ``last`` even when elapsed <= 0 — a slow-clock
+    worker rewound ``last`` and fast-clock workers re-credited the same
+    refill window, over-admitting without bound. The fix sources time
+    from the server inside the script, so client wall clocks are inert:
+    even with time.time() swinging +/-1h between calls, aggregate admission
+    stays within rate*span + burst."""
+    real_time = time.time
+    skew = itertools.cycle([-3600.0, 0.0, 3600.0])
+    monkeypatch.setattr(time, "time", lambda: real_time() + next(skew))
+
+    fake = FakeRedis()
+    rate, capacity = 40.0, 5.0
+    workers = [
+        RedisTokenBucket("redis://shared", rate, capacity, client=fake)
+        for _ in range(3)
+    ]
+    grants: list[float] = []
+    deadline = time.monotonic() + 0.5
+
+    async def hammer(bucket: RedisTokenBucket) -> None:
+        while time.monotonic() < deadline:
+            await bucket.acquire("anthropic:claude-opus-4-7", timeout_s=5.0)
+            grants.append(time.monotonic())
+
+    async with asyncio.TaskGroup() as tg:
+        for bucket in workers:
+            tg.create_task(hammer(bucket))
+            tg.create_task(hammer(bucket))
+
+    span_s = max(grants) - min(grants)
+    allowed = rate * span_s + capacity
+    assert len(grants) <= allowed + 2, (
+        f"{len(grants)} grants over {span_s:.2f}s with skewed client "
+        f"clocks exceeds the shared limit of ~{allowed:.0f} — the bucket "
+        "is trusting client time again"
+    )
+    assert len(grants) >= 1  # the limiter still grants work
+
+
+@pytest.mark.unit
+async def test_bucket_keys_carry_a_ttl() -> None:
+    """Hygiene (Phase 8 review): every bucket key is SET with EX =
+    ceil(burst/rate) + 60s so idle keys expire instead of accumulating."""
+    fake = FakeRedis()
+    bucket = RedisTokenBucket("redis://s", rate=2.0, capacity=6.0, client=fake)
+    assert bucket.ttl_s == math.ceil(6.0 / 2.0) + 60
+    await bucket.acquire("anthropic:model-x")
+    assert fake.ttls["foundry:rl:anthropic:model-x:tokens"] == bucket.ttl_s
+    assert fake.ttls["foundry:rl:anthropic:model-x:last"] == bucket.ttl_s
 
 
 @pytest.mark.unit

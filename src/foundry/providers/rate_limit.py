@@ -35,6 +35,7 @@ sleeping through the backoff (docs/71 § Cancellation inside retries).
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 from typing import Any, Protocol
@@ -146,26 +147,35 @@ class InProcessTokenBucket:
 
 # One round trip, atomic: refill from elapsed millis, grant if covered,
 # else report the shortfall as a recommended wait (docs/85 § Redis token
-# bucket). KEYS[1]=tokens KEYS[2]=last; ARGV = rate/ms, capacity, cost,
-# now_ms. Returns {granted(0|1), wait_ms}.
+# bucket). Time comes from redis TIME — the SERVER clock — never from the
+# callers: with client-supplied timestamps a slow-clock worker rewinds
+# ``last`` and lets fast-clock workers re-credit the same refill window.
+# ``last`` only ever advances (elapsed <= 0 leaves it untouched), and both
+# keys carry a TTL so idle buckets don't accumulate forever. (TIME before
+# writes is fine: Redis >= 5 replicates script EFFECTS, not the script.)
+# KEYS[1]=tokens KEYS[2]=last; ARGV = rate/ms, capacity, cost, ttl_s.
+# Returns {granted(0|1), wait_ms}.
 _ACQUIRE_LUA = """
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 local tokens = tonumber(redis.call('GET', KEYS[1]) or ARGV[2])
-local last = tonumber(redis.call('GET', KEYS[2]) or ARGV[4])
+local last = tonumber(redis.call('GET', KEYS[2]) or now)
 local rate_ms = tonumber(ARGV[1])
 local capacity = tonumber(ARGV[2])
 local cost = tonumber(ARGV[3])
-local now = tonumber(ARGV[4])
+local ttl_s = tonumber(ARGV[4])
 local elapsed = now - last
 if elapsed > 0 then
   tokens = math.min(capacity, tokens + elapsed * rate_ms)
+  last = now
 end
 if tokens >= cost then
-  redis.call('SET', KEYS[1], tokens - cost)
-  redis.call('SET', KEYS[2], now)
+  redis.call('SET', KEYS[1], tokens - cost, 'EX', ttl_s)
+  redis.call('SET', KEYS[2], last, 'EX', ttl_s)
   return {1, 0}
 end
-redis.call('SET', KEYS[1], tokens)
-redis.call('SET', KEYS[2], now)
+redis.call('SET', KEYS[1], tokens, 'EX', ttl_s)
+redis.call('SET', KEYS[2], last, 'EX', ttl_s)
 local wait_ms = math.ceil((cost - tokens) / rate_ms)
 return {0, wait_ms}
 """
@@ -196,6 +206,10 @@ class RedisTokenBucket:
         self.capacity = capacity if capacity is not None else rate
         self._client = client
         self._key_prefix = key_prefix
+        self.ttl_s = math.ceil(self.capacity / self.rate) + 60
+        """Bucket-key TTL: a full refill window + slack. An expired pair
+        re-initialises to a full bucket, which is the correct steady
+        state for a key idle that long."""
 
     def _get_client(self) -> Any:
         if self._client is not None:
@@ -221,7 +235,6 @@ class RedisTokenBucket:
         client = self._get_client()
         tokens_key = f"{self._key_prefix}:{key}:tokens"
         last_key = f"{self._key_prefix}:{key}:last"
-        now_ms = int(time.time() * 1000)
         try:
             granted, wait_ms = await client.eval(
                 _ACQUIRE_LUA,
@@ -231,7 +244,7 @@ class RedisTokenBucket:
                 self.rate / 1000.0,
                 self.capacity,
                 cost,
-                now_ms,
+                self.ttl_s,
             )
         except ProviderUnexpectedError:
             raise
