@@ -236,6 +236,18 @@ async def handle_websocket(
                         _error_frame("inbound frame is not valid JSON")
                     )
                     continue
+                except KeyError:
+                    # A BINARY frame: starlette's receive_json(mode="text")
+                    # reads message["text"], which binary frames don't
+                    # carry — the KeyError must not escape as a server
+                    # traceback (Phase 9 pre-work).
+                    await send(
+                        _error_frame(
+                            "binary WebSocket frames are not supported — "
+                            "send JSON text frames"
+                        )
+                    )
+                    continue
                 if not isinstance(raw, dict):
                     await send(
                         _error_frame("inbound frame must be a JSON object")
