@@ -36,12 +36,21 @@ from foundry.providers._types import (
 from foundry.providers.anthropic import AnthropicProvider
 from foundry.providers.openai import OpenAIProvider
 from foundry.providers.pricing import estimate_cost, estimate_pre_call_cost
+from foundry.providers.rate_limit import (
+    InProcessTokenBucket,
+    RateLimiter,
+    RedisTokenBucket,
+    build_rate_limiter,
+    default_rate_limiter,
+    reset_default_rate_limiter,
+)
 
 __all__ = [
     "AnthropicProvider",
     "CacheControlMode",
     "CapabilityName",
     "HttpRequestSpec",
+    "InProcessTokenBucket",
     "ModelBinding",
     "ModelPricing",
     "ModelSettings",
@@ -49,17 +58,22 @@ __all__ = [
     "Provider",
     "ProviderAdapter",
     "ProviderCapabilities",
+    "RateLimiter",
     "ReasoningEffort",
+    "RedisTokenBucket",
     "ResolvedModelSettings",
     "ResponseFormat",
     "SecretsResolver",
     "ToolSchema",
     "all_capabilities",
     "available_providers",
+    "build_rate_limiter",
     "check_capabilities_required",
+    "default_rate_limiter",
     "estimate_cost",
     "estimate_pre_call_cost",
     "load_capabilities",
     "register_provider",
+    "reset_default_rate_limiter",
     "resolve",
 ]

@@ -48,6 +48,7 @@ from foundry.providers._types import (
     ToolSchema,
 )
 from foundry.providers.pricing import estimate_cost, estimate_pre_call_cost
+from foundry.providers.rate_limit import RateLimiter, default_rate_limiter
 
 _DEFAULT_TIMEOUT_S = 60.0
 
@@ -76,6 +77,7 @@ class ProviderAdapter(ABC):
         *,
         retry_policy: RetryPolicy | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        rate_limiter: RateLimiter | None = None,
     ) -> None:
         self.model = model
         self.capabilities = manifest
@@ -83,6 +85,9 @@ class ProviderAdapter(ABC):
         self._credentials = credentials
         self._retry_policy = retry_policy or RetryPolicy()
         self._transport = transport
+        self._rate_limiter = rate_limiter
+        """Explicit limiter override; None consults the env-configured
+        process default (FOUNDRY_RATE_LIMITER, docs/85) per call."""
 
     # --- hooks concrete adapters implement -----------------------------------
 
@@ -136,6 +141,18 @@ class ProviderAdapter(ABC):
         resolved = settings or self._settings
         self._check_cancelled(session)
         self._pre_call_budget_check(messages, resolved, session)
+        limiter = (
+            self._rate_limiter
+            if self._rate_limiter is not None
+            else default_rate_limiter()
+        )
+        if limiter is not None:
+            # The docs/85 gate: keyed <provider>:<model>, shared across
+            # workers when Redis-backed. Blocks until a permit is granted;
+            # cancellation wins over the deferred wait.
+            await limiter.acquire(
+                f"{self.name}:{self.model}", session=session
+            )
 
         attempt = 0
         while True:
