@@ -314,3 +314,75 @@ def test_execute_archive(capsys: pytest.CaptureFixture[str]) -> None:
     assert execute_archive("runs", "90d") == 0
     assert "archived: 1" in capsys.readouterr().out
     assert execute_archive("runs", "bogus") == 2
+
+
+# --- project-scoped pin warning (docs/81 § Pinned retention, scope caveat) -------
+
+
+def _make_project_pin(root: Path, project: str, run_id: str) -> Path:
+    pin_file = root / "projects" / project / ".foundry" / "pinned_runs.txt"
+    pin_file.parent.mkdir(parents=True)
+    pin_file.write_text(f"run {run_id}  # project-scoped\n")
+    return pin_file
+
+
+@pytest.mark.unit
+def test_project_pin_files_finds_only_populated_files(tmp_path: Path) -> None:
+    projects_root = tmp_path / "projects"
+    pinned = _make_project_pin(tmp_path, "demo", "01PROJPIN")
+    empty = tmp_path / "projects" / "other" / ".foundry" / "pinned_runs.txt"
+    empty.parent.mkdir(parents=True)
+    empty.write_text("# comments only\n\n")
+    from foundry.storage import project_pin_files
+
+    assert project_pin_files(projects_root) == [pinned]
+    assert project_pin_files(tmp_path / "missing") == []
+
+
+@pytest.mark.unit
+def test_gc_warns_loudly_when_project_pins_exist_and_does_not_honour_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """gc honours GLOBAL pins only: a project-scoped pin does NOT protect
+    its run, and the CLI must say so loudly before collecting."""
+    monkeypatch.chdir(tmp_path)
+    pin_file = _make_project_pin(tmp_path, "demo", "01PROJPIN")
+    _make_run("01PROJPIN", days_old=120)
+
+    assert execute_gc("runs", "90d", dry_run=False, force=False) == 0
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "GLOBAL pins only" in captured.err
+    assert str(pin_file) in captured.err
+    assert "foundry storage pin run" in captured.err
+    # the documented behaviour: the project pin did not protect the run
+    assert not (runs_root() / "01PROJPIN").exists()
+
+
+@pytest.mark.unit
+def test_archive_warns_when_project_pins_exist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _make_project_pin(tmp_path, "demo", "01PROJPIN")
+    _make_run("01OLD", days_old=120)
+    assert execute_archive("runs", "90d") == 0
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err and "GLOBAL pins only" in captured.err
+    assert "archived: 1" in captured.out
+
+
+@pytest.mark.unit
+def test_gc_does_not_warn_without_project_pins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _make_run("01OLD", days_old=120)
+    assert execute_gc("runs", "90d", dry_run=True, force=False) == 0
+    assert "WARNING" not in capsys.readouterr().err

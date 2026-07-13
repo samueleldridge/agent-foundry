@@ -10,7 +10,11 @@ Pin scoping: ``gc``/``archive`` consult the **global** pin file only
 (``~/.foundry/pinned_global.txt``). Project pin files
 (``<project>/.foundry/pinned_runs.txt``) are read by ``pin``/``unpin``/
 ``list_pinned`` when ``project_dir`` is given; wiring project pins into gc is
-deliberately deferred (gc has no project context).
+deliberately deferred (gc has no project context — run dirs carry no project
+provenance the pin file could be resolved against). Instead, the storage CLI
+warns LOUDLY before gc/archive when project pin files exist under the working
+directory's ``projects/`` tree (see :func:`project_pin_files`): protect a run
+from gc by pinning it globally (``foundry storage pin run <id>``).
 
 A run directory's age is the mtime of its newest file (falling back to the
 directory mtime when empty) — a run still being appended to never ages out.
@@ -168,6 +172,21 @@ def list_pinned(project_dir: Path | None = None) -> list[PinnedItem]:
     if project_dir is not None:
         items.extend(_parse_pin_file(_pin_file(project_dir), "project"))
     return items
+
+
+def project_pin_files(projects_root: Path) -> list[Path]:
+    """Project-scoped pin files under ``projects_root`` (repo convention:
+    ``projects/<p>/.foundry/pinned_runs.txt``) that carry at least one pin.
+
+    gc/archive do NOT honour these (module docstring: gc has no project
+    context); the storage CLI uses this to warn loudly before collecting."""
+    if not projects_root.is_dir():
+        return []
+    return [
+        candidate
+        for candidate in sorted(projects_root.glob("*/.foundry/pinned_runs.txt"))
+        if _parse_pin_file(candidate, "project")
+    ]
 
 
 def _globally_pinned_run_ids() -> set[str]:
@@ -343,5 +362,6 @@ __all__ = [
     "list_pinned",
     "parse_duration",
     "pin",
+    "project_pin_files",
     "unpin",
 ]

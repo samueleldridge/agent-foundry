@@ -208,6 +208,8 @@ foundry storage unpin run 01JKM4ABCDEF
 
 Pinned-list itself is in `projects/<p>/.foundry/pinned_runs.txt` for project-scoped pins or `~/.foundry/pinned_global.txt` for global.
 
+**Scope caveat (v1)**: `gc` / `archive` honour **global** pins only — run directories carry no project provenance for a project pin file to be resolved against. When project-scoped pin files exist under the working directory's `projects/` tree, `foundry storage gc` / `archive` print a loud warning before collecting (those pins protect nothing at gc time); re-pin globally with `foundry storage pin run <id>` to protect a run. Wiring project pins into gc is deferred to v1.1+.
+
 ## Archival pattern
 
 Older run artifacts compress to monthly tarballs:

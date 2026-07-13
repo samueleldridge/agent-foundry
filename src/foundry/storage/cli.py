@@ -24,6 +24,7 @@ from foundry.storage.retention import (
     list_pinned,
     parse_duration,
     pin,
+    project_pin_files,
     unpin,
 )
 
@@ -88,6 +89,27 @@ def execute_stats(json_output: bool = False) -> int:
     return 0
 
 
+def _warn_project_pins(command: str) -> None:
+    """gc/archive honour GLOBAL pins only (docs/81; retention module
+    docstring). When project-scoped pin files exist under ``./projects/``,
+    say so loudly BEFORE collecting — those pins will not protect anything."""
+    files = project_pin_files(Path.cwd() / "projects")
+    if not files:
+        return
+    print(
+        f"WARNING: `foundry storage {command}` honours GLOBAL pins only "
+        "(~/.foundry/pinned_global.txt). Project-scoped pin files exist and "
+        "will NOT protect their runs:",
+        file=sys.stderr,
+    )
+    for path in files:
+        print(f"  {path}", file=sys.stderr)
+    print(
+        "  protect a run globally with: foundry storage pin run <run_id>",
+        file=sys.stderr,
+    )
+
+
 # --- gc ----------------------------------------------------------------------
 
 
@@ -120,6 +142,7 @@ def execute_gc(
     json_output: bool = False,
 ) -> int:
     """``foundry storage gc --kind runs --older-than 90d [--dry-run] [--force]``."""
+    _warn_project_pins("gc")
     try:
         delta = parse_duration(older_than)
         report = gc(
@@ -194,6 +217,7 @@ def _print_archive_report(report: ArchiveReport) -> None:
 
 def execute_archive(kind: str, older_than: str) -> int:
     """``foundry storage archive --kind runs --older-than 90d``."""
+    _warn_project_pins("archive")
     try:
         delta = parse_duration(older_than)
         report = archive(kind=kind, older_than_days=delta.total_seconds() / 86400)

@@ -43,6 +43,7 @@ from foundry.storage.retention import (
     list_pinned,
     parse_duration,
     pin,
+    project_pin_files,
     unpin,
 )
 
@@ -70,6 +71,7 @@ __all__ = [
     "parse_duration",
     "pin",
     "pinned_global_path",
+    "project_pin_files",
     "run_dir",
     "runs_root",
     "select_backend",
