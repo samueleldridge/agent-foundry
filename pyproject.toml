@@ -47,6 +47,16 @@
 #                                         Chosen over `websockets` to keep
 #                                         the dependency pure-Python.
 #
+# Phase 9 addition (chosen 2026-07-13):
+#   rich >=15                           — the `foundry review` TUI + table
+#                                         rendering. Already present
+#                                         transitively via typer; pinned
+#                                         explicitly because foundry.cli.tui
+#                                         imports it directly. textual was
+#                                         considered and rejected for v1
+#                                         (heavier pin for a minimal review
+#                                         page; docs/_retros/phase_9.md).
+#
 #   redis / asyncpg are deliberately NOT pinned: the Redis-backed rate
 #   limiter (foundry.providers.rate_limit) lazy-imports redis with a
 #   structured error when absent — same policy as foundry.cache's optional
@@ -86,6 +96,7 @@ dependencies = [
     "opentelemetry-exporter-otlp==1.42.1",
     "fastapi>=0.139,<1",
     "uvicorn>=0.51,<1",
+    "rich>=15",
     "wsproto>=1.2",
 ]
 

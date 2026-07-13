@@ -21,10 +21,9 @@ app = typer.Typer(
     help=(
         "agent-foundry — build, evaluate, version, and orchestrate "
         "multi-agent LLM systems from declarative configs.\n\n"
-        "`foundry run` (Phase 1), `foundry connections health` (Phase 2a), "
-        "`foundry eval` (Phase 4), and `foundry rollback` / `versions` / "
-        "`diff` / `catalog promote` (Phase 5) are live. Remaining "
-        "subcommands land in later phases; see docs/03-development-phases.md."
+        "v1 surface: run / serve / eval / forge / rollback / versions / "
+        "diff / catalog / obs / storage / test / doctor / review / deploy. "
+        "See docs/README.md for the map."
     ),
     no_args_is_help=True,
     add_completion=False,
@@ -290,8 +289,7 @@ def project_new(name: str = _PROJECT_NAME_ARG) -> None:
 
 catalog_app = typer.Typer(
     name="catalog",
-    help="Catalog operations. `promote` is live (Phase 5); list/show land "
-    "in Phase 9.",
+    help="Catalog operations: list, show, promote (human-gated).",
     no_args_is_help=True,
 )
 app.add_typer(catalog_app)
@@ -352,16 +350,26 @@ def catalog_promote(
     )
 
 
-@catalog_app.command(name="list", help="List catalog artifacts. Lands in Phase 9.")
-def catalog_list() -> None:
-    _not_yet_implemented("catalog list", "Phase 9")
+@catalog_app.command(name="list", help="List catalog artifacts across the roots.")
+def catalog_list(
+    kind: str | None = typer.Option(
+        None, "--kind", help="Filter: tools, connections, or retrievers."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="JSON output."),
+) -> None:
+    from foundry.cli.catalog import execute_catalog_list
+
+    raise typer.Exit(code=execute_catalog_list(kind=kind, json_output=json_output))
 
 
-@catalog_app.command(
-    name="show", help="Show an artifact's versions.json. Lands in Phase 9."
-)
-def catalog_show() -> None:
-    _not_yet_implemented("catalog show", "Phase 9")
+@catalog_app.command(name="show", help="Show an artifact's versions + versions.json.")
+def catalog_show(
+    ref: str = typer.Argument(..., help="Artifact name, e.g. http_get_json."),
+    json_output: bool = typer.Option(False, "--json", help="JSON output."),
+) -> None:
+    from foundry.cli.catalog import execute_catalog_show
+
+    raise typer.Exit(code=execute_catalog_show(ref, json_output=json_output))
 
 
 _EVAL_TARGET_ARG = typer.Argument(
@@ -671,6 +679,207 @@ def obs_eval_trend(
 
     raise typer.Exit(
         code=execute_eval_trend(project=project, since=since, json_output=json_output)
+    )
+
+
+storage_app = typer.Typer(
+    name="storage",
+    help="Artifact storage: stats, gc, archive, pin (docs/81).",
+    no_args_is_help=True,
+)
+app.add_typer(storage_app)
+
+
+@storage_app.command(name="stats", help="Disk usage by artifact kind.")
+def storage_stats(
+    json_output: bool = typer.Option(False, "--json", help="JSON output."),
+) -> None:
+    from foundry.storage.cli import execute_stats
+
+    raise typer.Exit(code=execute_stats(json_output=json_output))
+
+
+@storage_app.command(name="gc", help="Garbage-collect artifacts past retention.")
+def storage_gc(
+    kind: str = typer.Option("runs", "--kind", help="Artifact kind (runs)."),
+    older_than: str = typer.Option(..., "--older-than", help="e.g. 90d / 24h."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview only."),
+    force: bool = typer.Option(
+        False, "--force", help="Delete pinned items too (logged loudly)."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="JSON output."),
+) -> None:
+    from foundry.storage.cli import execute_gc
+
+    raise typer.Exit(
+        code=execute_gc(
+            kind, older_than, dry_run=dry_run, force=force, json_output=json_output
+        )
+    )
+
+
+@storage_app.command(name="archive", help="Compact old artifacts to monthly tarballs.")
+def storage_archive(
+    kind: str = typer.Option("runs", "--kind", help="Artifact kind (runs)."),
+    older_than: str = typer.Option(..., "--older-than", help="e.g. 90d."),
+) -> None:
+    from foundry.storage.cli import execute_archive
+
+    raise typer.Exit(code=execute_archive(kind, older_than))
+
+
+@storage_app.command(name="pin", help="Exempt an artifact from retention GC.")
+def storage_pin(
+    kind: str = typer.Argument(..., help="Artifact kind, e.g. run."),
+    artifact_id: str = typer.Argument(..., help="The artifact id (run id)."),
+    reason: str | None = typer.Option(None, "--reason", help="Why it is pinned."),
+) -> None:
+    from foundry.storage.cli import execute_pin
+
+    raise typer.Exit(code=execute_pin(kind, artifact_id, reason=reason))
+
+
+@storage_app.command(name="unpin", help="Remove a retention pin.")
+def storage_unpin(
+    kind: str = typer.Argument(..., help="Artifact kind, e.g. run."),
+    artifact_id: str = typer.Argument(..., help="The artifact id (run id)."),
+) -> None:
+    from foundry.storage.cli import execute_unpin
+
+    raise typer.Exit(code=execute_unpin(kind, artifact_id))
+
+
+@storage_app.command(name="list-pinned", help="List pinned artifacts.")
+def storage_list_pinned(
+    json_output: bool = typer.Option(False, "--json", help="JSON output."),
+) -> None:
+    from foundry.storage.cli import execute_list_pinned
+
+    raise typer.Exit(code=execute_list_pinned(json_output=json_output))
+
+
+@app.command(
+    name="test",
+    help="Run a project's pytest suite with foundry.testing fixtures (docs/82).",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def test_command(
+    ctx: typer.Context,
+    project: str = typer.Argument(
+        ..., help="Project path (projects/hello) or bare name."
+    ),
+    with_eval: str | None = typer.Option(
+        None, "--with-eval", help="Also run this eval spec as a gate."
+    ),
+    fail_under: float | None = typer.Option(
+        None, "--fail-under", help="Eval score floor for --with-eval."
+    ),
+) -> None:
+    from foundry.cli.test import execute_test
+
+    raise typer.Exit(
+        code=execute_test(
+            project, list(ctx.args), with_eval=with_eval, fail_under=fail_under
+        )
+    )
+
+
+@app.command(help="Environment self-diagnostic: roots, configs, backends (docs/82).")
+def doctor(
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Per-check detail."),
+    strict: bool = typer.Option(
+        False, "--strict", help="Exit non-zero on warnings too."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="JSON output."),
+) -> None:
+    from foundry.cli.doctor import execute_doctor
+
+    raise typer.Exit(
+        code=execute_doctor(verbose=verbose, strict=strict, json_output=json_output)
+    )
+
+
+@app.command(help="Interactive review TUI: commits, evals, rollback (docs/52).")
+def review(
+    project: str = typer.Argument(
+        ..., help="Project path (projects/hello) or bare name."
+    ),
+) -> None:
+    from foundry.cli.tui.review import execute_review
+
+    raise typer.Exit(code=execute_review(project))
+
+
+@app.command(
+    name="compute-version",
+    help="Deterministic content hash of a project's config tree (docs/84).",
+)
+def compute_version(
+    project: str = typer.Argument(
+        ..., help="Project path (projects/hello) or bare name."
+    ),
+    include_git_sha: bool = typer.Option(
+        False, "--include-git-sha", help="Append @<short-sha>."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="JSON output."),
+) -> None:
+    from foundry.cli.deploy import execute_compute_version
+
+    raise typer.Exit(
+        code=execute_compute_version(
+            project, include_git_sha=include_git_sha, json_output=json_output
+        )
+    )
+
+
+@app.command(help="Deploy a project image via a platform helper (docs/84).")
+def deploy(
+    project: str = typer.Argument(
+        ..., help="Project path (projects/hello) or bare name."
+    ),
+    image: str = typer.Option(..., "--image", help="Full image reference to deploy."),
+    target: str = typer.Option("dev", "--target", help="dev / staging / prod."),
+    platform: str = typer.Option(
+        "noop", "--platform", help="kubectl / ecs / cloud-run / fly / nomad / noop."
+    ),
+    pre_deploy_eval: str | None = typer.Option(
+        None, "--pre-deploy-eval", help="Eval spec path for the quality gate."
+    ),
+    production_floor: float = typer.Option(
+        0.9, "--production-floor", help="Minimum eval score to proceed."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show the platform command without applying."
+    ),
+    skip_eval: bool = typer.Option(
+        False, "--skip-eval", help="Bypass the pre-deploy eval gate."
+    ),
+    deployment_name: str | None = typer.Option(
+        None, "--deployment-name", help="Platform deployment/service name."
+    ),
+    namespace: str | None = typer.Option(
+        None, "--namespace", help="Kubernetes namespace."
+    ),
+    region: str | None = typer.Option(None, "--region", help="Cloud Run region."),
+    jobspec: str | None = typer.Option(None, "--jobspec", help="Nomad jobspec path."),
+) -> None:
+    from foundry.cli.deploy import execute_deploy
+
+    raise typer.Exit(
+        code=execute_deploy(
+            project,
+            image=image,
+            target=target,
+            platform=platform,
+            pre_deploy_eval=pre_deploy_eval,
+            production_floor=production_floor,
+            dry_run=dry_run,
+            skip_eval=skip_eval,
+            deployment_name=deployment_name,
+            namespace=namespace,
+            region=region,
+            jobspec=jobspec,
+        )
     )
 
 
