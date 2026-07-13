@@ -10,16 +10,33 @@ Requires Python 3.12 and [uv](https://docs.astral.sh/uv/). One provider API key 
 
 ```bash
 uv sync                          # install pinned deps
-export ANTHROPIC_API_KEY=sk-...  # or OPENAI_API_KEY (see provider swap below)
 uv run foundry doctor            # environment + config health check
 ```
+
+Provide your API key however you like — the CLI reads it from the process
+environment. For local work the easiest path is a `.env` in the repo root
+(gitignored), which `foundry` auto-loads:
+
+```bash
+cat > .env <<'EOF'
+ANTHROPIC_API_KEY=sk-ant-...      # or OPENAI_API_KEY (see provider swap below)
+HELLO_SERVICE_API_KEY=dummy       # hello's demo tool connection; any value works
+EOF
+uv run foundry doctor            # the `env_file` line confirms what was loaded
+```
+
+A real exported environment variable always wins over `.env`; opt out entirely
+with `FOUNDRY_NO_ENV_FILE=1`, or point elsewhere with `FOUNDRY_ENV_FILE=path`.
+Prefer not to use a file? Just `export ANTHROPIC_API_KEY=...` in your shell.
 
 ### Run the hello project
 
 ```bash
-export HELLO_SERVICE_API_KEY=dummy   # hello's demo catalog connection; any value works
 uv run foundry run hello --input '{"name": "Ada"}'   # bare names resolve against ./projects/
 ```
+
+(`hello` calls one demo tool over an authenticated connection, so it needs
+`HELLO_SERVICE_API_KEY` — already in the `.env` above.)
 
 This compiles `projects/hello/system.yaml` → LangGraph, calls the model (plus one catalog tool through a pooled, authenticated connection), and writes a full run artifact (events, LLM calls, tool calls, final state) under `~/.foundry/runs/<run_id>/`.
 
