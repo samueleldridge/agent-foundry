@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
+from foundry.cli._helpers import resolve_project_dir
 from foundry.core import CostBudget, RunId, Session
 from foundry.core.errors import FoundryError
 from foundry.observability.artifacts import RunArtifactWriter
@@ -80,6 +81,7 @@ def execute_run(
         resolved_run_id = RunId.new()
 
     try:
+        project_path = resolve_project_dir(str(project_path))
         compiled = compile_project(project_path, transport=transport)
     except FoundryError as exc:
         _print_error(exc)

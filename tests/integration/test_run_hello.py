@@ -116,6 +116,21 @@ def test_hello_runs_end_to_end_against_anthropic_fake(
 
 
 @pytest.mark.integration
+def test_bare_project_name_resolves_against_projects_dir(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`foundry run hello` (the documented hero form) resolves the bare
+    name against ./projects/ from the cwd, like the Phase 5 CLI verbs."""
+    monkeypatch.chdir(HELLO_DIR.parents[1])
+    code = execute_run(
+        Path("hello"), '{"name": "world"}', transport=_anthropic_transport()
+    )
+    assert code == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed == {"greeting": "Hello, world!"}
+
+
+@pytest.mark.integration
 def test_provider_swap_is_a_yaml_only_change(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

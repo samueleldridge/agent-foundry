@@ -59,11 +59,12 @@ def execute_serve(
         )
         return 2
 
-    resolved = project_path.resolve()
     try:
         # Fail fast + report structured errors before uvicorn boots.
+        from foundry.cli._helpers import resolve_project_dir
         from foundry.runtime.langgraph_adapter import compile_project
 
+        resolved = resolve_project_dir(str(project_path))
         compiled = compile_project(resolved)
     except FoundryError as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)

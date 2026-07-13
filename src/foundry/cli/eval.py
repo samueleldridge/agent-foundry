@@ -23,6 +23,7 @@ from pathlib import Path
 
 import httpx
 
+from foundry.cli._helpers import resolve_project_dir
 from foundry.config import FoundryRoots, load_eval_spec
 from foundry.core.errors import ConfigLoadError, ConfigValidationError, FoundryError
 from foundry.eval import (
@@ -134,7 +135,7 @@ def _eval_project(
             "usage: foundry eval <project> <eval-set>",
             context={"received_args": [project_path, *args]},
         )
-    project_dir = Path(project_path)
+    project_dir = resolve_project_dir(project_path)
     spec_path = _resolve_eval_path(project_dir, args[0])
     spec = load_eval_spec(spec_path)
     compiled = compile_project(project_dir, transport=transport)
