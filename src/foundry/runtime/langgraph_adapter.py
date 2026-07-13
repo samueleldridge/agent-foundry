@@ -51,6 +51,7 @@ from foundry.core import (
     RunFailed,
     RunStarted,
     Session,
+    StateTransition,
     WarningEvent,
 )
 from foundry.core.errors import (
@@ -247,6 +248,19 @@ class _Wiring:
                         new_resolutions[pending.approval_id] = record
                         if runtime is not None:
                             runtime.approvals = resolved
+                state_delta: dict[str, Any] | None = update.get("state")
+                if runtime is not None and state_delta:
+                    # docs/80 § flow control: every agent state mutation
+                    # emits state.transition (function nodes carry the same
+                    # fields on function_node.completed instead).
+                    self.emitter.emit(
+                        StateTransition,
+                        agent_name=agent_name,
+                        fields_written=sorted(state_delta),
+                        bytes_delta=len(
+                            json.dumps(state_delta, default=str).encode()
+                        ),
+                    )
                 return self._translate(
                     update, conv_channel, route_channel, new_resolutions
                 )

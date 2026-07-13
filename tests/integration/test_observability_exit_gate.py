@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -191,6 +192,68 @@ def test_traces_mirror_and_artifact_for_one_run(
     metadata = json.loads((run_dir / "metadata.json").read_text())
     assert metadata["status"] == "completed"
     assert metadata["run_id"] == run_id
+
+    # --- 5. state_transitions.jsonl content (docs/80 § flow control +
+    # docs/81 artifact layout): one record per agent state mutation, with
+    # the full identity + payload field set.
+    transitions = [
+        json.loads(line)
+        for line in (run_dir / "state_transitions.jsonl").read_text().splitlines()
+    ]
+    assert len(transitions) == 1
+    transition = transitions[0]
+    assert transition["event"] == "state.transition"
+    assert transition["run_id"] == run_id
+    assert transition["agent_name"] == "hello_agent"
+    assert transition["fields_written"] == ["greeting"]
+    assert transition["bytes_delta"] > 0
+    assert isinstance(transition["sequence"], int)
+    assert transition["timestamp"]
+    assert transition["worker_id"]
+    # the same records appear (in order) in the full event stream
+    stream_transitions = [e for e in events if e["event"] == "state.transition"]
+    assert stream_transitions == transitions
+
+
+@pytest.mark.integration
+def test_capture_inputs_false_excludes_inputs_from_the_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """docs/80 § Redaction + docs/81: with ``capture_inputs: false`` the
+    artifact has no inputs.json and llm_calls.jsonl carries no prompt
+    messages — while hashes and structural metadata remain."""
+    project_dir = tmp_path / "hello_no_capture"
+    shutil.copytree(HELLO_DIR, project_dir)
+    system_yaml = project_dir / "system.yaml"
+    system_yaml.write_text(
+        system_yaml.read_text() + "\nobservability:\n  capture_inputs: false\n"
+    )
+
+    transport = Transport(_tool_turns())
+    code = execute_run(project_dir, '{"name": "world"}', transport=transport.build())
+    assert code == 0
+
+    run_dir = _single_run_dir(tmp_path)
+    events = _events(run_dir)
+
+    # the gate: no inputs.json, and no prompt content anywhere
+    assert not (run_dir / "inputs.json").exists()
+    llm_calls = [
+        json.loads(line)
+        for line in (run_dir / "llm_calls.jsonl").read_text().splitlines()
+    ]
+    assert llm_calls
+    assert all(record["prompt_messages"] is None for record in llm_calls)
+    for event in events:
+        if event["event"] == "llm.started":
+            assert event["prompt_messages"] is None
+
+    # correlation stays: hashes + the rest of the artifact are intact
+    started = next(e for e in events if e["event"] == "run.started")
+    assert started["inputs_hash"]
+    assert (run_dir / "outputs.json").exists()
+    assert (run_dir / "metadata.json").exists()
 
 
 @pytest.mark.integration
