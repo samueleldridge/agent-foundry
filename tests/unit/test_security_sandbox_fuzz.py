@@ -85,6 +85,15 @@ def _malicious_write_paths(tree: dict[str, Path]) -> list[str]:
         "projects/demo/.foundry/eval_history.jsonl",
         str(project / "evals" / "qa.yaml"),
         str(project / ".foundry" / "audit.jsonl"),
+        # --- denied subtrees, case-shifted: on case-insensitive filesystems
+        # (darwin) Evals/ IS evals/, so matching must be casefolded ---
+        "projects/demo/Evals/qa.yaml",
+        "projects/demo/EVALS/new/deep/case.yaml",
+        "projects/demo/.Foundry/audit.jsonl",
+        str(project / "eVaLs" / "qa.yaml"),
+        # --- embedded NUL: the OS refuses to canonicalise; the sandbox must
+        # answer with SandboxViolation, never a bare ValueError ---
+        "projects/demo/agents/x\x00y.yaml",
         # --- traversal that ENTERS a denied subtree after resolution ---
         "projects/demo/agents/../evals/qa.yaml",
         "projects/demo/agents/../.foundry/audit.jsonl",
@@ -154,6 +163,7 @@ def test_malicious_read_fuzz_all_refused(tree: dict[str, Path]) -> None:
         str(tree["repo"].parent),
         "/",
         "projects/demo/../../../outside/victim.txt",
+        "projects/demo/agents/x\x00y.yaml",  # embedded NUL → SandboxViolation
     ]
     for raw in read_cases:
         with pytest.raises(SandboxViolation):

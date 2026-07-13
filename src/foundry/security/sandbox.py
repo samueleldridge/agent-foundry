@@ -11,7 +11,10 @@ reusable, side-effect-free checker:
   framework root + catalog roots for the meta-agent).
 - **Writes** are limited to a single root (the scoped project), with
   denied first-level subtrees (``evals/`` — the eval is the target;
-  ``.foundry/`` — the audit trail doesn't move).
+  ``.foundry/`` — the audit trail doesn't move). Denied-subtree matching
+  is case-insensitive (casefolded): on case-insensitive filesystems
+  (darwin's APFS default) ``Evals/`` IS ``evals/``, so a case-sensitive
+  check would let writes bypass the guard.
 
 The checker raises :class:`foundry.core.errors.SandboxViolation` and does
 nothing else: recording the violation, cancelling the forge session, and
@@ -44,11 +47,19 @@ class PathSandbox:
 
     def resolve(self, raw: str | Path) -> Path:
         """Canonicalise: relative → under ``base_dir``; symlinks resolved
-        BEFORE any membership check (docs/83 § sandboxes are structural)."""
+        BEFORE any membership check (docs/83 § sandboxes are structural).
+        Paths the OS cannot canonicalise (e.g. an embedded null byte) are
+        refused as violations — never surfaced as a bare ``ValueError``."""
         path = Path(raw)
         if not path.is_absolute():
             path = self.base_dir / path
-        return path.resolve()
+        try:
+            return path.resolve()
+        except ValueError as exc:
+            raise SandboxViolation(
+                f"unresolvable path refused: {str(raw)!r} ({exc})",
+                context={"path": str(raw), "kind": "resolve"},
+            ) from exc
 
     def check_read(self, raw: str | Path) -> Path:
         path = self.resolve(raw)
@@ -77,8 +88,8 @@ class PathSandbox:
                 context={"path": str(path), "kind": "write"},
             )
         relative = path.relative_to(write_root)
-        if relative.parts and relative.parts[0] in self.denied_write_subdirs:
-            denied = relative.parts[0]
+        denied = _denied_match(relative, self.denied_write_subdirs)
+        if denied is not None:
             reason = {
                 "evals": (
                     f"write into the eval set refused: {path} — the eval is "
@@ -100,6 +111,19 @@ class PathSandbox:
 
 def _is_under(path: Path, root: Path) -> bool:
     return path == root or path.is_relative_to(root)
+
+
+def _denied_match(relative: Path, denied_subdirs: tuple[str, ...]) -> str | None:
+    """Casefolded first-level match: ``Evals/`` and ``.Foundry/`` are the
+    denied trees themselves on case-insensitive filesystems (darwin), so
+    case must not matter (Phase 9 review follow-up 1)."""
+    if not relative.parts:
+        return None
+    first = relative.parts[0].casefold()
+    for name in denied_subdirs:
+        if name.casefold() == first:
+            return name
+    return None
 
 
 __all__ = ["PathSandbox"]
