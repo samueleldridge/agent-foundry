@@ -1,0 +1,51 @@
+# Azure Container Apps reference manifest for the hello project
+# (docs/84 § Sample manifests; Bicep / ARM-friendly shape).
+# CI replaces SYSTEM_VERSION with `foundry compute-version projects/hello`.
+properties:
+  managedEnvironmentId: <env-id>
+  configuration:
+    ingress:
+      external: true
+      targetPort: 8080
+    secrets:
+      - name: foundry-checkpointer
+        keyVaultUrl: https://<vault>.vault.azure.net/secrets/checkpointer-url
+        identity: <managed-identity-id>
+      - name: anthropic-api-key
+        keyVaultUrl: https://<vault>.vault.azure.net/secrets/anthropic-api-key
+        identity: <managed-identity-id>
+  template:
+    containers:
+      - name: hello
+        image: <registry>.azurecr.io/foundry-hello:SYSTEM_VERSION
+        env:
+          - name: FOUNDRY_ENV
+            value: prod
+          - name: FOUNDRY_TRACING
+            value: otel
+          - name: OTEL_EXPORTER_OTLP_ENDPOINT
+            value: http://otel-collector:4317
+          - name: FOUNDRY_CHECKPOINTER
+            secretRef: foundry-checkpointer
+          - name: ANTHROPIC_API_KEY
+            secretRef: anthropic-api-key
+        probes:
+          - type: liveness
+            httpGet:
+              path: /health
+              port: 8080
+          - type: readiness
+            httpGet:
+              path: /health?deep=true
+              port: 8080
+        resources:
+          cpu: 1.0
+          memory: 2Gi
+    scale:
+      minReplicas: 2
+      maxReplicas: 10
+      rules:
+        - name: http-scaling
+          http:
+            metadata:
+              concurrentRequests: "100"

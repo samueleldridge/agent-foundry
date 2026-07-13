@@ -1,0 +1,48 @@
+# Fly.io reference config for the hello project (docs/84 § Sample manifests).
+# Deploy a specific content-hashed image:
+#   fly deploy --image registry.fly.io/foundry-hello:<system_version>
+app = "foundry-hello"
+primary_region = "lhr"
+
+[build]
+  dockerfile = "../../Dockerfile"
+
+[env]
+  FOUNDRY_ENV = "prod"
+  FOUNDRY_HOST = "0.0.0.0"
+  FOUNDRY_PORT = "8080"
+  FOUNDRY_TRACING = "otel"
+  FOUNDRY_MAX_CONCURRENT_RUNS = "100"
+
+# Secrets never live here (see deploy/env.template):
+#   fly secrets set FOUNDRY_CHECKPOINTER=... FOUNDRY_RATE_LIMITER=... \
+#     FOUNDRY_API_TOKENS=... ANTHROPIC_API_KEY=...
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 2
+  processes = ["app"]
+
+[[http_service.checks]]
+  type = "http"
+  interval = "10s"
+  timeout = "5s"
+  grace_period = "30s"
+  method = "GET"
+  path = "/health"
+
+[[http_service.checks]]
+  type = "http"
+  interval = "30s"
+  timeout = "15s"
+  grace_period = "60s"
+  method = "GET"
+  path = "/health?deep=true"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 2
+  memory_mb = 2048

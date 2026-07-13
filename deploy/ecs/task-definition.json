@@ -1,0 +1,41 @@
+{
+  "family": "hello",
+  "containerDefinitions": [
+    {
+      "name": "hello",
+      "image": "<account>.dkr.ecr.<region>.amazonaws.com/foundry-hello:SYSTEM_VERSION",
+      "essential": true,
+      "portMappings": [{ "containerPort": 8080, "protocol": "tcp" }],
+      "environment": [
+        { "name": "FOUNDRY_ENV", "value": "prod" },
+        { "name": "FOUNDRY_TRACING", "value": "otel" },
+        { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://otel-collector:4317" },
+        { "name": "FOUNDRY_MAX_CONCURRENT_RUNS", "value": "100" }
+      ],
+      "secrets": [
+        { "name": "FOUNDRY_CHECKPOINTER", "valueFrom": "arn:aws:secretsmanager:<region>:<account>:secret:foundry-prod-checkpointer" },
+        { "name": "FOUNDRY_RATE_LIMITER", "valueFrom": "arn:aws:secretsmanager:<region>:<account>:secret:foundry-prod-redis" },
+        { "name": "FOUNDRY_API_TOKENS", "valueFrom": "arn:aws:secretsmanager:<region>:<account>:secret:foundry-prod-api-tokens" },
+        { "name": "ANTHROPIC_API_KEY", "valueFrom": "arn:aws:secretsmanager:<region>:<account>:secret:foundry-prod-anthropic" }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"
+        ],
+        "interval": 30,
+        "timeout": 10,
+        "retries": 3,
+        "startPeriod": 30
+      }
+    }
+  ],
+  "requiresCompatibilities": ["FARGATE"],
+  "networkMode": "awsvpc",
+  "cpu": "1024",
+  "memory": "2048",
+  "taskRoleArn": "arn:aws:iam::<account>:role/hello-task-role",
+  "executionRoleArn": "arn:aws:iam::<account>:role/ecs-execution-role"
+}

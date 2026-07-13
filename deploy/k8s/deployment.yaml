@@ -1,0 +1,95 @@
+# Kubernetes reference manifest for the hello project (docs/84 § Sample
+# manifests). Image tag = <project>:<system_version>; CI replaces the
+# SYSTEM_VERSION placeholder with `foundry compute-version projects/hello`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+  labels:
+    app: hello
+    foundry.project: hello
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: hello
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: hello
+        foundry.project: hello
+    spec:
+      serviceAccountName: hello  # for vault / IAM-federated identity
+      containers:
+        - name: hello
+          image: foundry-hello:SYSTEM_VERSION  # placeholder; CI replaces
+          ports:
+            - containerPort: 8080
+          env:
+            - name: FOUNDRY_ENV
+              value: prod
+            - name: FOUNDRY_CHECKPOINTER
+              valueFrom:
+                secretKeyRef:
+                  name: foundry-prod
+                  key: checkpointer-url
+            - name: FOUNDRY_RATE_LIMITER
+              valueFrom:
+                secretKeyRef:
+                  name: foundry-prod
+                  key: redis-url
+            - name: FOUNDRY_API_TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: foundry-prod
+                  key: api-tokens
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: foundry-prod
+                  key: anthropic-api-key
+            - name: FOUNDRY_TRACING
+              value: otel
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.observability:4317
+            - name: FOUNDRY_MAX_CONCURRENT_RUNS
+              value: "100"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health?deep=true
+              port: 8080
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 3
+      # Allow time for graceful drain (docs/71 § Graceful shutdown;
+      # FOUNDRY_DRAIN_TIMEOUT_S must be comfortably below this).
+      terminationGracePeriodSeconds: 150
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello
+spec:
+  selector:
+    app: hello
+  ports:
+    - port: 80
+      targetPort: 8080

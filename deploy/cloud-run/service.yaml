@@ -1,0 +1,55 @@
+# Google Cloud Run (Knative) reference manifest for the hello project
+# (docs/84 § Sample manifests). CI replaces SYSTEM_VERSION with
+# `foundry compute-version projects/hello`.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: hello
+  annotations:
+    run.googleapis.com/launch-stage: GA
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "20"
+        run.googleapis.com/cpu-throttling: "false"
+    spec:
+      serviceAccountName: hello@<gcp-project>.iam.gserviceaccount.com
+      timeoutSeconds: 600
+      containers:
+        - image: gcr.io/<gcp-project>/foundry-hello:SYSTEM_VERSION
+          ports:
+            - containerPort: 8080
+          env:
+            - name: FOUNDRY_ENV
+              value: prod
+            - name: FOUNDRY_TRACING
+              value: otel
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector:4317
+            - name: FOUNDRY_CHECKPOINTER
+              valueFrom:
+                secretKeyRef:
+                  name: foundry-prod
+                  key: checkpointer-url
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: foundry-prod
+                  key: anthropic-api-key
+          startupProbe:
+            httpGet:
+              path: /health?deep=true
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+          resources:
+            limits:
+              cpu: "2"
+              memory: 2Gi
