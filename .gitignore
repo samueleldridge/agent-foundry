@@ -17,3 +17,6 @@ wheels/
 projects/*/.foundry/
 
 personal_docs/
+# Local secrets (never commit)
+.env
+.env.*
