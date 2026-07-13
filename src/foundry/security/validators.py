@@ -16,14 +16,11 @@ schema boundaries:
 from __future__ import annotations
 
 import json
-from typing import TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 from foundry.auth.redactor import SECRET_VALUE_PATTERNS
 from foundry.core.errors import SecurityError
-
-ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
 def find_secret_shaped_content(text: str) -> list[str]:
@@ -50,7 +47,9 @@ def ensure_no_secret_leak(text: str, *, where: str) -> str:
     return text
 
 
-def validated_json(text: str, model: type[ModelT], *, where: str) -> ModelT:
+def validated_json[ModelT: BaseModel](
+    text: str, model: type[ModelT], *, where: str
+) -> ModelT:
     """Parse untrusted JSON text and validate it against ``model``.
     Malformed JSON or a schema mismatch raises :class:`SecurityError` with
     a structured summary (no raw payload echo beyond pydantic's own field
