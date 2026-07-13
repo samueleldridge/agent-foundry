@@ -31,6 +31,9 @@ src/foundry/core/
 src/foundry/orchestration/
 └── state_scope.py       compile-time visibility validation; StateVisibilityError generation
 └── state_compiler.py    StateSpec → Pydantic model → LangGraph TypedDict + reducer dict
+                         (as-built erratum: state_compiler.py was merged into
+                         state_scope.py — compile_state + parse_type_string live
+                         there; functionality unchanged)
 
 projects/<name>/
 └── state.yaml           StateSpec — the project's state shape + visibility + reducer overrides

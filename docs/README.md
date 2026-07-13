@@ -8,7 +8,7 @@ All ten phases (0–9) are implemented, reviewed, and tagged `v1.0.0`. `src/foun
 
 - Per-phase ground truth: `_phase_handoffs/` (deviations + exit-gate tables), `_demos/`, `_retros/`, `_manual_tests/`.
 - The ≤5-minute end-to-end demo: `uv run python scripts/demo_phase9.py` (recorded in `_demos/phase_9.md`).
-- v1.1 candidates live in the operator's backlog memory (schema-only eval gen, mid-iteration HITL, drift daemon, forge web UI, native provider streaming, Postgres checkpointer, `foundry obs trace`, ...).
+- v1.1 candidates: [91-v1_1-backlog.md](91-v1_1-backlog.md) (consolidated from the phase handoffs; canonical copy mirrored in operator memory).
 
 Docs remain normative for maintenance: where an implementation deviates deliberately, the phase handoff records it.
 

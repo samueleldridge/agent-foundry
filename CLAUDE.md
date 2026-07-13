@@ -2,7 +2,7 @@
 
 **agent-foundry** is a personal developer kit for building, evaluating, versioning, and orchestrating multi-agent LLM systems. The core claim: configs are text (YAML + markdown + Pydantic), a meta-agent edits them, and the runtime executes compiled specs against any provider.
 
-**Status: design-complete, pre-implementation.** `docs/` is the source of truth (33 specs across 9 tiers). `src/foundry/` does not exist yet. The build is sequenced into 10 phases (0–9) in [docs/03-development-phases.md](docs/03-development-phases.md), with paste-ready Claude Code prompts in [docs/90-implementation-plan.md](docs/90-implementation-plan.md).
+**Status: v1 COMPLETE (tagged `v1.0.0`, 2026-07-13).** All ten phases (0–9) are implemented and reviewed; `src/foundry/` ships the full documented surface. `docs/` remains the source of truth (33 specs across 9 tiers) — where the implementation deliberately deviates, the phase handoff in `docs/_phase_handoffs/` records it. The build was sequenced per [docs/03-development-phases.md](docs/03-development-phases.md) and [docs/90-implementation-plan.md](docs/90-implementation-plan.md); maintenance work should still honour the per-phase exit gates and review pattern there. Operator quickstart: root [README.md](README.md). v1.1+ backlog: [docs/91-v1_1-backlog.md](docs/91-v1_1-backlog.md).
 
 ## Read these first (in order)
 
