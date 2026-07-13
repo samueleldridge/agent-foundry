@@ -1,8 +1,8 @@
 name: hello_agent
 description: Friendly conversational assistant that remembers the user via three memory layers.
 model_binding:
-  provider: anthropic
-  model: claude-haiku-4-5
+  provider: openai
+  model: gpt-4o-mini
   settings:
     max_tokens: 512
     temperature: 0.2
