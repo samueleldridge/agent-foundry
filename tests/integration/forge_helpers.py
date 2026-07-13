@@ -30,6 +30,8 @@ from typing import Any
 
 import httpx
 
+from foundry.security.injection import unwrap_tool_output
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 META_MODEL = "claude-opus-4-7"
 PROJECT_MODEL = "claude-haiku-4-5"
@@ -359,7 +361,9 @@ def _tool_result_payload(message: dict[str, Any]) -> dict[str, Any] | None:
             for piece in inner:
                 if isinstance(piece, dict) and piece.get("type") == "text":
                     try:
-                        parsed = json.loads(piece["text"])
+                        # Phase 9: the runtime wraps tool results in the
+                        # docs/83 typed boundary; the fake LLM unwraps it.
+                        parsed = json.loads(unwrap_tool_output(piece["text"]))
                     except json.JSONDecodeError:
                         return None
                     return parsed if isinstance(parsed, dict) else None

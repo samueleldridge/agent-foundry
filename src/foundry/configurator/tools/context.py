@@ -30,8 +30,9 @@ from typing import TYPE_CHECKING, NoReturn
 import yaml
 
 from foundry.config.refs import FoundryRoots
-from foundry.core.errors import ConfigError
+from foundry.core.errors import ConfigError, SandboxViolation
 from foundry.core.session import Session
+from foundry.security.sandbox import PathSandbox
 from foundry.versioning.git_backend import GitBackend
 
 if TYPE_CHECKING:
@@ -141,19 +142,28 @@ class MetaToolContext:
 
 
 # --- sandbox -----------------------------------------------------------------
+#
+# Phase 9: the pure path logic lives in foundry.security.sandbox
+# (PathSandbox); this module keeps the forge-session side effects —
+# recording the violation and firing the cancel token.
+
+
+def _sandbox(ctx: MetaToolContext) -> PathSandbox:
+    return PathSandbox(
+        base_dir=ctx.backend.repo_root,
+        read_roots=(
+            ctx.project_dir,
+            ctx.framework_root.resolve(),
+            *(root.resolve() for root in ctx.catalog_roots),
+        ),
+        write_root=ctx.project_dir,
+    )
 
 
 def resolve_path(ctx: MetaToolContext, raw: str) -> Path:
     """Canonicalise a meta-agent-supplied path. Relative paths resolve
     against the REPO root; symlinks are resolved before any check."""
-    path = Path(raw)
-    if not path.is_absolute():
-        path = ctx.backend.repo_root / path
-    return path.resolve()
-
-
-def _is_under(path: Path, root: Path) -> bool:
-    return path == root or path.is_relative_to(root)
+    return _sandbox(ctx).resolve(raw)
 
 
 def violation(
@@ -173,21 +183,10 @@ def check_read_path(
     ctx: MetaToolContext, session: Session, raw: str, *, tool: str
 ) -> Path:
     """Reads: scoped project + framework root + catalog roots (docs/61)."""
-    path = resolve_path(ctx, raw)
-    allowed = (
-        ctx.project_dir,
-        ctx.framework_root.resolve(),
-        *(root.resolve() for root in ctx.catalog_roots),
-    )
-    if not any(_is_under(path, root) for root in allowed):
-        violation(
-            ctx,
-            session,
-            tool=tool,
-            detail=f"path outside sandbox: {path} (readable roots: "
-            f"{', '.join(str(r) for r in allowed)})",
-        )
-    return path
+    try:
+        return _sandbox(ctx).check_read(raw)
+    except SandboxViolation as exc:
+        violation(ctx, session, tool=tool, detail=str(exc))
 
 
 def check_write_path(
@@ -196,36 +195,11 @@ def check_write_path(
     """Writes: STRICTLY inside the scoped project; never ``evals/``; never
     ``.foundry/``; never a superseded (frozen) artifact version directory
     or a superseded prompt version file."""
-    path = resolve_path(ctx, raw)
-    project_dir = ctx.project_dir
-    if not _is_under(path, project_dir):
-        violation(
-            ctx,
-            session,
-            tool=tool,
-            detail=f"write outside the scoped project: {path} (writes are "
-            f"limited to {project_dir}; catalog and framework trees are "
-            "read-only — catalog promotion is human-gated)",
-        )
-    relative = path.relative_to(project_dir)
-    if relative.parts and relative.parts[0] == "evals":
-        violation(
-            ctx,
-            session,
-            tool=tool,
-            detail=f"write into the eval set refused: {path} — the eval is "
-            "the target; the target doesn't move (docs/60)",
-        )
-    if relative.parts and relative.parts[0] == ".foundry":
-        violation(
-            ctx,
-            session,
-            tool=tool,
-            detail=f"write into the project's .foundry/ refused: {path} — "
-            "the audit log and runtime state are the framework's record of "
-            "what happened; the meta-agent cannot rewrite its own audit "
-            "trail (Phase 6 review finding 2)",
-        )
+    try:
+        path = _sandbox(ctx).check_write(raw)
+    except SandboxViolation as exc:
+        violation(ctx, session, tool=tool, detail=str(exc))
+    relative = path.relative_to(ctx.project_dir)
     _check_version_immutability(ctx, path, relative, tool=tool)
     _check_prompt_immutability(ctx, path, relative, tool=tool)
     return path

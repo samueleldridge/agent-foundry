@@ -77,7 +77,7 @@ from foundry.core.errors import (
     OrchestrationError,
     ToolError,
 )
-from foundry.core.tool import RunContext
+from foundry.core.tool import RegisteredTool, RunContext
 from foundry.memory import DefaultMemory, build_memory, weave
 from foundry.observability.events import dispatch_event
 from foundry.observability.tracing import (
@@ -95,6 +95,7 @@ from foundry.runtime.compiled import (
     CompiledFunction,
     CompiledProject,
 )
+from foundry.security.injection import TOOL_RESULT_BOUNDARY_NOTE, wrap_tool_output
 
 EventSink = Callable[[BaseModel], None]
 
@@ -221,6 +222,10 @@ def _system_text(ca: CompiledAgent, tool_descriptions: str) -> str:
         + (
             "\n\nYou can call the following tools when they help:\n"
             + tool_descriptions
+            # docs/83: every agent that can receive tool results gets the
+            # typed-boundary note — the prompt references the boundary the
+            # runtime wraps tool outputs in.
+            + "\n\n" + TOOL_RESULT_BOUNDARY_NOTE
             if tool_descriptions
             else ""
         )
@@ -361,14 +366,34 @@ async def _dispatch_one(
         return ToolResultBlock(
             tool_use_id=block.id,
             is_error=True,
-            content=[TextBlock(text=f"{type(exc).__name__}: {exc}")],
+            content=[TextBlock(text=wrap_tool_output(
+                f"{type(exc).__name__}: {exc}",
+                tool_ref=_tool_ref_of(registered, block),
+                tool_version=_tool_version_of(registered),
+                is_error=True,
+            ))],
         )
     finally:
         await accessor.release_all()
+    # docs/83: tool output is untrusted content — interpolate it into the
+    # conversation only inside its typed boundary. The matching prompt-side
+    # note is appended in _system_text.
     return ToolResultBlock(
         tool_use_id=block.id,
-        content=[TextBlock(text=output.model_dump_json())],
+        content=[TextBlock(text=wrap_tool_output(
+            output.model_dump_json(),
+            tool_ref=_tool_ref_of(registered, block),
+            tool_version=_tool_version_of(registered),
+        ))],
     )
+
+
+def _tool_ref_of(registered: RegisteredTool | None, block: ToolUseBlock) -> str:
+    return registered.descriptor.ref if registered is not None else block.name
+
+
+def _tool_version_of(registered: RegisteredTool | None) -> str:
+    return registered.descriptor.version if registered is not None else "unknown"
 
 
 # --- agent step (node-sized slices) ---------------------------------------------------
