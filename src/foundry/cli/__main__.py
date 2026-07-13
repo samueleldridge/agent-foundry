@@ -31,6 +31,16 @@ app = typer.Typer(
 )
 
 
+@app.callback()
+def _main_callback() -> None:
+    """Install the OTel SDK per FOUNDRY_TRACING before any subcommand runs
+    (docs/80). Off by default: with FOUNDRY_TRACING unset the span/metric
+    APIs stay no-ops while the SQLite mirror + run artifacts still record."""
+    from foundry.observability.tracing import configure_observability
+
+    configure_observability()
+
+
 def _not_yet_implemented(command: str, phase: str) -> NoReturn:
     typer.echo(
         f"`foundry {command}` is not implemented yet (planned for {phase}). "
@@ -577,9 +587,91 @@ def serve(
     )
 
 
-@app.command(help="Query observability store: cost, p95, failures. Lands in Phase 9.")
-def obs() -> None:
-    _not_yet_implemented("obs", "Phase 9")
+obs_app = typer.Typer(
+    name="obs",
+    help="Query the local observability store (docs/80): cost, latency, failures.",
+    no_args_is_help=True,
+)
+app.add_typer(obs_app)
+
+_OBS_PROJECT_OPTION = typer.Option(None, "--project", help="Filter to one project.")
+_OBS_SINCE_OPTION = typer.Option(
+    None, "--since", help="Time window, e.g. 7d / 24h / 30m (default: all history)."
+)
+_OBS_JSON_OPTION = typer.Option(False, "--json", help="Machine-readable JSON output.")
+
+
+@obs_app.command(name="cost", help="Cost breakdown from recorded LLM calls.")
+def obs_cost(
+    project: str | None = _OBS_PROJECT_OPTION,
+    since: str | None = _OBS_SINCE_OPTION,
+    by: str = typer.Option("model", "--by", help="Group by: model, day, or agent."),
+    json_output: bool = _OBS_JSON_OPTION,
+) -> None:
+    from foundry.cli.obs import execute_cost
+
+    raise typer.Exit(
+        code=execute_cost(project=project, since=since, by=by, json_output=json_output)
+    )
+
+
+@obs_app.command(name="tool-failures", help="Per-tool call/failure counts.")
+def obs_tool_failures(
+    tool: str | None = typer.Option(None, "--tool", help="Filter to one tool ref."),
+    project: str | None = _OBS_PROJECT_OPTION,
+    since: str | None = _OBS_SINCE_OPTION,
+    json_output: bool = _OBS_JSON_OPTION,
+) -> None:
+    from foundry.cli.obs import execute_tool_failures
+
+    raise typer.Exit(
+        code=execute_tool_failures(
+            tool=tool, project=project, since=since, json_output=json_output
+        )
+    )
+
+
+@obs_app.command(name="p95", help="Per-model latency percentiles (p50/p95).")
+def obs_p95(
+    model: str | None = typer.Option(None, "--model", help="Filter to one model."),
+    project: str | None = _OBS_PROJECT_OPTION,
+    since: str | None = _OBS_SINCE_OPTION,
+    json_output: bool = _OBS_JSON_OPTION,
+) -> None:
+    from foundry.cli.obs import execute_p95
+
+    raise typer.Exit(
+        code=execute_p95(model=model, project=project, since=since, json_output=json_output)
+    )
+
+
+@obs_app.command(name="runs", help="Recent runs recorded in the mirror.")
+def obs_runs(
+    project: str | None = _OBS_PROJECT_OPTION,
+    since: str | None = _OBS_SINCE_OPTION,
+    status: str | None = typer.Option(
+        None, "--status", help="Filter: in_progress, success, failed, cancelled."
+    ),
+    json_output: bool = _OBS_JSON_OPTION,
+) -> None:
+    from foundry.cli.obs import execute_runs
+
+    raise typer.Exit(
+        code=execute_runs(project=project, since=since, status=status, json_output=json_output)
+    )
+
+
+@obs_app.command(name="eval-trend", help="Eval scores over time (drift surface).")
+def obs_eval_trend(
+    project: str | None = _OBS_PROJECT_OPTION,
+    since: str | None = _OBS_SINCE_OPTION,
+    json_output: bool = _OBS_JSON_OPTION,
+) -> None:
+    from foundry.cli.obs import execute_eval_trend
+
+    raise typer.Exit(
+        code=execute_eval_trend(project=project, since=since, json_output=json_output)
+    )
 
 
 def main() -> None:
