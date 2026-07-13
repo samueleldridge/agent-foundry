@@ -216,3 +216,32 @@ batch; request-size guard (structured 413) + batch-size cap.
 **v1 is COMPLETE pending the Phase 9 review session + the operator
 manual smoke test. There is no Phase 10 — next steps live in
 docs/90 § "When you're done with v1" and the v1.1 backlog memory.**
+
+## v1.0.0 final patch set (post-review, 2026-07-13)
+
+The Phase 9 review passed with five non-blocking follow-ups; all five are
+applied on top of the original tag point and `v1.0.0` was re-pointed
+(`git tag -f`, never pushed) at the patched HEAD:
+
+1. **fix(security)** — `PathSandbox` denied-subtree matching is now
+   casefolded (darwin's case-insensitive APFS let `Evals/` / `.Foundry/`
+   bypass the guard); embedded-NUL paths map to `SandboxViolation` instead
+   of leaking `ValueError`. Fuzz corpus extended accordingly.
+2. **fix(security)** — tool-result boundary: `</tool_result` escaping is
+   case-insensitive (and case-preserving for unwrap); `tool_ref` /
+   `tool_version` are attribute-escaped, closing the attribute-injection
+   hole via crafted tool names.
+3. **fix(observability)** — `state.transition` was documented + handled but
+   never emitted; agent state writes now emit it, so
+   `state_transitions.jsonl` materialises. Exit-gate tests assert its
+   content and the `capture_inputs: false` gate.
+4. **test(contract)** — the observability schema contract now lives in
+   `docs/80-observability-attributes.yaml` (referenced by docs/80 and
+   parsed by the contract test at test time); doc↔test drift fails CI.
+5. **fix(storage)** — `gc`/`archive` still honour global pins only
+   (project pins deferred to v1.1+), but the CLI now warns loudly when
+   `projects/*/.foundry/pinned_runs.txt` files exist. Documented in
+   docs/81 § Pinned retention.
+
+Post-patch DoD: ruff clean, mypy --strict clean (210 files),
+**991 passed + 1 skipped**.
