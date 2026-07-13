@@ -23,7 +23,7 @@ uv run foundry run hello --input '{"name": "Ada"}'   # bare names resolve agains
 
 This compiles `projects/hello/system.yaml` → LangGraph, calls the model (plus one catalog tool through a pooled, authenticated connection), and writes a full run artifact (events, LLM calls, tool calls, final state) under `~/.foundry/runs/<run_id>/`.
 
-Provider swap is a one-line YAML change — edit `projects/hello/system.yaml` → `model_binding.provider: openai` + a model name, set `OPENAI_API_KEY`, re-run the same command.
+Provider swap is a one-line YAML change — edit `projects/hello/agents/hello_agent/agent.yaml` → `model_binding.provider: openai` + a model name, set `OPENAI_API_KEY`, re-run the same command.
 
 Other example projects: `projects/rag_hello` (semantic cache + hybrid retrieval), `projects/memory_hello` (three memory layers + function nodes), `projects/team_hello` (supervisor + workers + human-in-the-loop approval).
 
