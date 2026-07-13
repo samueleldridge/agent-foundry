@@ -35,6 +35,8 @@ src/foundry/observability/
 
 Every `RunEvent` subclass from `10-core-framework.md` § Streaming events plus framework-emitted spans. Grouped by phase:
 
+> **Machine-checked contract**: the enforced attribute schema for this taxonomy is extracted to [80-observability-attributes.yaml](80-observability-attributes.yaml). `tests/contract/test_observability_schema.py` parses that file at test time and compares it against the code's actual event field sets and emitted span attributes, so doc ↔ code drift fails CI. The tables below stay the human-readable narrative (they include roadmap-optional attributes, `?`-marked); when the schema changes, update the YAML **and** the matching table row together.
+
 ### Run lifecycle
 
 | Event | When | Key attributes |
@@ -350,7 +352,7 @@ Standard observability backends handle the alerting. Foundry's job is providing 
 ### Contract
 
 1. **No credential leaks**: a fixture with known fake credentials run end-to-end; OTel + SQLite + run artifact scanned; no key found.
-2. **Schema stability**: snapshot test of every event's JSON schema; CI fails on unintended changes.
+2. **Schema stability**: the frozen contract lives in [80-observability-attributes.yaml](80-observability-attributes.yaml); `tests/contract/test_observability_schema.py` parses it and compares against every event's field set and every mirrored span's attributes; CI fails on unintended changes.
 
 ### Integration (Phase 9 exit gate)
 

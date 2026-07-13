@@ -1,21 +1,29 @@
 """Observability schema contracts (docs/80 § Test expectations):
 
-1. **Event-shape freeze** — every RunEvent's field set is snapshotted here.
-   Attribute shape is frozen per major version (docs/80 invariant 3):
-   additions to this table are fine (update the snapshot deliberately);
-   renames/removals are a major-version event and must fail CI first.
-2. **Span attribute spec** — every span the runtime emits (native or via
-   the event→span mirror) carries the mandatory attributes from the
-   docs/80 + docs/01 attribute table.
+1. **Event-shape freeze** — every RunEvent's field set matches the frozen
+   attribute contract. Attribute shape is frozen per major version
+   (docs/80 invariant 3): additions are fine (update the contract file
+   deliberately); renames/removals are a major-version event and must
+   fail CI first.
+2. **Span attribute spec** — every span the runtime emits via the
+   event→span mirror carries the mandatory attributes from the contract.
+
+The contract itself is NOT hardcoded here: it lives in
+``docs/80-observability-attributes.yaml`` (the machine-readable extract of
+the docs/80 attribute tables — Phase 9 review follow-up 4), so the doc and
+this test can no longer drift apart silently. The doc references the YAML;
+this test parses it at test time and compares it against the code.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, get_args
 
 import pytest
+import yaml
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
@@ -25,110 +33,46 @@ from foundry.core import events as ev
 from foundry.core.connection import AuthScheme, ConnectionDescriptor
 from foundry.observability.events import dispatch_event
 
-# --- 1. event field-shape freeze ------------------------------------------------
+# --- the machine-readable contract (docs/80-observability-attributes.yaml) ------
 
-# event literal → sorted field names. UPDATING THIS TABLE IS AN API DECISION:
-# additive fields are fine; renames/removals break downstream dashboards and
-# require a major version bump (docs/80 invariant 3).
-EVENT_FIELD_SNAPSHOT: dict[str, list[str]] = {
-    "run.started": ["inputs_hash", "pin_set_hash", "project", "system_version"],
-    "agent.started": ["agent_name", "agent_version"],
-    "agent.completed": ["agent_name", "output_summary"],
-    "function_node.started": ["node_name", "node_version"],
-    "function_node.completed": [
-        "bytes_delta", "fields_written", "latency_ms", "node_name", "node_version",
-    ],
-    "llm.started": [
-        "agent_name", "model", "prompt_messages", "prompt_tokens_estimate", "provider",
-    ],
-    "llm.delta": ["agent_name", "content_block_index", "delta"],
-    "llm.completed": [
-        "agent_name", "cost_estimate_usd", "latency_ms", "stop_reason", "usage",
-    ],
-    "tool.started": [
-        "agent_name", "input_hash", "input_preview", "tool_ref", "tool_version",
-    ],
-    "tool.completed": [
-        "agent_name", "error_category", "latency_ms", "output_preview",
-        "retry_count", "success", "tool_ref", "tool_version",
-    ],
-    "connection": ["agent_name", "connection_descriptor", "latency_ms", "lifecycle"],
-    "embed": [
-        "agent_name", "cost_estimate_usd", "embedder", "input_count",
-        "input_tokens", "latency_ms", "purpose",
-    ],
-    "cache.semantic.hit": [
-        "agent_name", "cached_at", "saved_cost_estimate_usd",
-        "saved_tokens_estimate", "similarity", "threshold",
-    ],
-    "cache.semantic.miss": ["agent_name", "threshold", "top_similarity"],
-    "cache.semantic.store": ["agent_name", "ttl_s"],
-    "cache.semantic.invalidate": [
-        "agent_name", "current_version", "previous_version", "reason",
-    ],
-    "cache.tool.hit": ["agent_name", "cached_at", "tool_ref", "tool_version"],
-    "cache.tool.miss": ["agent_name", "tool_ref", "tool_version"],
-    "cache.tool.store": ["agent_name", "tool_ref", "tool_version", "ttl_s"],
-    "warning": ["agent_name", "category", "error_class", "message"],
-    "retrieval": [
-        "agent_name", "branch_latency_ms", "branches_failed", "kind",
-        "latency_ms", "retriever", "returned", "top_k",
-    ],
-    "rerank": [
-        "after_ids", "agent_name", "before_ids", "candidates",
-        "cost_estimate_usd", "latency_ms", "reranker", "top_k",
-    ],
-    "memory.read": [
-        "agent_name", "layers_failed", "layers_read", "layers_truncated",
-        "total_tokens_estimate", "truncated",
-    ],
-    "memory.write": ["agent_name", "bytes", "layer_kind", "layer_name", "write_kind"],
-    "memory.consolidate": [
-        "agent_name", "input_tokens_summarised", "latency_ms", "layer_name",
-        "output_tokens_written", "trigger",
-    ],
-    "handoff": ["from_agent", "hop_number", "to_agent", "trigger"],
-    "state.transition": ["agent_name", "bytes_delta", "fields_written"],
-    "approval.required": ["agent_name", "approval_id", "context", "prompt"],
-    "approval.resolved": ["approval_id", "decision", "reason"],
-    "run.completed": [
-        "duration_ms", "final_output", "status", "total_cost_estimate_usd",
-        "total_input_tokens", "total_output_tokens",
-    ],
-    "run.failed": ["error"],
-    "run.cancelled": ["reason"],
-    "forge.started": [
-        "forge_run_id", "max_cost_usd", "max_iterations", "meta_agent_version",
-        "project", "threshold",
-    ],
-    "forge.iteration_started": ["directive_kind", "forge_run_id", "iteration_number"],
-    "forge.iteration_completed": [
-        "applied", "cluster_id", "commit_shas", "eval_delta", "eval_score",
-        "forge_run_id", "iteration_number",
-    ],
-    "forge.rollback": [
-        "forge_run_id", "iteration_number", "scope", "target", "to_version",
-    ],
-    "forge.terminated": [
-        "final_score", "forge_run_id", "iterations", "reason", "total_cost_usd",
-    ],
-    "meta_agent.violation": ["detail", "forge_run_id", "tool"],
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_CONTRACT_PATH = _REPO_ROOT / "docs" / "80-observability-attributes.yaml"
+
+
+def _load_contract() -> dict[str, Any]:
+    loaded = yaml.safe_load(_CONTRACT_PATH.read_text())
+    assert isinstance(loaded, dict), f"{_CONTRACT_PATH} must parse to a mapping"
+    for key in ("base_event_fields", "events", "span_base_attributes", "spans"):
+        assert key in loaded, f"{_CONTRACT_PATH} lacks the {key!r} section"
+    return loaded
+
+
+_CONTRACT = _load_contract()
+_BASE_FIELDS: set[str] = set(_CONTRACT["base_event_fields"])
+EVENT_FIELD_CONTRACT: dict[str, list[str]] = {
+    literal: sorted(fields) for literal, fields in _CONTRACT["events"].items()
+}
+_SPAN_BASE_ATTRS: set[str] = set(_CONTRACT["span_base_attributes"])
+SPAN_ATTR_CONTRACT: dict[str, set[str]] = {
+    name: set(attrs) for name, attrs in _CONTRACT["spans"].items()
 }
 
-_BASE_FIELDS = {"run_id", "sequence", "timestamp", "worker_id", "event"}
+
+# --- 1. event field-shape freeze ------------------------------------------------
 
 
 @pytest.mark.contract
-def test_every_run_event_field_set_matches_the_frozen_snapshot() -> None:
+def test_every_run_event_field_set_matches_the_frozen_contract() -> None:
     union_members = get_args(get_args(ev.RunEvent)[0])
     seen: dict[str, list[str]] = {}
     for cls in union_members:
         literal = get_args(cls.model_fields["event"].annotation)[0]
-        fields = sorted(set(cls.model_fields) - _BASE_FIELDS - {"event"})
+        fields = sorted(set(cls.model_fields) - _BASE_FIELDS)
         seen[literal] = fields
-    assert seen == EVENT_FIELD_SNAPSHOT, (
-        "RunEvent schema drift: update EVENT_FIELD_SNAPSHOT deliberately "
-        "(additive) or treat as a major-version break (rename/removal)"
+    assert seen == EVENT_FIELD_CONTRACT, (
+        "RunEvent schema drift against docs/80-observability-attributes.yaml: "
+        "update the contract file deliberately (additive) or treat as a "
+        "major-version break (rename/removal)"
     )
 
 
@@ -140,7 +84,7 @@ def test_every_event_carries_the_base_identity_fields() -> None:
         assert not missing, f"{cls.__name__} lacks base fields {missing}"
 
 
-# --- 2. span attribute spec (docs/80 + docs/01 attribute table) -----------------
+# --- 2. span attribute spec ------------------------------------------------------
 
 _RID = "R1" + "0" * 24
 _NOW = datetime(2026, 7, 13, 12, 0, 0, tzinfo=UTC)
@@ -150,121 +94,86 @@ def _base(seq: int = 0) -> dict[str, Any]:
     return {"run_id": _RID, "sequence": seq, "timestamp": _NOW, "worker_id": "host:1"}
 
 
-# span name → (event instance, mandatory attribute keys per docs/80 table).
-# run_id / sequence / timestamp / worker_id are asserted for every span.
-def _mirror_cases() -> list[tuple[str, BaseModel, set[str]]]:
+# span name → a representative event instance; the mandatory attribute set
+# comes from the contract file, NOT from this table.
+def _mirror_cases() -> dict[str, BaseModel]:
     descriptor = ConnectionDescriptor(
         ref="catalog/http_service@v1",
         slot="service",
         auth_scheme=AuthScheme.API_KEY,
         config_hash="deadbeef",
     )
-    return [
-        (
-            "foundry.tool",
-            ev.ToolCompleted(
-                **_base(), agent_name="a", tool_ref="local/t", tool_version="v1",
-                success=True, latency_ms=10,
-            ),
-            {"agent_name", "tool_ref", "tool_version", "success", "latency_ms",
-             "retry_count"},
+    return {
+        "foundry.tool": ev.ToolCompleted(
+            **_base(), agent_name="a", tool_ref="local/t", tool_version="v1",
+            success=True, latency_ms=10,
         ),
-        (
-            "foundry.handoff",
-            ev.Handoff(
-                **_base(), from_agent="a", to_agent="b", trigger="rule", hop_number=1,
-            ),
-            {"from_agent", "to_agent", "trigger", "hop_number"},
+        "foundry.handoff": ev.Handoff(
+            **_base(), from_agent="a", to_agent="b", trigger="rule", hop_number=1,
         ),
-        (
-            "foundry.state_transition",
-            ev.StateTransition(**_base(), agent_name="a", fields_written=["x"]),
-            {"agent_name", "fields_written", "bytes_delta"},
+        "foundry.state_transition": ev.StateTransition(
+            **_base(), agent_name="a", fields_written=["x"],
         ),
-        (
-            "foundry.function_node",
-            ev.FunctionNodeCompleted(
-                **_base(), node_name="n", node_version="v1", fields_written=["x"],
-                bytes_delta=1, latency_ms=2,
-            ),
-            {"node_name", "fields_written", "bytes_delta", "latency_ms"},
+        "foundry.function_node": ev.FunctionNodeCompleted(
+            **_base(), node_name="n", node_version="v1", fields_written=["x"],
+            bytes_delta=1, latency_ms=2,
         ),
-        (
-            "foundry.connection",
-            ev.ConnectionEvent(
-                **_base(), agent_name="a", connection_descriptor=descriptor,
-                lifecycle="acquire", latency_ms=1,
-            ),
-            {"connection_ref", "slot", "auth_scheme", "config_hash", "lifecycle",
-             "latency_ms"},
+        "foundry.connection": ev.ConnectionEvent(
+            **_base(), agent_name="a", connection_descriptor=descriptor,
+            lifecycle="acquire", latency_ms=1,
         ),
-        (
-            "foundry.embed",
-            ev.EmbedCall(
-                **_base(), agent_name="a", embedder="e", input_count=1,
-                input_tokens=8, purpose="query", latency_ms=3,
-            ),
-            {"embedder", "input_count", "input_tokens", "purpose", "latency_ms"},
+        "foundry.embed": ev.EmbedCall(
+            **_base(), agent_name="a", embedder="e", input_count=1,
+            input_tokens=8, purpose="query", latency_ms=3,
         ),
-        (
-            "foundry.cache.semantic",
-            ev.SemanticCacheHitEvent(
-                **_base(), agent_name="a", similarity=0.97, threshold=0.9,
-                cached_at=_NOW, saved_tokens_estimate=100,
-                saved_cost_estimate_usd=Decimal("0.001"),
-            ),
-            {"agent_name", "similarity", "threshold", "cached_at"},
+        "foundry.cache.semantic": ev.SemanticCacheHitEvent(
+            **_base(), agent_name="a", similarity=0.97, threshold=0.9,
+            cached_at=_NOW, saved_tokens_estimate=100,
+            saved_cost_estimate_usd=Decimal("0.001"),
         ),
-        (
-            "foundry.cache.tool",
-            ev.ToolCacheHit(
-                **_base(), agent_name="a", tool_ref="local/t", tool_version="v1",
-                cached_at=_NOW,
-            ),
-            {"agent_name", "tool_ref", "tool_version", "cached_at"},
+        "foundry.cache.tool": ev.ToolCacheHit(
+            **_base(), agent_name="a", tool_ref="local/t", tool_version="v1",
+            cached_at=_NOW,
         ),
-        (
-            "foundry.retrieval",
-            ev.RetrievalEvent(
-                **_base(), agent_name="a", retriever="r", kind="dense", top_k=5,
-                returned=3, latency_ms=4,
-            ),
-            {"retriever", "kind", "top_k", "returned", "latency_ms"},
+        "foundry.retrieval": ev.RetrievalEvent(
+            **_base(), agent_name="a", retriever="r", kind="dense", top_k=5,
+            returned=3, latency_ms=4,
         ),
-        (
-            "foundry.rerank",
-            ev.RerankEvent(
-                **_base(), agent_name="a", reranker="rr", candidates=10, top_k=3,
-                latency_ms=5,
-            ),
-            {"reranker", "candidates", "top_k", "latency_ms"},
+        "foundry.rerank": ev.RerankEvent(
+            **_base(), agent_name="a", reranker="rr", candidates=10, top_k=3,
+            latency_ms=5,
         ),
-        (
-            "foundry.memory",
-            ev.MemoryWriteEvent(
-                **_base(), agent_name="a", layer_name="working",
-                layer_kind="working", write_kind="message", bytes=64,
-            ),
-            {"agent_name", "layer_name", "layer_kind", "write_kind"},
+        "foundry.memory": ev.MemoryWriteEvent(
+            **_base(), agent_name="a", layer_name="working",
+            layer_kind="working", write_kind="message", bytes=64,
         ),
-        (
-            "foundry.approval",
-            ev.ApprovalRequiredEvent(
-                **_base(), agent_name="a", approval_id="ap1", prompt="ok?",
-            ),
-            {"agent_name", "approval_id", "prompt"},
+        "foundry.approval": ev.ApprovalRequiredEvent(
+            **_base(), agent_name="a", approval_id="ap1", prompt="ok?",
         ),
-    ]
+    }
+
+
+@pytest.mark.contract
+def test_every_contract_span_has_a_probe_case() -> None:
+    """The contract file and this test's probe events cover the same span
+    set — an addition to either side without the other fails here."""
+    assert set(_mirror_cases()) == set(SPAN_ATTR_CONTRACT), (
+        "span set drift between docs/80-observability-attributes.yaml and "
+        "the probe events in this test"
+    )
 
 
 @pytest.mark.contract
 def test_span_mirror_attribute_spec(span_exporter: InMemorySpanExporter) -> None:
     cases = _mirror_cases()
-    for _, event, _ in cases:
+    for event in cases.values():
         dispatch_event(event)
     spans = {span.name: span for span in span_exporter.get_finished_spans()}
-    for name, _, required in cases:
+    for name, required in SPAN_ATTR_CONTRACT.items():
         assert name in spans, f"span {name} not emitted"
         attributes = dict(spans[name].attributes or {})
-        missing = ({"run_id", "sequence", "worker_id"} | required) - set(attributes)
-        assert not missing, f"span {name} missing mandatory attributes {missing}"
+        missing = (_SPAN_BASE_ATTRS | required) - set(attributes)
+        assert not missing, (
+            f"span {name} missing mandatory attributes {missing} (contract: "
+            "docs/80-observability-attributes.yaml)"
+        )

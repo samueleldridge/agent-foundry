@@ -1,0 +1,113 @@
+# 80 — Observability attribute contract (machine-readable)
+#
+# This file is the FROZEN attribute schema for the event taxonomy in
+# 80-observability.md (invariant 3: attribute shape is frozen per major
+# version). It is parsed at test time by
+# tests/contract/test_observability_schema.py and compared against the
+# code's actual RunEvent field sets and emitted span attributes, so
+# doc <-> code drift fails CI instead of staying silent.
+#
+# UPDATING THIS FILE IS AN API DECISION:
+# - additive fields/attributes are fine (update deliberately, keep sorted);
+# - renames/removals break downstream dashboards and require a major
+#   version bump (80-observability.md invariant 3).
+#
+# The markdown tables in 80-observability.md remain the human-readable
+# narrative (including roadmap-optional attributes); THIS file is the
+# enforced contract.
+
+# Identity fields carried by every RunEvent (docs/80 invariant: every event
+# has a run_id, timestamp, sequence, worker_id).
+base_event_fields: [run_id, sequence, timestamp, worker_id, event]
+
+# Event literal -> sorted payload field names (base fields excluded).
+events:
+  run.started: [inputs_hash, pin_set_hash, project, system_version]
+  agent.started: [agent_name, agent_version]
+  agent.completed: [agent_name, output_summary]
+  function_node.started: [node_name, node_version]
+  function_node.completed:
+    [bytes_delta, fields_written, latency_ms, node_name, node_version]
+  llm.started:
+    [agent_name, model, prompt_messages, prompt_tokens_estimate, provider]
+  llm.delta: [agent_name, content_block_index, delta]
+  llm.completed:
+    [agent_name, cost_estimate_usd, latency_ms, stop_reason, usage]
+  tool.started:
+    [agent_name, input_hash, input_preview, tool_ref, tool_version]
+  tool.completed:
+    [agent_name, error_category, latency_ms, output_preview,
+     retry_count, success, tool_ref, tool_version]
+  connection: [agent_name, connection_descriptor, latency_ms, lifecycle]
+  embed:
+    [agent_name, cost_estimate_usd, embedder, input_count,
+     input_tokens, latency_ms, purpose]
+  cache.semantic.hit:
+    [agent_name, cached_at, saved_cost_estimate_usd,
+     saved_tokens_estimate, similarity, threshold]
+  cache.semantic.miss: [agent_name, threshold, top_similarity]
+  cache.semantic.store: [agent_name, ttl_s]
+  cache.semantic.invalidate:
+    [agent_name, current_version, previous_version, reason]
+  cache.tool.hit: [agent_name, cached_at, tool_ref, tool_version]
+  cache.tool.miss: [agent_name, tool_ref, tool_version]
+  cache.tool.store: [agent_name, tool_ref, tool_version, ttl_s]
+  warning: [agent_name, category, error_class, message]
+  retrieval:
+    [agent_name, branch_latency_ms, branches_failed, kind,
+     latency_ms, retriever, returned, top_k]
+  rerank:
+    [after_ids, agent_name, before_ids, candidates,
+     cost_estimate_usd, latency_ms, reranker, top_k]
+  memory.read:
+    [agent_name, layers_failed, layers_read, layers_truncated,
+     total_tokens_estimate, truncated]
+  memory.write: [agent_name, bytes, layer_kind, layer_name, write_kind]
+  memory.consolidate:
+    [agent_name, input_tokens_summarised, latency_ms, layer_name,
+     output_tokens_written, trigger]
+  handoff: [from_agent, hop_number, to_agent, trigger]
+  state.transition: [agent_name, bytes_delta, fields_written]
+  approval.required: [agent_name, approval_id, context, prompt]
+  approval.resolved: [approval_id, decision, reason]
+  run.completed:
+    [duration_ms, final_output, status, total_cost_estimate_usd,
+     total_input_tokens, total_output_tokens]
+  run.failed: [error]
+  run.cancelled: [reason]
+  forge.started:
+    [forge_run_id, max_cost_usd, max_iterations, meta_agent_version,
+     project, threshold]
+  forge.iteration_started: [directive_kind, forge_run_id, iteration_number]
+  forge.iteration_completed:
+    [applied, cluster_id, commit_shas, eval_delta, eval_score,
+     forge_run_id, iteration_number]
+  forge.rollback:
+    [forge_run_id, iteration_number, scope, target, to_version]
+  forge.terminated:
+    [final_score, forge_run_id, iterations, reason, total_cost_usd]
+  meta_agent.violation: [detail, forge_run_id, tool]
+
+# Identity attributes asserted on EVERY mirrored span.
+span_base_attributes: [run_id, sequence, worker_id]
+
+# Mirrored span name -> mandatory attributes (docs/80 trace tree; the
+# native foundry.run / foundry.node / foundry.llm / foundry.eval spans are
+# created where the work happens and are asserted in the integration
+# exit-gate tests instead).
+spans:
+  foundry.tool:
+    [agent_name, latency_ms, retry_count, success, tool_ref, tool_version]
+  foundry.handoff: [from_agent, hop_number, to_agent, trigger]
+  foundry.state_transition: [agent_name, bytes_delta, fields_written]
+  foundry.function_node:
+    [bytes_delta, fields_written, latency_ms, node_name]
+  foundry.connection:
+    [auth_scheme, config_hash, connection_ref, latency_ms, lifecycle, slot]
+  foundry.embed: [embedder, input_count, input_tokens, latency_ms, purpose]
+  foundry.cache.semantic: [agent_name, cached_at, similarity, threshold]
+  foundry.cache.tool: [agent_name, cached_at, tool_ref, tool_version]
+  foundry.retrieval: [kind, latency_ms, retriever, returned, top_k]
+  foundry.rerank: [candidates, latency_ms, reranker, top_k]
+  foundry.memory: [agent_name, layer_kind, layer_name, write_kind]
+  foundry.approval: [agent_name, approval_id, prompt]
