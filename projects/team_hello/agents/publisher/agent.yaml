@@ -1,8 +1,8 @@
 name: publisher
 description: Publishes the approved greeting draft via the publish_greeting tool (human approval required).
 model_binding:
-  provider: openai
-  model: gpt-4o-mini
+  provider: anthropic
+  model: claude-haiku-4-5
   settings:
     max_tokens: 512
     temperature: 0.0

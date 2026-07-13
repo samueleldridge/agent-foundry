@@ -1,8 +1,8 @@
 name: hello_agent
 description: Greets the caller by name, warmly and briefly, mentioning the current time fetched via the get_time tool.
 model_binding:
-  provider: openai
-  model: gpt-4o-mini
+  provider: anthropic
+  model: claude-haiku-4-5
   settings:
     max_tokens: 512
     temperature: 0.7
