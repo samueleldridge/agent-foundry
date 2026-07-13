@@ -32,11 +32,18 @@ app = typer.Typer(
 
 @app.callback()
 def _main_callback() -> None:
-    """Install the OTel SDK per FOUNDRY_TRACING before any subcommand runs
-    (docs/80). Off by default: with FOUNDRY_TRACING unset the span/metric
-    APIs stay no-ops while the SQLite mirror + run artifacts still record."""
+    """Runs once before any subcommand.
+
+    1. Load a local `.env` into os.environ (local-testing convenience;
+       real env vars always win; opt out with FOUNDRY_NO_ENV_FILE=1). This
+       lives at the CLI entry point ONLY — the library never reads `.env`.
+    2. Install the OTel SDK per FOUNDRY_TRACING (docs/80). Off by default:
+       with FOUNDRY_TRACING unset the span/metric APIs stay no-ops while the
+       SQLite mirror + run artifacts still record."""
+    from foundry.cli.dotenv import load_local_env
     from foundry.observability.tracing import configure_observability
 
+    load_local_env()
     configure_observability()
 
 

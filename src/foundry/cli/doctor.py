@@ -164,6 +164,26 @@ def _check_secrets_provider() -> DoctorCheck:
     )
 
 
+def _check_env_file() -> DoctorCheck:
+    from foundry.cli.dotenv import find_env_file, parse_env_text
+
+    if os.environ.get("FOUNDRY_NO_ENV_FILE", "").strip():
+        return _ok("env_file", "disabled (FOUNDRY_NO_ENV_FILE set) — using process env")
+    path = find_env_file()
+    if path is None:
+        return _ok("env_file", "no .env found — using process env only")
+    try:
+        keys = [k for k, _ in parse_env_text(path.read_text(encoding="utf-8"))]
+    except OSError as exc:
+        return _warn("env_file", f"{path} present but unreadable: {exc}")
+    # Names only, never values; process env still wins over any of these.
+    return _ok(
+        "env_file",
+        f"{path} — {len(keys)} var(s) auto-loaded by the CLI "
+        f"({', '.join(sorted(keys)) or 'none'}); real env wins",
+    )
+
+
 def _check_checkpointer() -> DoctorCheck:
     value = os.environ.get("FOUNDRY_CHECKPOINTER", "").strip()
     if not value:
@@ -322,6 +342,7 @@ def run_doctor_checks(*, verbose: bool = False) -> list[DoctorCheck]:
         )
     )
     checks.extend(_guarded(lambda: [_check_secrets_provider()], "secrets_provider"))
+    checks.extend(_guarded(lambda: [_check_env_file()], "env_file"))
     checks.extend(_guarded(lambda: [_check_checkpointer()], "checkpointer"))
     checks.extend(_guarded(lambda: [_check_rate_limiter()], "rate_limiter"))
     checks.extend(_guarded(lambda: [_check_tracing()], "tracing"))
