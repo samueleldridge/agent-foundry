@@ -267,6 +267,8 @@ class RunManager:
         self, input_data: dict[str, Any], *, run_id: RunId | None = None
     ) -> LiveRun:
         live = self._new_live(run_id)
+        if self.compiled.project.system.observability.capture_inputs:
+            live.writer.write_inputs(input_data)
         self._runs[str(live.run_id)] = live
         self._require_tg().start_soon(self._drive, live, input_data, None)
         self._prune()

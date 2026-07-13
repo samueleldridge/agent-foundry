@@ -107,6 +107,8 @@ def execute_run(
         pin_set_hash=compiled.pin_set_hash,
     )
     writer = RunArtifactWriter(resolved_run_id)
+    if compiled.project.system.observability.capture_inputs:
+        writer.write_inputs(input_data)
     logger.info(
         "run.starting",
         project=compiled.project.system.name,

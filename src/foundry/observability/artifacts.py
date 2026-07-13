@@ -29,7 +29,9 @@ from pydantic import BaseModel
 from foundry.core import (
     LLMCallCompleted,
     LLMCallStarted,
+    RunCompleted,
     RunId,
+    StateTransition,
     ToolCompleted,
     ToolStarted,
 )
@@ -56,6 +58,7 @@ class RunArtifactWriter:
         self._events_path = self.directory / "events.jsonl"
         self._llm_calls_path = self.directory / "llm_calls.jsonl"
         self._tool_calls_path = self.directory / "tool_calls.jsonl"
+        self._state_transitions_path = self.directory / "state_transitions.jsonl"
         self._last_llm_started: LLMCallStarted | None = None
         self._last_tool_started: ToolStarted | None = None
 
@@ -92,6 +95,13 @@ class RunArtifactWriter:
             self._last_tool_started = event
         elif isinstance(event, ToolCompleted):
             self._record_tool_call(event)
+        elif isinstance(event, StateTransition):
+            # docs/81: state mutations get their own stream alongside the
+            # full event log (per-run debugging surface).
+            with self._state_transitions_path.open("a") as fh:
+                fh.write(event.model_dump_json() + "\n")
+        elif isinstance(event, RunCompleted) and event.final_output is not None:
+            self.write_outputs(event.final_output)
 
     def _record_llm_call(self, event: LLMCallCompleted) -> None:
         started = self._last_llm_started
@@ -138,6 +148,20 @@ class RunArtifactWriter:
         }
         with self._tool_calls_path.open("a") as fh:
             fh.write(json.dumps(record) + "\n")
+
+    def write_inputs(self, inputs: dict[str, Any]) -> None:
+        """Persist the request input (docs/81 inputs.json). Callers honour
+        ObservabilityConfig.capture_inputs before calling."""
+        (self.directory / "inputs.json").write_text(
+            json.dumps({"inputs": _jsonable(inputs)}, indent=2, default=str) + "\n"
+        )
+
+    def write_outputs(self, output: Any) -> None:
+        """Persist the final output (docs/81 outputs.json); called from the
+        run.completed event so every terminal run leaves one."""
+        (self.directory / "outputs.json").write_text(
+            json.dumps({"output": _jsonable(output)}, indent=2, default=str) + "\n"
+        )
 
     def write_final_state(self, state: dict[str, Any]) -> None:
         """Persist the run's final state projection (final_state.json) —
