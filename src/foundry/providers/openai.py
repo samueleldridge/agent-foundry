@@ -155,10 +155,16 @@ class OpenAIProvider(ProviderAdapter):
                 else "max_tokens"
             )
             body[key] = settings.max_tokens
-        if settings.temperature is not None:
-            body["temperature"] = settings.temperature
-        if settings.top_p is not None:
-            body["top_p"] = settings.top_p
+        # Reasoning models (o-series, gpt-5 family) accept ONLY the default
+        # sampling params — a non-default `temperature`/`top_p` is a 400. The
+        # meta-agent sets temperature 0.1 and deterministic evals force 0.0, so
+        # we drop both here rather than let callers 400 against every reasoning
+        # model. Non-reasoning models keep the caller's values.
+        if not self.capabilities.reasoning_effort:
+            if settings.temperature is not None:
+                body["temperature"] = settings.temperature
+            if settings.top_p is not None:
+                body["top_p"] = settings.top_p
         if settings.stop_sequences:
             body["stop"] = settings.stop_sequences
         if settings.seed is not None:

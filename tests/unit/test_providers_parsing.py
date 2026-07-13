@@ -153,6 +153,23 @@ def test_openai_reasoning_model_uses_max_completion_tokens() -> None:
 
 
 @pytest.mark.unit
+def test_openai_reasoning_model_drops_temperature_and_top_p() -> None:
+    from foundry.providers import ModelSettings
+
+    reasoning = _adapter("openai", "gpt-5-mini")
+    plain = _adapter("openai", "gpt-4o")
+    settings = ModelSettings(temperature=0.0, top_p=0.5, max_tokens=100)
+    r_body = reasoning._build_request([], [], settings).body
+    p_body = plain._build_request([], [], settings).body
+    # Reasoning models reject non-default sampling params -> omitted.
+    assert "temperature" not in r_body
+    assert "top_p" not in r_body
+    # Non-reasoning models keep the caller's values.
+    assert p_body["temperature"] == 0.0
+    assert p_body["top_p"] == 0.5
+
+
+@pytest.mark.unit
 def test_openai_content_filter_classified_as_content_policy() -> None:
     adapter = _adapter("openai", "gpt-4o")
     err = adapter._classify_http_error(
