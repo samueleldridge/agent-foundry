@@ -1153,18 +1153,18 @@ Do NOT fix; flag for the next implementation session.
 
 Per-phase status (mark on completion):
 
-- [ ] Phase 0 — Decisions & skeleton
-- [ ] Phase 1 — Core framework + provider + config
-- [ ] Phase 2a — Tools + connections + catalog + state visibility
-- [ ] Phase 2b — Cache + embedders + retrieval
-- [ ] Phase 2c — Memory + FunctionNode
-- [ ] Phase 3 — Single-agent orchestration on LangGraph
-- [ ] Phase 4 — Eval harness
-- [ ] Phase 5 — Versioning + git + rollback + catalog promote
-- [ ] Phase 6 — Meta-agent
-- [ ] Phase 7 — Multi-agent orchestration + HITL
-- [ ] Phase 8 — API + streaming + scaling
-- [ ] Phase 9 — Observability + dev UX + security + deploy
+- [x] Phase 0 — Decisions & skeleton (2026-06-01)
+- [x] Phase 1 — Core framework + provider + config (2026-07-07)
+- [x] Phase 2a — Tools + connections + catalog + state visibility (2026-07-08)
+- [x] Phase 2b — Cache + embedders + retrieval (2026-07-08)
+- [x] Phase 2c — Memory + FunctionNode (2026-07-08)
+- [x] Phase 3 — Single-agent orchestration on LangGraph (2026-07-09)
+- [x] Phase 4 — Eval harness (2026-07-09)
+- [x] Phase 5 — Versioning + git + rollback + catalog promote (2026-07-09)
+- [x] Phase 6 — Meta-agent (2026-07-10)
+- [x] Phase 7 — Multi-agent orchestration + HITL (2026-07-10)
+- [x] Phase 8 — API + streaming + scaling (2026-07-12)
+- [x] Phase 9 — Observability + dev UX + security + deploy (2026-07-13) — **v1 tagged v1.0.0**
 
 ## Lessons-learned section (operator fills in)
 

@@ -2,6 +2,16 @@
 
 This directory is the source of truth for the design of `agent-foundry`, a personal developer kit for building, evaluating, versioning, and orchestrating multi-agent systems. The docs are organised in tiers; each tier is a conceptual layer of the system and each file in a tier is a deep spec for one component of that layer.
 
+## Status: v1 COMPLETE (2026-07-13)
+
+All ten phases (0–9) are implemented, reviewed, and tagged `v1.0.0`. `src/foundry/` ships the full surface these docs specify: core framework + providers, tools/connections/caching/retrieval/memory, LangGraph orchestration + HITL, the eval harness, per-artifact versioning + rollback, the meta-agent (`foundry forge`), the FastAPI serving layer (SSE/WebSocket/batch), and the Phase 9 tier-8 slice — OTel tracing/metrics + SQLite event-mirror (`foundry obs`), pluggable artifact storage + retention, the security guardrails (path sandbox, typed tool-result boundaries, redaction), `foundry.testing` + `foundry test`/`doctor`/`review`/`deploy`, and container packaging under `deploy/`.
+
+- Per-phase ground truth: `_phase_handoffs/` (deviations + exit-gate tables), `_demos/`, `_retros/`, `_manual_tests/`.
+- The ≤5-minute end-to-end demo: `uv run python scripts/demo_phase9.py` (recorded in `_demos/phase_9.md`).
+- v1.1 candidates live in the operator's backlog memory (schema-only eval gen, mid-iteration HITL, drift daemon, forge web UI, native provider streaming, Postgres checkpointer, `foundry obs trace`, ...).
+
+Docs remain normative for maintenance: where an implementation deviates deliberately, the phase handoff records it.
+
 ## How to read these docs
 
 Read Tier 0 first — it frames everything else.
