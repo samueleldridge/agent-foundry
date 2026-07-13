@@ -22,6 +22,8 @@ scanning:
 
 from __future__ import annotations
 
+import re
+
 BOUNDARY_TAG = "tool_result"
 
 TOOL_RESULT_BOUNDARY_NOTE = (
@@ -37,12 +39,30 @@ that can receive tool results (docs/83 exit gate: the interpolation
 boundary is referenced explicitly by the agent prompt)."""
 
 
+_CLOSE_SEQ = re.compile(re.escape(f"</{BOUNDARY_TAG}"), re.IGNORECASE)
+_ESCAPED_CLOSE_SEQ = re.compile(re.escape(f"&lt;/{BOUNDARY_TAG}"), re.IGNORECASE)
+
+
 def _neutralise(text: str) -> str:
     """Prevent boundary breakout: a payload containing ``</tool_result``
     could close the typed boundary early and smuggle content outside it.
-    The closing sequence is HTML-entity-escaped (visible, reversible by a
-    human, inert as a tag)."""
-    return text.replace(f"</{BOUNDARY_TAG}", f"&lt;/{BOUNDARY_TAG}")
+    Matching is case-insensitive (models treat ``</TOOL_RESULT>`` as a
+    closing tag too; Phase 9 review follow-up 2) and case-preserving so
+    :func:`unwrap_tool_output` stays an inverse. The closing sequence is
+    HTML-entity-escaped (visible, reversible by a human, inert as a tag)."""
+    return _CLOSE_SEQ.sub(lambda m: "&lt;" + m.group(0)[1:], text)
+
+
+def _attr(value: str) -> str:
+    """Escape a value interpolated into a double-quoted tag attribute: a
+    crafted tool name like ``t" untrusted="false`` must not inject
+    attributes or terminate the tag (Phase 9 review follow-up 2)."""
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 
 def wrap_tool_output(
@@ -56,7 +76,7 @@ def wrap_tool_output(
     framework provides, item 1)."""
     error_attr = ' error="true"' if is_error else ""
     return (
-        f'<{BOUNDARY_TAG} tool="{tool_ref}" version="{tool_version}"'
+        f'<{BOUNDARY_TAG} tool="{_attr(tool_ref)}" version="{_attr(tool_version)}"'
         f' untrusted="true"{error_attr}>\n'
         f"{_neutralise(text)}\n"
         f"</{BOUNDARY_TAG}>"
@@ -74,7 +94,7 @@ def unwrap_tool_output(text: str) -> str:
         return text
     header_end = stripped.find(">")
     inner = stripped[header_end + 1 : -len(close_tag)].strip("\n")
-    return inner.replace(f"&lt;/{BOUNDARY_TAG}", f"</{BOUNDARY_TAG}")
+    return _ESCAPED_CLOSE_SEQ.sub(lambda m: "<" + m.group(0)[len("&lt;") :], inner)
 
 
 __all__ = [
