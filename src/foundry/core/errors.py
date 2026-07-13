@@ -360,6 +360,44 @@ class CatalogPromotionRefused(VersioningError):
     eval cannot run (docs/50 § Versioning failure modes)."""
 
 
+# --- storage (docs/81) -------------------------------------------------------
+
+
+class StorageError(FoundryError):
+    """Artifact-storage backend failure: backend unreachable, auth failed,
+    key missing, archive corrupt (docs/81 § Failure modes)."""
+
+
+class StorageBackendUnavailable(StorageError):
+    """The configured backend's SDK is not installed or the service is
+    unreachable. Lazy-import policy: fail closed with an install hint."""
+
+
+class StorageKeyNotFound(StorageError):
+    pass
+
+
+# --- security (docs/83) ------------------------------------------------------
+
+
+class SecurityError(FoundryError):
+    """Structural security-control refusal (docs/83). Raised by the path
+    sandbox and validators; never carries the offending secret content."""
+
+
+class SandboxViolation(SecurityError):
+    """A path escaped the sandbox: traversal, symlink escape, catalog or
+    framework write, absolute path outside allowed roots (docs/83)."""
+
+
+# --- deploy (docs/84) --------------------------------------------------------
+
+
+class DeployError(FoundryError):
+    """`foundry deploy` failure. ``context['exit_code']`` carries the docs/84
+    exit-code contract (1 eval-gate, 2 platform, 3 image, 4 manifest)."""
+
+
 __all__ = [
     "ApprovalRequired",
     "CacheBackendError",
@@ -385,6 +423,7 @@ __all__ = [
     "ConnectionTimeoutError",
     "CostBudgetExceeded",
     "CyclicDependencyError",
+    "DeployError",
     "EmbedderAuthError",
     "EmbedderConfigError",
     "EmbedderError",
@@ -412,7 +451,12 @@ __all__ = [
     "RetrievalError",
     "RollbackError",
     "RunCancelled",
+    "SandboxViolation",
+    "SecurityError",
     "StateVisibilityError",
+    "StorageBackendUnavailable",
+    "StorageError",
+    "StorageKeyNotFound",
     "ToolError",
     "ToolHandlerError",
     "ToolInputValidationError",
