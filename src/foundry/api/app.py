@@ -49,6 +49,7 @@ from foundry.api.runs import RunManager
 from foundry.api.schemas import derive_input_model, derive_output_model
 from foundry.api.worker import WorkerState
 from foundry.core.errors import FoundryError
+from foundry.observability.tracing import configure_observability
 from foundry.runtime.langgraph_adapter import compile_project
 
 _FRAMEWORK_VERSION = "0.1.0"  # mirrors pyproject [project].version
@@ -162,6 +163,7 @@ def create_app(
     (tests). All construction is eager: a broken project fails HERE, not
     on the first request.
     """
+    configure_observability()
     compiled = compile_project(Path(project_path), transport=transport)
     input_model = derive_input_model(compiled)
     output_model = derive_output_model(compiled)

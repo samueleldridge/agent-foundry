@@ -59,7 +59,79 @@ def foundry_span(name: str, attributes: dict[str, Any]) -> Iterator[Span]:
         yield span
 
 
+_CONFIGURED_MODE: str | None = None
+
+
+def configure_observability(*, mode: str | None = None) -> str:
+    """Install the OTel SDK per ``FOUNDRY_TRACING`` (docs/80 § Backend
+    integration patterns). Idempotent per process — the first call wins
+    (OTel forbids replacing a global TracerProvider).
+
+    Modes: ``off`` (default — API no-ops; the SQLite mirror and run
+    artifacts still capture everything), ``console``, ``otel`` (OTLP),
+    ``langsmith``, ``langfuse``. Metrics export is wired for ``otel`` and
+    ``console``; the LangSmith/Langfuse ingests are trace-only.
+    """
+    global _CONFIGURED_MODE
+    if _CONFIGURED_MODE is not None:
+        return _CONFIGURED_MODE
+    resolved = (mode or os.environ.get("FOUNDRY_TRACING", "")).strip().lower()
+    if resolved in ("", "off", "none", "0", "false"):
+        _CONFIGURED_MODE = "off"
+        return "off"
+
+    from opentelemetry import metrics as otel_metrics
+    from opentelemetry.sdk.metrics import MeterProvider
+    from opentelemetry.sdk.metrics.export import (
+        ConsoleMetricExporter,
+        MetricExporter,
+        PeriodicExportingMetricReader,
+    )
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+    from foundry.observability import exporters
+
+    metric_exporter: MetricExporter | None
+    if resolved == "console":
+        span_exporter = exporters.build_console_exporter()
+        metric_exporter = ConsoleMetricExporter()
+    elif resolved == "otel":
+        span_exporter = exporters.build_otlp_exporter()
+        metric_exporter = exporters.build_otlp_metric_exporter()
+    elif resolved == "langsmith":
+        span_exporter = exporters.build_langsmith_exporter()
+        metric_exporter = None
+    elif resolved == "langfuse":
+        span_exporter = exporters.build_langfuse_exporter()
+        metric_exporter = None
+    else:
+        from foundry.core.errors import ConfigError
+
+        raise ConfigError(
+            f"unknown FOUNDRY_TRACING mode {resolved!r}: expected off, console, "
+            "otel, langsmith, or langfuse",
+            context={"mode": resolved},
+        )
+
+    resource = Resource.create(
+        {"service.name": os.environ.get("OTEL_SERVICE_NAME", "foundry")}
+    )
+    provider = TracerProvider(resource=resource)
+    provider.add_span_processor(BatchSpanProcessor(span_exporter))
+    trace.set_tracer_provider(provider)
+    if metric_exporter is not None:
+        reader = PeriodicExportingMetricReader(metric_exporter)
+        otel_metrics.set_meter_provider(
+            MeterProvider(resource=resource, metric_readers=[reader])
+        )
+    _CONFIGURED_MODE = resolved
+    return resolved
+
+
 __all__ = [
+    "configure_observability",
     "foundry_span",
     "set_span_attributes",
     "worker_id",

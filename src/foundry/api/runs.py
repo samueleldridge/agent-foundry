@@ -51,6 +51,7 @@ from foundry.core import (
 )
 from foundry.core.errors import FoundryError, OrchestrationError
 from foundry.observability.artifacts import RunArtifactWriter
+from foundry.observability.events import dispatch_event
 from foundry.observability.logging import run_logger
 from foundry.runtime.compiled import CompiledProject
 from foundry.runtime.langgraph_adapter import run_project
@@ -470,6 +471,9 @@ class RunManager:
             reason=reason,
         )
         live.sink(event)
+        # Synthesized outside the EventEmitter, so mirror it into the
+        # observability transports explicitly (docs/80 invariant 4).
+        dispatch_event(event)
         live.writer.write_metadata(
             project=self.project,
             status=status,

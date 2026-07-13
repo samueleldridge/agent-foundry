@@ -79,6 +79,7 @@ from foundry.core.errors import (
 )
 from foundry.core.tool import RunContext
 from foundry.memory import DefaultMemory, build_memory, weave
+from foundry.observability.events import dispatch_event
 from foundry.observability.tracing import (
     foundry_span,
     set_span_attributes,
@@ -134,6 +135,10 @@ class EventEmitter:
         self._sequence += 1
         if self._sink is not None:
             self._sink(event)
+        # Phase 9: fan the same event out to the observability transports
+        # (span mirror + OTel metrics + SQLite mirror). Degradation-guarded —
+        # an exporter failure never takes the run down (docs/80).
+        dispatch_event(event)
         if self._session.logger is not None:
             self._session.logger.info(
                 str(getattr(event, "event", event_cls.__name__)),

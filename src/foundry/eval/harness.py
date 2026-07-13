@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import structlog
 from pydantic import BaseModel, ValidationError
 
 from foundry.catalog.loader import LoadedToolVersion, load_tool_version
@@ -75,6 +76,8 @@ from foundry.eval.schemas import (
 )
 from foundry.eval.scorers import Scorer, ScorerServices, build_scorers
 from foundry.eval.scorers.llm_judge import judge_cost
+from foundry.observability.events import get_store
+from foundry.observability.metrics import get_metrics_recorder
 from foundry.observability.tracing import foundry_span, set_span_attributes
 from foundry.retrieval import build_retriever_accessor
 from foundry.runtime.compiled import CompiledProject
@@ -955,7 +958,48 @@ def write_eval_artifact(
         }
         with history.open("a") as fh:
             fh.write(json.dumps(entry) + "\n")
+    _mirror_eval_result(result, project_dir=project_dir)
     return directory
+
+
+_obs_log = structlog.get_logger("foundry.observability")
+
+
+def _mirror_eval_result(result: EvalRunResult, *, project_dir: Path | None) -> None:
+    """Mirror the eval into the SQLite store + OTel metrics (docs/80
+    `evals` table + `foundry.eval.*` instruments). Degradation-guarded:
+    observability failures never fail the eval run."""
+    project = project_dir.name if project_dir is not None else ""
+    try:
+        get_store().record_eval(
+            eval_run_id=str(result.eval_run_id),
+            project=project,
+            eval_name=result.eval_name,
+            target_ref=result.target_ref,
+            target_version=result.target_version,
+            eval_spec_hash=result.eval_spec_hash,
+            score=result.score,
+            threshold=result.threshold,
+            passed=result.passed,
+            cases_total=result.cases_total,
+            cases_passed=result.cases_passed,
+            cost_total_usd=(
+                float(result.cost_total_usd) if result.cost_total_usd is not None else None
+            ),
+            completed_at=result.completed_at.isoformat(),
+        )
+        get_metrics_recorder().record_eval(
+            project=project,
+            target_ref=result.target_ref,
+            eval_spec_hash=result.eval_spec_hash,
+            score=result.score,
+        )
+    except Exception as exc:
+        _obs_log.warning(
+            "observability.degraded",
+            subsystem="eval_mirror",
+            error=f"{type(exc).__name__}: {exc}",
+        )
 
 
 def load_eval_result(ref: str | Path) -> EvalRunResult:

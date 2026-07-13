@@ -36,6 +36,7 @@ from typing import Literal
 from foundry.core.errors import RollbackError
 from foundry.core.types import RunId
 from foundry.observability.logging import run_logger
+from foundry.observability.metrics import get_metrics_recorder
 from foundry.observability.tracing import foundry_span
 from foundry.versioning.audit import (
     AuditEntry,
@@ -429,6 +430,9 @@ def execute_rollback(
     op_run_id = str(RunId.new())
     logger = run_logger(op_run_id)
 
+    get_metrics_recorder().record_rollback(
+        project=plan.project_name, granularity=plan.granularity
+    )
     with foundry_span(
         "foundry.rollback",
         {
