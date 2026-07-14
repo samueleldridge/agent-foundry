@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This doc is the operator's playbook for implementing `agent-foundry` from the design specs. It mirrors the ten phases in `03-development-phases.md` (Phases 0–9) and adds the implementation workflow: **paste-ready prompts for fresh Claude Code sessions per phase**, **explicit stop gates + commit checkpoints**, and **review prompts to verify each phase from a fresh session**.
+This doc is the operator's playbook for implementing `agent-foundry` from the design specs. It mirrors the phases in `03-development-phases.md` (Phases 0–9, which shipped v1.0.0, plus the appended Phase 10 — Foundry Studio, the v1.1 headline) and adds the implementation workflow: **paste-ready prompts for fresh Claude Code sessions per phase**, **explicit stop gates + commit checkpoints**, and **review prompts to verify each phase from a fresh session**.
 
 The point of the fresh-session pattern: a single Claude Code session implementing all 10 phases would accumulate context bloat + drift. Each phase gets its own session with a focused prompt; the session ends at the stop gate; a separate review session validates before moving on. This pattern keeps each session sharp + makes the work auditable phase by phase.
 
@@ -1091,6 +1091,487 @@ deployment to a real environment, etc.).
 
 ---
 
+## Phase 10 — overview (Foundry Studio, v1.1)
+
+**Source of truth**: `docs/03-development-phases.md` § Phase 10 — overview, and `docs/72-web-studio.md` (the full spec).
+
+v1.0.0 is tagged; Phase 10 is the v1.1 headline: a React webapp over every CLI feature. Delivered in three sub-phases on a strict dependency DAG: **10a (control-plane backend) → 10b (React foundation + core screens) → 10c (chat + graph + forge console + widgets + packaging)**. Same fresh-session-per-sub-phase pattern as Phase 2: each sub-phase gets its own implementation session, AI review session, handoff note, and manual smoke test. **Do not bundle them.**
+
+New constraint every Phase 10 session honours: `foundry.api` MUST NOT import `foundry.studio` (run-time/dev-time boundary, enforced by ruff + contract test), and Phase 10 must not regress the v1.0.0 suite (998 tests).
+
+---
+
+## Phase 10a — Studio control-plane API + `foundry studio` CLI
+
+**Source of truth**: `docs/03-development-phases.md` § Phase 10a.
+
+### Implementation prompt for Phase 10a
+
+```
+You are implementing Phase 10a of agent-foundry (Foundry Studio backend).
+v1.0.0 (Phases 0-9) is complete and tagged. Phase 10 has three sub-phases:
+10a (this one) → 10b → 10c.
+
+READ these first (in this order):
+- docs/03-development-phases.md § Phase 10 — overview + § Phase 10a
+- docs/72-web-studio.md (FULL — your primary spec; the API-surface
+  tables and Pydantic shapes are normative)
+- docs/70-api-layer.md § Streaming + § Failure modes (the machinery
+  you reuse)
+- docs/82-dev-ux.md § CLI catalogue (the surface you mirror route-by-route)
+- src/foundry/cli/__main__.py (the full CLI surface — parity target)
+- src/foundry/api/runs.py (RunManager — reused in-process for chat)
+- src/foundry/orchestration/patterns.py (FlowPlan — walked for graph
+  export)
+- docs/_phase_handoffs/phase_9.md (v1 as-built state)
+
+DELIVERABLES (per docs/03 § Phase 10a):
+1. foundry.studio — NEW top-level module per docs/72 § Module layout:
+   app.py (FastAPI factory mounting /api + static assets), server.py,
+   schemas.py (normative Pydantic models per route), security.py
+   (PathSandbox wiring + redaction + optional bearer), events.py
+   (SSE encoding reusing foundry.api.streaming).
+2. All route groups per docs/72 § API surface: projects (+ scaffold +
+   test launch), configs (tree/read/validate/write-with-commit),
+   JSON-schema serving, catalog (list/show/files/promote/deprecate),
+   doctor, obs (cost/latency/tool-failures/eval-trend/runs), storage
+   (stats/gc/archive/pins), runs + artifacts + SSE events replay +
+   approvals + resume, evals (launch/list/show/compare),
+   versions/diff/rollback/compute-version, connections
+   (list/health/describe/refresh), forge (launch/list/show/SSE
+   events/cancel), chat (sessions/messages/SSE events/approvals),
+   graph export (compile_project → FlowPlan → GraphExport), deploy
+   (dry-run default), layouts (~/.foundry/studio/layouts.json),
+   tasks, health.
+3. ValidationResult mapping: config-loader errors → severity/message/
+   pointer/line/column/hint; text identical to the CLI's.
+4. Commit-on-save: validate → sandbox → write → commit
+   "studio(<project>): edit <path>" via the versioning helpers;
+   audit entries with operator.kind = "studio".
+5. Forge lifecycle as a supervised background task with live SSE
+   trajectory (iterations, scores, per-iteration commits, meta-tool
+   calls, sandbox violations, termination reason); cancel; 409 on a
+   concurrent forge for the same project.
+6. Chat: per-project in-process RunManager pool (SQLite checkpointer);
+   each message = one run; session SSE multiplexing with Last-Event-ID
+   resume; approval round-trip; turns-convention conversation carry
+   where the project supports it.
+7. Import boundary: nested src/foundry/api/ruff.toml banning
+   foundry.studio (and foundry.configurator), following the
+   src/foundry/core/ruff.toml precedent (re-declare the third-party
+   bans — ruff replaces, not merges, banned-api tables). Extend
+   tests/contract/test_import_boundaries.py to match.
+8. CLI: foundry studio [--host --port --dev --no-open --auth-token].
+   Serves /api + static assets (placeholder page until 10b). --dev
+   serves API-only + prints the Vite-proxy workflow. Non-loopback
+   bind without a token refuses to start.
+9. Studio observability: studio_request_id threaded into spawned
+   run_ids; foundry.studio.request spans; studio.* events mirrored
+   to the SQLite store.
+10. Tests: CLI-parity contract test (every CLI command ↔ route, encoded
+    as data from docs/72's table), credential-leak contract test
+    (planted fake secret; zero hits across all route responses),
+    scripts/smoke_studio.py exercising EVERY route against the example
+    projects with MockProvider.
+
+EXIT GATE: per docs/03 § Phase 10a (15 items — verify each before
+declaring done). Highlights you must demonstrate, not just implement:
+- CLI parity + OpenAPI served
+- validation rejects bad YAML with pointer + line; write path commits
+- sandbox refuses writes outside projects/ (traversal + symlink cases)
+- forge launch streams SSE events; chat streams + approval round-trip
+  (mock transport tests — no LLM spend in CI)
+- graph export correct for single AND supervisor fixtures
+- foundry studio boots and serves
+- ruff + mypy --strict + full pytest green; no regressions to the
+  v1.0.0 suite (998 tests)
+
+WHEN COMPLETE:
+1. Write handoff to docs/_phase_handoffs/phase_10a.md: route inventory
+   as built, schemas 10b will consume, deviations from docs/72, env
+   vars needed, MockProvider patterns used for chat/forge tests.
+2. Write the manual smoke-test checklist to
+   docs/_manual_tests/phase_10a.md (curl-driven; the operator runs it
+   by hand).
+3. Commit per logical chunk, conventional format, e.g.:
+   "feat(studio): control-plane app factory + security + schemas",
+   "feat(studio): config validate/write + commit-on-save",
+   "feat(studio): forge + chat streaming routes",
+   "feat(studio): graph export + layouts + CLI",
+   "test(studio): parity + redaction contract tests + smoke script".
+   NO co-author lines. No institution names anywhere.
+4. STOP at the exit gate. Do not start Phase 10b. Do not write any
+   frontend code. End with "Phase 10a complete; ready for review".
+
+DO NOT:
+- Create the studio/ frontend tree, package.json, or any React/TS code
+  (Phase 10b).
+- Implement widgets, chat UI, graph rendering (10b/10c — you only ship
+  the JSON/SSE they consume).
+- Import foundry.studio from foundry.api, ever.
+- Re-implement validation/compilation/versioning logic in the studio
+  layer — delegate to the existing modules.
+- Let the meta-agent or any studio route write src/foundry/ or
+  catalog/ (promote route is the only catalog mutation).
+- Add a Claude co-author line to commits.
+```
+
+### Review prompt for Phase 10a
+
+```
+You are reviewing Phase 10a of agent-foundry (Foundry Studio backend).
+
+READ:
+- docs/03-development-phases.md § Phase 10 — overview + § Phase 10a
+- docs/72-web-studio.md (the spec it implements)
+- docs/_phase_handoffs/phase_10a.md
+- Repo state
+
+VERIFY each of the 15 exit-gate items from docs/03 § Phase 10a. Run the
+commands (pytest, ruff, mypy, scripts/smoke_studio.py, foundry studio
+boot) where possible; cite file + line evidence otherwise.
+
+CRITICAL spec-compliance checks beyond the exit gate:
+- Parity test is DATA-driven from the docs/72 table (a new CLI command
+  with no route must fail it — verify by reasoning through the test).
+- ValidationResult fidelity: loader error text identical to CLI output
+  (not re-worded); pointer + line + column populated.
+- Chat reuses foundry.api.runs.RunManager (no parallel chat runtime).
+- Graph export walks FlowPlan (no flow semantics re-implemented in
+  foundry.studio.graph); nested flows produce group containers.
+- Sandbox: PathSandbox from foundry.security (not a re-implementation);
+  traversal + symlink refusal tested.
+- Redaction: every route group covered by the planted-credential test
+  (connections, runs, artifacts, forge events, config snapshot).
+- Import boundary: nested api/ruff.toml re-declares third-party bans
+  (ruff replace-not-merge trap); contract test extended; foundry serve
+  importable with no studio assets present.
+- Commit hygiene: studio(<project>) messages; no co-author lines.
+- Scope: ZERO frontend code (studio/ tree must not exist yet) — leakage
+  is a FAIL.
+
+Report:
+- Per exit-gate item: PASS / FAIL with evidence.
+- Spec compliance per critical checks.
+- Out-of-scope leakage (10b/10c work) — FAIL if any.
+- Verdict: PASS / PARTIAL / FAIL; if PARTIAL, ordered gap list.
+
+Do NOT implement; review only.
+```
+
+---
+
+## Phase 10b — React foundation + core screens
+
+**Source of truth**: `docs/03-development-phases.md` § Phase 10b.
+
+### Implementation prompt for Phase 10b
+
+```
+You are implementing Phase 10b of agent-foundry (Foundry Studio
+frontend foundation + core screens). Phases 0-9 and 10a are complete.
+
+READ these first:
+- docs/03-development-phases.md § Phase 10 — overview + § Phase 10b
+- docs/72-web-studio.md §§ Frontend architecture, Config-editing UX,
+  Security posture, Testing strategy (FULL)
+- docs/_phase_handoffs/phase_10a.md (the API you consume — route
+  inventory + schemas)
+- The served /api/openapi.json from `foundry studio --dev` (ground
+  truth for type generation)
+
+STACK (settled — do not substitute): React 19 + Vite + TypeScript
+strict; Tailwind CSS v4 + shadcn/ui (Radix) + lucide-react; TanStack
+Query; React Router; CodeMirror 6; Recharts; vitest +
+@testing-library/react + msw; npm with package-lock.json committed;
+Node ≥ 26. (@xyflow/react + react-grid-layout are 10c — do not add.)
+
+DELIVERABLES (per docs/03 § Phase 10b):
+1. studio/ top-level tree per docs/72 § Frontend layout: package.json,
+   vite.config.ts (dev proxy /api → studio port), tsconfig (strict),
+   eslint config, index.html, src/ skeleton.
+2. Foundation: shadcn/ui component library under src/components/ui/;
+   theme system (class-based dark/light, token file covering BOTH
+   modes, pre-hydration script, persisted toggle); app shell (sidebar
+   nav, project switcher, theme toggle); React Router table per
+   docs/72 § Routing map.
+3. Typed API layer: fetch client (bearer + FoundryError envelope
+   decode); types generated from /api/openapi.json (npm run gen:api;
+   generated file committed + drift-checked); TanStack Query hooks per
+   route group; useSSE hook with Last-Event-ID resume (unit-tested
+   here, consumed in 10c).
+4. Shared components: DataTable, CodeEditor (CodeMirror 6 —
+   yaml/markdown/python), DiffView, EventFeed, Recharts wrappers on
+   theme tokens, shared formatters (cost/tokens/durations/relative
+   time).
+5. Core screens: projects list + overview; config editor (file tree +
+   editor + debounced server-side validation rendered as inline
+   diagnostics at line/column + commit-on-save toast + 409
+   stale-content flow); catalog explorer (kinds → artifact → versions
+   → files; promote/deprecate dialogs); doctor page; obs dashboards
+   (cost/latency/failures/eval-trend); evals (launch/results/detail/
+   compare); versions (commits, per-artifact versions, DiffView,
+   dry-run-first rollback dialog); runs history + run detail (artifact
+   view; live SSE feed is 10c); connections; storage.
+6. Frontend tests: vitest + testing-library with msw handlers; at
+   least one happy-path + one API-error-rendering test per core
+   screen; validation-diagnostic rendering; rollback dialog flow;
+   theme persistence.
+
+EXIT GATE: per docs/03 § Phase 10b (12 items). Highlights:
+- npm ci && npm run build succeeds; vitest + tsc --noEmit + eslint
+  clean; generated types drift-check passes
+- dark/light toggle works + persists; every screen correct in BOTH
+  modes
+- config editor shows server validation errors inline at the right
+  line; save blocked while invalid; valid save → commit toast +
+  commit visible in versions screen
+- all core screens function against the REAL studio API (msw only in
+  tests)
+- no console errors on the happy path
+- backend suite untouched and green
+
+WHEN COMPLETE:
+1. Handoff to docs/_phase_handoffs/phase_10b.md: component inventory,
+   API-client patterns 10c will consume, any deviations from docs/72,
+   npm script reference.
+2. Manual smoke-test checklist to docs/_manual_tests/phase_10b.md
+   (browser walk of every core screen, both themes).
+3. Commit per logical chunk, e.g.:
+   "feat(studio-ui): vite + tailwind + shadcn foundation + theming",
+   "feat(studio-ui): typed api client + query hooks + sse hook",
+   "feat(studio-ui): config editor with server validation round-trip",
+   "feat(studio-ui): catalog + doctor + obs + evals + versions screens",
+   "test(studio-ui): vitest + msw suite".
+   NO co-author lines.
+4. STOP. Do not start Phase 10c. End with "Phase 10b complete; ready
+   for review".
+
+DO NOT:
+- Implement chat, flow graph, forge console, widgets, or dashboards
+  (Phase 10c).
+- Add @xyflow/react or react-grid-layout dependencies (10c).
+- Validate YAML client-side or re-implement any foundry semantics in
+  TypeScript — validation is the server round-trip, always.
+- Touch src/foundry/ beyond (if strictly needed) serving fixes in
+  foundry.studio — no framework changes.
+- Use yarn/pnpm/bun; npm only. Do not skip committing package-lock.json.
+- Hard-code colors — theme tokens only.
+- Add a Claude co-author line to commits.
+```
+
+### Review prompt for Phase 10b
+
+```
+You are reviewing Phase 10b of agent-foundry (Studio frontend
+foundation + core screens).
+
+READ:
+- docs/03-development-phases.md § Phase 10b
+- docs/72-web-studio.md §§ Frontend architecture, Config-editing UX,
+  Testing strategy
+- docs/_phase_handoffs/phase_10b.md
+- Repo state (studio/ tree + any backend diffs)
+
+VERIFY each of the 12 exit-gate items from docs/03 § Phase 10b. Run:
+npm ci, npm run gen:api -- --check (or the drift-check equivalent),
+npm run lint, tsc --noEmit, npm test, npm run build. Boot
+foundry studio --dev + npm run dev and walk the screens if possible.
+
+CRITICAL spec-compliance checks beyond the exit gate:
+- No foundry semantics re-implemented client-side (search for YAML
+  parsing/validation libs in package.json — presence is a red flag).
+- Types are GENERATED from OpenAPI (not hand-written mirrors).
+- Theme: token-based; grep for hard-coded hex/oklch values outside the
+  token file; both modes verified per screen.
+- Server state lives in TanStack Query only (no Redux/Zustand store
+  duplicating API data).
+- Error rendering uses the structured FoundryError envelope.
+- msw used in tests only, never shipped in the production bundle.
+- Backend untouched: git diff on src/foundry/ should be empty or
+  minimal + justified in the handoff.
+- Scope: NO chat/graph/forge/widget code, NO @xyflow/react or
+  react-grid-layout in package.json — leakage is a FAIL.
+
+Report:
+- Per exit-gate item: PASS / FAIL with evidence.
+- Spec compliance per critical checks.
+- Out-of-scope leakage — FAIL if any.
+- Verdict: PASS / PARTIAL / FAIL; if PARTIAL, ordered gap list.
+
+Do NOT implement; review only.
+```
+
+---
+
+## Phase 10c — Chat + flow graph + forge console + widget dashboards + polish + packaging
+
+**Source of truth**: `docs/03-development-phases.md` § Phase 10c.
+
+### Implementation prompt for Phase 10c
+
+```
+You are implementing Phase 10c of agent-foundry (Foundry Studio:
+real-time surfaces, widgets, polish, packaging). Phases 0-9, 10a, 10b
+are complete. This closes Phase 10 and ships the v1.1 headline.
+
+READ these first:
+- docs/03-development-phases.md § Phase 10 — overview + § Phase 10c
+- docs/72-web-studio.md §§ Widget system, Flow-graph visualisation,
+  Chat UX, Packaging, Testing strategy (FULL)
+- docs/_phase_handoffs/phase_10a.md + phase_10b.md (the API + the
+  component/hook inventory you build on)
+
+NEW DEPENDENCIES allowed in this sub-phase: @xyflow/react (React
+Flow), a dagre layout package, react-grid-layout. Nothing else new
+without noting it in the handoff.
+
+DELIVERABLES (per docs/03 § Phase 10c):
+1. Chat (docs/72 § Chat UX): streaming thread on the session SSE;
+   per-message run footer (run_id link, cost, tokens, latency);
+   collapsible activity strip (tool calls, node transitions);
+   IN-THREAD approval cards (approve / reject-with-reason) collapsing
+   to resolved badges; failed-run rendering + retry; session list +
+   reload reattach; schema-driven input form fallback for non-text
+   projects.
+2. Flow graph (docs/72 § Flow-graph visualisation): React Flow +
+   dagre auto-layout; custom nodes per kind/role; edge styling per
+   kind; node side panel (model, prompt version, tools + pins, state
+   read/write, jump links to config + runs); minimap/fit/zoom;
+   flow-graph-mini variant; system_version staleness + recompile;
+   non-compiling project → ValidationResult with a link into the
+   config editor.
+3. Forge console: launch form; live trajectory (per-iteration score
+   chart + commit list + event log); sandbox violations + termination
+   reasons surfaced prominently; cancel; history + drill-in.
+4. Widget dashboards (docs/72 § Widget system): registry with the 12
+   settled widgets (project-health, runs-feed, cost-chart,
+   latency-chart, eval-trend, doctor-panel, forge-console, chat-panel,
+   flow-graph-mini, catalog-browser, approvals-inbox, versions-panel);
+   react-grid-layout host (add/remove/drag/resize/per-widget config);
+   named dashboards; debounced persistence via PUT /api/layouts;
+   shipped default layouts (default / forge board / chat board);
+   unknown-widget placeholder tiles.
+5. Approvals inbox (cross-project) consistent with in-chat approvals.
+6. Run detail live view: EventFeed attached to in-progress runs.
+7. Polish: empty states, keyboard focus order, loading skeletons,
+   both-themes sweep, 1024px responsive check.
+8. Packaging per docs/72 § Packaging: asset resolution
+   FOUNDRY_STUDIO_ASSETS → packaged foundry/studio/_assets/ →
+   repo studio/dist/; release-build hook copying dist/ into the
+   wheel; structured missing-assets error naming the build command.
+9. docs/_manual_tests/phase_10.md — the manual browser checklist
+   covering EVERY CLI-feature-through-UI claim: one row per CLI
+   command naming its UI path, plus chat + HITL, graph on hello AND
+   team_hello, forge console, widget persistence, both themes.
+10. CI: Node job (npm ci, gen-check, lint, typecheck, test, build) +
+    scripts/smoke_studio.py gate.
+11. Update docs/91-v1_1-backlog.md: "forge web UI" delivered by
+    Phase 10; Playwright E2E recorded as v1.2 candidate.
+
+EXIT GATE: per docs/03 § Phase 10c (12 items). Highlights you must
+demonstrate:
+- chat streams live incl. approval controls; approve AND reject paths;
+  reload + studio-restart survival
+- flow graph correct for hello (single) AND team_hello (supervisor +
+  workers) from the graph-export endpoint
+- forge console shows a live trajectory with commits + scores
+- widget dashboard add/remove/drag/resize/persist; layouts survive
+  reload AND studio restart
+- foundry studio serves the PRODUCTION build end-to-end (no Vite)
+- full frontend + backend suites green; no regressions
+
+WHEN COMPLETE:
+1. Final handoff to docs/_phase_handoffs/phase_10c.md.
+2. Retro to docs/_retros/phase_10.md + demo transcript to
+   docs/_demos/phase_10.md (the hero demo from docs/03 § Phase 10c,
+   run for real).
+3. Commit per logical chunk, e.g.:
+   "feat(studio-ui): chat with streaming + in-chat HITL approvals",
+   "feat(studio-ui): flow-graph view on graph-export",
+   "feat(studio-ui): forge console with live trajectory",
+   "feat(studio-ui): widget registry + composable dashboards",
+   "build(studio): production asset packaging + CI node job",
+   "docs(studio): phase-10 manual browser checklist".
+   NO co-author lines.
+4. Suggest (do not apply) a v1.1.0 tag once the operator's manual
+   checklist pass is green.
+5. STOP. Phase 10 complete. Do not start any v1.2 work (Playwright,
+   multi-repo support, etc.).
+
+DO NOT:
+- Add Playwright or any browser-automation E2E (v1.2; manual checklist
+  is the v1.1 gate).
+- Re-implement flow semantics client-side — the graph renders
+  GraphExport JSON verbatim; layout is the only client-side computation.
+- Persist widget layouts to localStorage (server-side via /api/layouts
+  is the contract).
+- Make Node a runtime dependency of the installed package — built
+  assets only.
+- Change the control-plane API surface without updating docs/72 + the
+  parity test + regenerating frontend types (note any such change in
+  the handoff).
+- Add a Claude co-author line to commits.
+```
+
+### Review prompt for Phase 10c
+
+```
+You are reviewing Phase 10c of agent-foundry. This closes Phase 10 and
+gates the v1.1 release.
+
+READ:
+- docs/03-development-phases.md § Phase 10 — overview + § Phase 10c
+- docs/72-web-studio.md (full — final compliance pass against the spec)
+- docs/_phase_handoffs/phase_10a.md + phase_10b.md + phase_10c.md
+- docs/_manual_tests/phase_10.md
+- Repo state
+
+VERIFY each of the 12 exit-gate items from docs/03 § Phase 10c. Run
+the full gauntlet: backend (ruff, mypy --strict, pytest incl. the
+contract tests, scripts/smoke_studio.py) and frontend (npm ci,
+gen-check, lint, typecheck, test, build). Then boot plain
+`foundry studio` (production assets) and spot-check the hero demo.
+
+CRITICAL spec-compliance checks beyond the exit gate:
+- CLI-feature coverage: cross-check docs/_manual_tests/phase_10.md
+  against src/foundry/cli/__main__.py — EVERY command must have a
+  checklist row naming its UI path; any missing command is a FAIL.
+- Chat: each message maps to one run; approval resolution consistent
+  between chat and the approvals inbox; HITL pause survives a studio
+  restart (checkpointer).
+- Graph: rendering driven entirely by GraphExport JSON (no flow-type
+  branching logic beyond visual mapping in the frontend).
+- Widgets: all 12 registry entries render; unknown-widget id →
+  placeholder tile, not a crash; layouts round-trip through
+  ~/.foundry/studio/layouts.json.
+- Packaging: asset resolution order per docs/72 § Packaging; missing
+  assets → structured error; foundry serve still works with zero
+  studio assets (boundary intact end-to-end).
+- Security posture: non-loopback bind refuses without token;
+  planted-credential test still green; no telemetry/analytics calls in
+  the bundle.
+- docs/91-v1_1-backlog.md updated (forge web UI delivered; Playwright
+  → v1.2).
+
+ADDITIONAL Phase 10 cumulative checks:
+- 10a + 10b exit gates still pass (no regressions).
+- v1.0.0 suite (998 tests) still green.
+- Import boundary api ⊬ studio still enforced (ruff + contract test).
+
+Report:
+- Per exit-gate item: PASS / FAIL with evidence.
+- Cumulative regression check: CLEAN / REGRESSIONS FOUND.
+- Verdict: PASS / PARTIAL / FAIL.
+- If PASS: Phase 10 is complete — the operator runs the manual browser
+  checklist (docs/_manual_tests/phase_10.md); v1.1.0 tags only after
+  that manual pass is green.
+
+Do NOT implement; review only.
+```
+
+---
+
 ## Cross-cutting prompts
 
 ### Mid-phase recovery prompt
@@ -1165,6 +1646,9 @@ Per-phase status (mark on completion):
 - [x] Phase 7 — Multi-agent orchestration + HITL (2026-07-10)
 - [x] Phase 8 — API + streaming + scaling (2026-07-12)
 - [x] Phase 9 — Observability + dev UX + security + deploy (2026-07-13) — **v1 tagged v1.0.0**
+- [ ] Phase 10a — Studio control-plane API + `foundry studio` CLI (v1.1)
+- [ ] Phase 10b — Studio React foundation + core screens (v1.1)
+- [ ] Phase 10c — Studio chat + graph + forge console + widgets + packaging (v1.1) — **v1.1 tags v1.1.0 after the manual browser checklist passes**
 
 ## Lessons-learned section (operator fills in)
 

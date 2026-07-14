@@ -30,8 +30,11 @@ Phases correspond to doc tiers but are not 1:1 with them. Some tiers (e.g. Tier 
 | 7 | Multi-agent + HITL | Supervisor/worker with scoped state; interrupt/resume works | 6 | 4–6 days |
 | 8 | API + async runtime polish | `foundry serve` exposes a system as FastAPI with SSE streaming | 7 | 3–5 days |
 | 9 | Observability + dev UX + security + deploy | OTel traces; CLI polish; review UI skeleton; prompt-injection + tool allowlist guardrails; Dockerfile | 8 | 4–6 days |
+| 10a | Studio control plane (v1.1) | `foundry studio` serves a FastAPI control plane with a route for every CLI feature + forge/chat streaming | 9 (v1.0.0 shipped) | 4–6 days |
+| 10b | Studio React foundation + core screens (v1.1) | Projects, config editors, catalog, doctor, obs/evals/versions/runs screens against the real API; dark/light | 10a | 5–7 days |
+| 10c | Studio chat + graph + forge console + widgets (v1.1) | In-chat HITL, flow-graph view, live forge console, composable widget dashboards; packaged end-to-end serve | 10b | 5–7 days |
 
-Total calendar estimate (one engineer, focused): roughly 6–10 weeks. This is an estimate for architecture work with testing, not "AI-assisted hyper-speed."
+Total calendar estimate (one engineer, focused): roughly 6–10 weeks for v1 (Phases 0–9, shipped 2026-07-13 as v1.0.0). Phase 10 (Foundry Studio, the v1.1 headline) adds roughly 3 weeks. This is an estimate for architecture work with testing, not "AI-assisted hyper-speed."
 
 ---
 
@@ -381,6 +384,129 @@ Cumulative duration matches the original estimate (10–14 days); the split exis
 - [ ] Security: inject a tool whose output contains an obvious prompt-injection pattern ("Ignore previous instructions..."); the tool-output interpolation surrounds it with a typed boundary that the agent prompt references explicitly. Documented in `83`.
 - [ ] `docker build` + `docker run foundry-api` serves a configured project end-to-end with OTel exporting to a container-side collector.
 - [ ] A top-to-bottom demo runs in ≤5 minutes of real time: forge a tiny project, eval it, serve it, hit the API, roll back a deliberate regression, view cost metrics.
+
+---
+
+## Phase 10 — overview (Foundry Studio, v1.1)
+
+Phase 10 delivers **Foundry Studio** — the dedicated React webapp over every foundry CLI feature, per `72-web-studio.md` (the source-of-truth spec; read it before any sub-phase). v1.0.0 is the baseline; Phase 10 must not regress it.
+
+Like Phase 2, it is delivered in three sub-phases on a strict dependency DAG (**10a → 10b → 10c**), each a vertical slice with its own hero demo, exit gate, AI review session, and manual smoke test:
+
+- **10a** — the `foundry.studio` control-plane backend + `foundry studio` CLI. Everything the UI will need, testable with `curl` before a single React component exists.
+- **10b** — the React foundation (stack, theming, component library, typed API client) + every "core" screen: projects, config editors with server-side validation, catalog explorer, doctor, and the obs / evals / versions / runs / connections / storage table screens.
+- **10c** — the real-time and compositional surfaces: chat with in-chat HITL, flow-graph visualisation, live forge console, the widget dashboard system, then polish and packaging.
+
+Split rationale (same as Phase 2's): the monolith is too large for one session to hold without drift, and 10a's API is independently verifiable, which keeps the React work honest — the frontend consumes a reviewed contract instead of co-evolving with it.
+
+Boundaries that hold across all three sub-phases (from `72-web-studio.md` § Invariants):
+
+- `foundry.api` MUST NOT import `foundry.studio` (new import-boundary rule; ruff + contract test).
+- The frontend never re-implements foundry semantics; validation/compilation/versioning are server round-trips.
+- Studio writes are validated via the config loaders, committed via the versioning helpers, and sandboxed to `projects/` (PathSandbox); `src/foundry/` and `catalog/` are read-only.
+- No secrets to the browser; redaction contract-tested.
+- Browser E2E automation is out of scope (manual checklist in v1.1; Playwright is v1.2).
+
+---
+
+## Phase 10a — Studio control-plane API + `foundry studio` CLI
+
+**Hero demo after this sub-phase**: `foundry studio --dev` boots; `curl` walks the control plane end-to-end — list projects, validate a deliberately broken `agent.yaml` (structured pointer+line errors), save a fixed one (commit appears in `git log` as `studio(hello): edit ...`), export `hello`'s flow graph as JSON, launch a forge run and watch its SSE event stream, open a chat session against `hello` and stream a run including an approval round-trip.
+
+### Deliverables
+
+- **`foundry.studio`** — new top-level module per `72-web-studio.md` § Module layout: `app.py` (FastAPI factory), `server.py`, `schemas.py` (Pydantic request/response models — normative), `security.py` (PathSandbox wiring + redaction + optional bearer), `events.py` (SSE reuse of `foundry.api.streaming`).
+- **Route groups** (full shapes in `72` § API surface): projects (+ scaffold + test launch), configs (tree / read / validate / write-with-commit), JSON-schema serving, catalog (list / show / files / promote / deprecate), doctor, obs (cost / latency / tool-failures / eval-trend / runs), storage (stats / gc / archive / pins), runs + artifacts + events replay + approvals + resume, evals (launch / list / show / compare), versions / diff / rollback / compute-version, connections (list / health / describe / refresh), forge (launch / list / show / SSE events / cancel), chat (sessions / messages / SSE events / approvals), graph export (`compile_project` → `FlowPlan` → `GraphExport`), deploy (dry-run-default), layouts (GET/PUT → `~/.foundry/studio/layouts.json`), tasks, health.
+- **`ValidationResult` mapping** — config-loader errors → `{severity, message, pointer, line, column, hint}`; identical text to the CLI's.
+- **Commit-on-save** — validate → sandbox check → write → commit `studio(<project>): edit <path>` via the versioning helpers; audit-log entries with `operator.kind = "studio"`.
+- **Forge lifecycle** — background task in the app lifespan task group; live SSE trajectory (iterations, scores, commits, meta-tool calls, sandbox violations, termination reason); cancel; one-per-project 409.
+- **Chat machinery** — per-project in-process `RunManager` pool (SQLite checkpointer); each message = a run; session event multiplexing with Last-Event-ID resume; approval round-trip; `turns`-convention conversation carry where the project supports it.
+- **Import boundary** — nested `src/foundry/api/ruff.toml` banning `foundry.studio` (and `foundry.configurator`); `tests/contract/test_import_boundaries.py` extended.
+- **CLI** — `foundry studio [--host --port --dev --no-open --auth-token]`; serves `/api` + static assets (placeholder page until 10b); `--dev` documents the Vite-proxy workflow; non-loopback bind refuses to start without a token.
+- **Studio observability** — `studio_request_id` threading into spawned `run_id`s; `foundry.studio.request` spans; `studio.*` events mirrored to the SQLite store.
+- **Test scaffolding** — CLI-parity contract test (every `foundry.cli.__main__` command ↔ route), credential-leak contract test (planted fake secret, zero hits across all routes), `scripts/smoke_studio.py` exercising every route against the example projects with `MockProvider`.
+
+### Exit gate
+
+- [ ] **CLI parity**: every CLI feature has a corresponding API route; the parity contract test encodes the mapping table from `72` and fails on any uncovered command.
+- [ ] `GET /api/openapi.json` serves a valid OpenAPI schema covering every route.
+- [ ] **Validation round-trip**: `POST .../validate` with bad YAML returns structured issues with pointer + line + column + hint; message text identical to `foundry validate`'s.
+- [ ] **Write path**: `PUT` on a config file validates first (422 + issues on bad content, nothing written), then writes + commits `studio(<project>): edit <path>`; commit visible in `git log`.
+- [ ] **Sandbox**: writes targeting `src/foundry/`, `catalog/`, or any path outside the project (incl. `..` traversal and symlink escapes) → 403 `SandboxViolation` + `studio.sandbox_refused` event; catalog mutation possible ONLY via the gated promote route.
+- [ ] **Forge streaming**: `POST /api/forge` launches a background forge; `GET /api/forge/{id}/events` streams live SSE events incl. per-iteration commits + scores and the termination event; cancel works; second launch on the same project → 409.
+- [ ] **Chat round-trip** (mock transport tests): message → run streams `llm.delta`s over the session SSE; a tool raising `ApprovalRequired` surfaces `approval.required`; posting the approval resumes to `run.completed`; Last-Event-ID replay returns missed events.
+- [ ] **Graph export**: `hello` (single) and a supervisor+workers fixture both produce `GraphExport` JSON matching the schema in `72` (node kinds/roles, handoff edges bidirectional, conditional labels); non-compiling project → 422 with `ValidationResult`.
+- [ ] **Rollback via API**: dry-run returns the plan + pre-flight results; confirmed per-tool rollback produces the same single-file commit as the CLI.
+- [ ] **Layouts**: `PUT /api/layouts` persists to `~/.foundry/studio/layouts.json`; `GET` round-trips it.
+- [ ] **Redaction**: the credential-leak contract test passes — a planted fake secret in a fixture connection appears in zero route responses (connections, runs, artifacts, forge events, config snapshots).
+- [ ] **Import boundary**: ruff flags a deliberate `foundry.api` → `foundry.studio` import; contract test enforces the same; `foundry serve` runs with no studio assets present.
+- [ ] `foundry studio` boots, serves `/api/health` + the placeholder page; non-loopback `--host` without a token refuses to start; `--dev` prints the Vite workflow.
+- [ ] `scripts/smoke_studio.py` exercises every route green against the example projects.
+- [ ] Backend DoD: `ruff check` zero violations (incl. the new nested config), `mypy --strict src/foundry/` passes, full pytest suite green with **no regressions to the v1.0.0 suite (998 tests)**.
+
+---
+
+## Phase 10b — React foundation + core screens
+
+**Hero demo after this sub-phase**: `foundry studio --dev` + `npm run dev`; in the browser — flip dark/light (persists across reload), browse projects, open `hello`'s `agent.yaml`, introduce a typo and watch the server-side validation error render inline at the right line, fix + save and see the commit toast, explore the catalog down to a tool version's files, run doctor, and read cost/latency/eval-trend dashboards rendered from the real obs data.
+
+### Deliverables
+
+- **`studio/` tree** — React 19 + Vite + TypeScript (strict) per `72` § Frontend layout; npm with committed `package-lock.json`; eslint + vitest wiring; `vite.config.ts` dev proxy to the control plane.
+- **Foundation** — Tailwind v4 + shadcn/ui component library (`src/components/ui/`), lucide-react icons, theme system (class-based dark/light, token file for both modes, pre-hydration script, persisted toggle), app shell (sidebar nav, project switcher, theme toggle), React Router route table per `72` § Routing map.
+- **Typed API layer** — fetch client (bearer + error-envelope decode), types generated from `/api/openapi.json` (`npm run gen:api`, committed, drift-checked), TanStack Query hooks per route group, `useSSE` hook with Last-Event-ID resume (consumed in 10c but built + unit-tested here).
+- **Shared components** — `DataTable`, `CodeEditor` (CodeMirror 6: yaml/markdown/python), `DiffView`, `EventFeed`, Recharts chart wrappers on theme tokens, shared formatters (cost / tokens / durations / relative time).
+- **Core screens** — projects list + project overview; **config editor** (file tree + CodeMirror + debounced server validation with inline diagnostics + commit-on-save + 409 stale-content handling); catalog explorer (kinds → artifact → versions → files, promote/deprecate dialogs); doctor page (checks + re-run); obs dashboards (cost / latency / failures / eval-trend); evals screens (launch, results, per-case detail, compare); versions screen (commits, per-artifact versions, diff view, dry-run-first rollback dialog); runs history + run detail (artifact view; live event feed lands in 10c); connections (list / health / describe / refresh); storage (stats, gc/archive with dry-run, pins).
+- **Frontend test suite** — vitest + @testing-library/react with msw handlers; component tests for validation-diagnostic rendering, table screens, rollback dialog flow, theme persistence.
+
+### Exit gate
+
+- [ ] `npm run build` succeeds from a clean `npm ci`.
+- [ ] `npm test` (vitest), `tsc --noEmit`, and eslint all pass clean; generated API types match the served OpenAPI schema (drift check).
+- [ ] Dark/light toggle works, persists across reloads, and every shipped screen renders correctly in BOTH modes (no hard-coded colors — token audit).
+- [ ] Projects list + project detail render against the real studio API.
+- [ ] Config editor: server validation errors render inline at the correct line/column with the hint text; save is blocked while invalid; a valid save shows the commit toast and the commit appears in the versions screen.
+- [ ] Catalog explorer browses kinds → artifacts → versions → files read-only; promote dialog drives the gated route.
+- [ ] Doctor page renders all checks with ok/warn/fail states and re-runs on demand.
+- [ ] Cost, latency, and eval-trend dashboards render real `foundry obs` data; empty-data states are designed, not blank.
+- [ ] Evals, versions (incl. diff + dry-run rollback), runs history, connections, and storage screens all function against the real API.
+- [ ] Integration-tested via msw: each core screen has at least one test covering happy path + API-error rendering (structured `FoundryError` envelope shown, never a blank crash).
+- [ ] No console errors or unhandled promise rejections on the happy path through every shipped screen.
+- [ ] Backend suite still green (no regressions); `ruff` + `mypy --strict` still clean.
+
+---
+
+## Phase 10c — Chat + flow graph + forge console + widget dashboards + polish + packaging
+
+**Hero demo after this sub-phase**: `npm run build` then plain `foundry studio` (production assets, no Vite) — chat with `hello` and watch tokens stream, hit a HITL approval and resolve it in-chat; open `team_hello`'s flow graph and inspect the supervisor + workers; launch a forge run from the forge console and watch the live trajectory with per-iteration commits + scores; compose a dashboard from widgets (chat + forge console + cost chart + approvals inbox), drag/resize it, reload the browser and find it intact.
+
+### Deliverables
+
+- **Chat** (`72` § Chat UX) — streaming thread over the session SSE; per-message run footer (run_id link, cost, tokens, latency); collapsible activity strip (tool calls, node transitions); in-thread approval cards (approve / reject-with-reason) collapsing to resolved badges; failed-run rendering + retry; session list + reload reattach; schema-driven input form fallback for non-text projects.
+- **Flow graph** (`72` § Flow-graph visualisation) — React Flow + dagre auto-layout; custom node components per kind/role; edge styling by kind; node side panel (model, prompt version, tools + pins, state read/write, jump links); minimap/fit/zoom; stale-graph detection via `system_version` + recompile button; non-compiling project renders the `ValidationResult` with a link into the config editor.
+- **Forge console** — launch form (description, eval set, threshold, budget, model); live trajectory view (per-iteration score chart + commit list + event log); sandbox violations and terminations surfaced prominently; cancel; history of past forge runs with drill-in.
+- **Widget dashboards** (`72` § Widget system) — registry with the 12 settled widgets; react-grid-layout host (add / remove / drag / resize / per-widget config); named dashboards; layout persistence via `PUT /api/layouts` (debounced); shipped default layouts (default / forge board / chat board); unknown-widget placeholder tiles.
+- **Approvals inbox** — cross-project pending list; resolving from inbox or chat updates both surfaces.
+- **Run detail live view** — `EventFeed` attached to in-progress runs via SSE.
+- **Polish** — empty states, keyboard focus order, loading skeletons, both-themes sweep, responsive check at 1024px.
+- **Packaging** — asset resolution order per `72` § Packaging (`FOUNDRY_STUDIO_ASSETS` → packaged `_assets/` → repo `studio/dist/`); release-build hook that copies `dist/` into the wheel; `foundry studio` structured error naming the build command when assets are missing.
+- **Manual browser checklist** — `docs/_manual_tests/phase_10.md` walking **every CLI-feature-through-UI claim** (one row per CLI command → UI path), chat + HITL, graph on both fixture shapes, forge console, widget persistence, both themes.
+- **CI** — Node job (`npm ci`, gen-check, lint, typecheck, test, build) + `scripts/smoke_studio.py` gate.
+
+### Exit gate
+
+- [ ] Chat streams tokens/events live; the activity strip shows tool calls; an `approval.required` renders in-chat approval controls; approve AND reject-with-reason paths both resume the run correctly; the resolved badge persists in the thread.
+- [ ] Chat sessions survive a browser reload (thread replayed from artifacts, live stream reattached) and a studio restart with a pending approval (checkpointer resume).
+- [ ] Flow graph renders `hello` (single) AND `team_hello` (supervisor + workers) correctly from the graph-export endpoint — node roles, bidirectional handoff edges, correct terminal shape; node side panel shows tools + pins + state scopes.
+- [ ] Forge console launches a forge run and shows the live trajectory — per-iteration scores charted, per-iteration commit shas listed, termination reason surfaced; a sandbox violation event renders as a prominent alert; cancel works from the UI.
+- [ ] Widget dashboard: add / remove / drag / resize / per-widget config all work; layouts persist via the backend and **survive a full browser reload** and a studio restart; default dashboards ship and reset works.
+- [ ] All 12 registry widgets render with live data and deep-link to their full screens.
+- [ ] Approvals inbox and in-chat approvals stay consistent (resolving in one updates the other).
+- [ ] `foundry studio` serves the **production build** end-to-end — every screen functional with no Vite process; SPA history fallback works on deep links.
+- [ ] Frontend suite green: vitest (incl. graph fixtures for both shapes, approval card flow, widget persistence), `tsc --noEmit`, eslint; `npm run build` clean.
+- [ ] `scripts/smoke_studio.py` green; backend DoD holds (`ruff`, `mypy --strict`, full pytest, no regressions).
+- [ ] `docs/_manual_tests/phase_10.md` exists, covers every CLI-feature-through-UI claim (every CLI command has a checklist row naming its UI path), and the operator's manual pass is green in both themes.
+- [ ] `docs/91-v1_1-backlog.md` updated: "forge web UI" marked delivered; Playwright E2E recorded as v1.2.
 
 ---
 

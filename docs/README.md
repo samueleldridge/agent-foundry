@@ -9,6 +9,7 @@ All ten phases (0–9) are implemented, reviewed, and tagged `v1.0.0`. `src/foun
 - Per-phase ground truth: `_phase_handoffs/` (deviations + exit-gate tables), `_demos/`, `_retros/`, `_manual_tests/`.
 - The ≤5-minute end-to-end demo: `uv run python scripts/demo_phase9.py` (recorded in `_demos/phase_9.md`).
 - v1.1 candidates: [91-v1_1-backlog.md](91-v1_1-backlog.md) (consolidated from the phase handoffs; canonical copy mirrored in operator memory).
+- **v1.1 in progress — Phase 10 (Foundry Studio)**: a React webapp over every CLI feature (chat with in-chat HITL, flow-graph view, live forge console, widget dashboards), spec'd in [72-web-studio.md](72-web-studio.md) and planned as Phases 10a–10c in [03-development-phases.md](03-development-phases.md) + [90-implementation-plan.md](90-implementation-plan.md).
 
 Docs remain normative for maintenance: where an implementation deviates deliberately, the phase handoff records it.
 
@@ -33,7 +34,7 @@ After Tier 0 you can either read top-down (Tier 1 → Tier 8) or jump to a speci
 | 4 | Eval | `40-eval-harness.md` · `41-eval-driven-iteration.md` |
 | 5 | Versioning & rollback | `50-versioning-model.md` · `51-git-backbone.md` · `52-rollback-and-audit.md` |
 | 6 | Meta-agent | `60-meta-agent.md` · `61-meta-tools.md` · `62-configurator-sessions.md` |
-| 7 | API & async runtime | `70-api-layer.md` · `71-async-runtime.md` |
+| 7 | API & async runtime & web studio | `70-api-layer.md` · `71-async-runtime.md` · `72-web-studio.md` |
 | 8 | Observability, storage, dev UX, security, deploy, batch & throughput, multi-tenancy & IP | `80-observability.md` · `81-storage-and-artifacts.md` · `82-dev-ux.md` · `83-security-guardrails.md` · `84-deployment.md` · `85-batch-and-throughput.md` · `86-multi-tenancy-and-ip.md` |
 | Impl | Phased implementation plan with paste-ready prompts for fresh Claude Code sessions per phase | `90-implementation-plan.md` |
 

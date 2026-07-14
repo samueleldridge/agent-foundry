@@ -10,7 +10,7 @@ Deferred-from-v1 items, consolidated from the per-phase handoffs and reviews so 
 - Connection + function-node scaffold meta-tools (`build_connection`, `build_function_node`).
 - Schema-only eval generation.
 - Drift daemon (scheduled re-eval + alerting).
-- Forge web UI.
+- ~~Forge web UI~~ — **being delivered by Phase 10 (Foundry Studio)**, expanded from a forge-only UI to a full webapp over every CLI feature; spec in `72-web-studio.md`, build plan in `03-development-phases.md` § Phases 10a–10c. Browser E2E automation (Playwright) is deliberately excluded from Phase 10 → tracked as a **v1.2 candidate** below.
 - Cross-iteration learning / failure-pattern memory (docs/41).
 - Handler-scaffold forbidden-import lint (docs/20 deferral).
 
@@ -50,5 +50,9 @@ Deferred-from-v1 items, consolidated from the per-phase handoffs and reviews so 
 - `foundry obs trace <run_id>` tree view + raw-SQL surface.
 - Checkpoint pruning for completed threads.
 - Review TUI: textual front-end (rich-based today; `ReviewModel` is the seam).
+
+## v1.2 candidates (deferred FROM v1.1 planning)
+
+- Playwright browser E2E for Foundry Studio (Phase 10 ships a manual browser checklist instead; `72-web-studio.md` § Testing strategy).
 
 Canonical copy also lives in operator memory (`project_v1_1_backlog.md`); update both when planning v1.1.
