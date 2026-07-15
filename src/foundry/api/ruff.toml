@@ -1,0 +1,28 @@
+# Nested ruff config for `src/foundry/api/`.
+#
+# `foundry.api` is the RUN-TIME serving layer. It must not import the
+# dev-time modules:
+#   - `foundry.configurator` (docs/01 rule 4 — previously test-enforced
+#     only)
+#   - `foundry.studio` (docs/01 rule 5, added by docs/72 — `foundry serve`
+#     must stay deployable with no studio or Node-built asset present)
+#
+# Why we duplicate the third-party bans here: ruff REPLACES (does not
+# merge) the `[lint.flake8-tidy-imports.banned-api]` table when a child
+# config extends a parent. So the full root ban list must be repeated
+# alongside the api-only additions (the src/foundry/core/ruff.toml
+# precedent).
+
+extend = "../../../ruff.toml"
+
+[lint.flake8-tidy-imports.banned-api]
+# Third-party (re-declared from the root config; do not drift):
+"langgraph".msg = "Only foundry.runtime.langgraph_adapter (and _langgraph_types) may import langgraph."
+"langchain_core".msg = "Only foundry.runtime.langgraph_adapter (and _langgraph_types) may import langchain_core."
+"langchain_anthropic".msg = "Only foundry.providers.anthropic may import langchain_anthropic."
+"langchain_openai".msg = "Only foundry.providers.openai may import langchain_openai."
+"anthropic".msg = "Only foundry.providers.anthropic may import the anthropic SDK."
+"openai".msg = "Only foundry.providers.openai may import the openai SDK."
+# Foundry-internal — api only:
+"foundry.studio".msg = "api must not import foundry.studio (run-time/dev-time boundary; see docs/01 rule 5)."
+"foundry.configurator".msg = "api must not import foundry.configurator (docs/01 rule 4; previously test-enforced only)."
