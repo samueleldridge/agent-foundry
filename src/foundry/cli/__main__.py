@@ -890,6 +890,57 @@ def deploy(
     )
 
 
+_STUDIO_ROOT_ARG = typer.Argument(
+    None, help="Repo root to serve (default: the current directory)."
+)
+
+
+@app.command(
+    help="Launch Foundry Studio: the control-plane API + webapp (docs/72). "
+    "Built frontend assets resolve via FOUNDRY_STUDIO_DIST (absolute path "
+    "to the frontend repo's dist/), else a sibling "
+    "../agent-foundry-studio/dist checkout; a placeholder page serves "
+    "until the frontend is built."
+)
+def studio(
+    project_root: Path | None = _STUDIO_ROOT_ARG,
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Bind address; non-loopback requires --auth-token or "
+        "FOUNDRY_STUDIO_TOKEN.",
+    ),
+    port: int = typer.Option(8400, "--port", help="Studio port."),
+    dev: bool = typer.Option(
+        False,
+        "--dev",
+        help="Dev workflow: serve the API only + print the Vite proxy "
+        "instructions (the frontend lives in the separate "
+        "agent-foundry-studio repo).",
+    ),
+    no_open: bool = typer.Option(
+        False, "--no-open", help="Don't auto-open the browser."
+    ),
+    auth_token: str | None = typer.Option(
+        None,
+        "--auth-token",
+        help="Require Authorization: Bearer <token> on /api/*.",
+    ),
+) -> None:
+    from foundry.studio.server import execute_studio
+
+    raise typer.Exit(
+        code=execute_studio(
+            project_root,
+            host=host,
+            port=port,
+            dev=dev,
+            open_browser=not no_open,
+            auth_token=auth_token,
+        )
+    )
+
+
 def main() -> None:
     """Console-script entry point referenced from pyproject.toml."""
     app()
