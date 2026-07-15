@@ -1247,8 +1247,9 @@ CRITICAL spec-compliance checks beyond the exit gate:
   (ruff replace-not-merge trap); contract test extended; foundry serve
   importable with no studio assets present.
 - Commit hygiene: studio(<project>) messages; no co-author lines.
-- Scope: ZERO frontend code (studio/ tree must not exist yet) — leakage
-  is a FAIL.
+- Scope: ZERO frontend code in THIS repo (the frontend is the separate
+  agent-foundry-studio repository, which must not exist yet either) —
+  leakage is a FAIL.
 
 Report:
 - Per exit-gate item: PASS / FAIL with evidence.
@@ -1287,9 +1288,12 @@ Query; React Router; CodeMirror 6; Recharts; vitest +
 Node ≥ 26. (@xyflow/react + react-grid-layout are 10c — do not add.)
 
 DELIVERABLES (per docs/03 § Phase 10b):
-1. studio/ top-level tree per docs/72 § Frontend layout: package.json,
+1. The agent-foundry-studio repository (a SIBLING checkout of this
+   repo, e.g. /Users/sam/projects/agent-foundry-studio, with its OWN
+   git history) per docs/72 § Frontend layout: package.json,
    vite.config.ts (dev proxy /api → studio port), tsconfig (strict),
-   eslint config, index.html, src/ skeleton.
+   eslint config, index.html, src/ skeleton. This repo gains NO
+   studio/ tree, node_modules, or TSX — ever.
 2. Foundation: shadcn/ui component library under src/components/ui/;
    theme system (class-based dark/light, token file covering BOTH
    modes, pre-hydration script, persisted toggle); app shell (sidebar
@@ -1371,7 +1375,8 @@ READ:
 - docs/72-web-studio.md §§ Frontend architecture, Config-editing UX,
   Testing strategy
 - docs/_phase_handoffs/phase_10b.md
-- Repo state (studio/ tree + any backend diffs)
+- Repo state (the agent-foundry-studio sibling repo + any backend
+  diffs in THIS repo)
 
 VERIFY each of the 12 exit-gate items from docs/03 § Phase 10b. Run:
 npm ci, npm run gen:api -- --check (or the drift-check equivalent),
@@ -1457,14 +1462,17 @@ DELIVERABLES (per docs/03 § Phase 10c):
 7. Polish: empty states, keyboard focus order, loading skeletons,
    both-themes sweep, 1024px responsive check.
 8. Packaging per docs/72 § Packaging: asset resolution
-   FOUNDRY_STUDIO_ASSETS → packaged foundry/studio/_assets/ →
-   repo studio/dist/; release-build hook copying dist/ into the
-   wheel; structured missing-assets error naming the build command.
+   FOUNDRY_STUDIO_DIST (absolute path to the frontend repo's built
+   dist/) → packaged foundry/studio/_assets/ → the sibling
+   ../agent-foundry-studio/dist checkout; release-build hook copying
+   the frontend repo's dist/ into the wheel; the placeholder page
+   (naming the build command) when no assets resolve.
 9. docs/_manual_tests/phase_10.md — the manual browser checklist
    covering EVERY CLI-feature-through-UI claim: one row per CLI
    command naming its UI path, plus chat + HITL, graph on hello AND
    team_hello, forge console, widget persistence, both themes.
-10. CI: Node job (npm ci, gen-check, lint, typecheck, test, build) +
+10. CI: Node job (npm ci, gen-check, lint, typecheck, test, build)
+    in the agent-foundry-studio repo's own CI; this repo keeps the
     scripts/smoke_studio.py gate.
 11. Update docs/91-v1_1-backlog.md: "forge web UI" delivered by
     Phase 10; Playwright E2E recorded as v1.2 candidate.

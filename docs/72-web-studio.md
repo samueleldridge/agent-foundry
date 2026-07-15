@@ -28,7 +28,7 @@ Three load-bearing properties:
 ```
                        browser (localhost:<port>)
                               │
-                    React SPA (studio/ tree, built by Vite)
+              React SPA (the agent-foundry-studio repo, built by Vite)
                               │  fetch /api/*  ·  SSE  ·  static assets
                               ▼
    ┌───────────────────  foundry studio  ────────────────────┐
@@ -69,15 +69,17 @@ Enforcement follows the established two-layer pattern:
 
 ### As-built addendum to docs/01 § Directory layout
 
-Rather than rewriting `01-architecture-overview.md`, this section records the two additions to the target repo shape (docs/01 remains normative for everything else):
+Rather than rewriting `01-architecture-overview.md`, this section records the additions to the target layout (docs/01 remains normative for everything else):
 
 ```
 src/foundry/studio/        # NEW module — dev-time control plane (this doc)
-studio/                    # NEW top-level tree — React frontend source
-                           #   (peer of src/, catalog/, projects/, docs/)
+
+../agent-foundry-studio/   # NEW SIBLING REPOSITORY — the React frontend
+                           #   (its own git history, npm, package-lock.json;
+                           #    this repo never contains node_modules or TSX)
 ```
 
-`studio/` is the **fourth top-level tree**. Its rules: framework developers edit it (it ships with the framework, versioned with framework releases, not per-artifact); the meta-agent never writes it; project operators never need to touch it. Built assets are produced by `npm run build` into `studio/dist/` and served by `foundry.studio.server` (packaging options in § Packaging).
+**The frontend lives in a separate repository** (decided at Phase 10a): `agent-foundry-studio`, checked out as a sibling directory of this repo (e.g. `/Users/sam/projects/agent-foundry-studio`). Rules: framework developers edit it; the meta-agent never writes it; project operators never need to touch it; this repo carries **no** `studio/` tree, `node_modules`, or React/TS source. Built assets are produced by `npm run build` into the frontend repo's `dist/` and served by `foundry.studio.server` — located via `FOUNDRY_STUDIO_DIST` or the sibling-checkout convention (§ Packaging).
 
 ### Module layout — `src/foundry/studio/`
 
@@ -109,10 +111,14 @@ src/foundry/studio/
 
 Each module owns one route group and delegates to the existing framework modules — `configs.py` calls `foundry.config` loaders and `foundry.versioning` commit helpers; `forge.py` drives `foundry.configurator.session`; `chat.py` instantiates `foundry.api.runs.RunManager` per project; `graph.py` calls `foundry.orchestration.compile_project`. **No business logic is duplicated in the studio layer**; it is adapters + schemas + task supervision.
 
-### Frontend layout — `studio/`
+### Frontend layout — the `agent-foundry-studio` repository
+
+The frontend is its OWN repository (sibling checkout, e.g.
+`/Users/sam/projects/agent-foundry-studio`), with its own git history and
+npm tooling. Its internal layout:
 
 ```
-studio/
+agent-foundry-studio/      # separate repo root (sibling of this repo)
 ├── package.json           npm; package-lock.json committed; Node ≥ 26
 ├── vite.config.ts         React 19 + TS; dev proxy /api → 127.0.0.1:<port>
 ├── tsconfig.json          strict: true
@@ -379,9 +385,9 @@ foundry studio [PROJECT_ROOT]
 
 Behaviour:
 
-- **Production mode (default)**: serves `/api/*` plus the built SPA from `studio/dist/` (or the packaged assets — § Packaging) with an SPA history fallback (any non-`/api` 404 → `index.html`). Opens the browser at `http://127.0.0.1:8400`.
-- **`--dev`**: serves the API only and prints `cd studio && npm run dev` — Vite's dev server (port 5173) proxies `/api` to the studio port (configured in `vite.config.ts`), giving HMR against the live control plane. `--dev` exists so the workflow is documented in `--help`, not just in this doc.
-- Missing built assets without `--dev` → structured error naming the fix (`npm --prefix studio run build`) and exit 2.
+- **Production mode (default)**: serves `/api/*` plus the built SPA (resolved per § Packaging: `FOUNDRY_STUDIO_DIST` → packaged assets → the sibling `../agent-foundry-studio/dist` checkout) with an SPA history fallback (any non-`/api` 404 → `index.html`). Opens the browser at `http://127.0.0.1:8400`.
+- **`--dev`**: serves the API only and prints `cd ../agent-foundry-studio && npm run dev` — Vite's dev server (port 5173) proxies `/api` to the studio port (configured in the frontend repo's `vite.config.ts`), giving HMR against the live control plane. `--dev` exists so the workflow is documented in `--help`, not just in this doc.
+- Missing built assets without `--dev` → the control plane still boots and serves a "frontend not built" placeholder page naming the fix (build the `agent-foundry-studio` repo and/or set `FOUNDRY_STUDIO_DIST`). The frontend being a separate repo means a backend-only checkout is a first-class, fully working state.
 
 ## Frontend architecture
 
@@ -632,11 +638,11 @@ Frontend:
 - **`tsc --noEmit`** and **eslint** clean; generated API types drift-checked in CI.
 - **No browser E2E in v1.1**: the browser pass is the manual checklist `docs/_manual_tests/phase_10.md`, which walks every CLI-feature-through-UI claim in both themes. Playwright is the v1.2 candidate (recorded in `91-v1_1-backlog.md`).
 
-CI additions: a Node job (`npm ci && npm run gen:api -- --check && npm run lint && npm run typecheck && npm test && npm run build`) beside the Python job; the API smoke script gates merges touching `src/foundry/studio/` or `studio/`.
+CI additions: the Node job (`npm ci && npm run gen:api -- --check && npm run lint && npm run typecheck && npm test && npm run build`) lives in the `agent-foundry-studio` repo's own CI; in THIS repo the API smoke script gates merges touching `src/foundry/studio/`.
 
 ## Packaging
 
-`npm run build` → `studio/dist/`. Resolution order for `foundry.studio.server`: `FOUNDRY_STUDIO_ASSETS` env override → packaged assets under `foundry/studio/_assets/` (populated by the release build so `uv`-installed foundry ships a working studio without Node) → repo-relative `studio/dist/` (dev checkout). Node is a build-time dependency only; never a runtime requirement.
+`npm run build` (in the `agent-foundry-studio` repo) → its `dist/`. Resolution order for `foundry.studio.server`: `FOUNDRY_STUDIO_DIST` env override (absolute path to a built `dist/`) → packaged assets under `foundry/studio/_assets/` (populated by the release build so `uv`-installed foundry ships a working studio without Node) → the sibling checkout `<repo_root>/../agent-foundry-studio/dist` (the dev convention). Neither present → the placeholder page. Node is a build-time dependency of the FRONTEND repo only; never a runtime requirement here, and this repo never contains `node_modules`.
 
 ## Invariants
 
@@ -655,7 +661,7 @@ CI additions: a Node job (`npm ci && npm run gen:api -- --check && npm run lint 
 
 | Cause | Surfaced |
 |---|---|
-| Built assets missing (no `--dev`) | startup error naming `npm --prefix studio run build`; exit 2 |
+| Built assets missing (no `--dev`) | boots anyway; placeholder page names the fix (`npm run build` in `agent-foundry-studio` / `FOUNDRY_STUDIO_DIST`) |
 | Config save with invalid YAML | 422 + `ValidationResult`; editor shows inline diagnostics; nothing written |
 | Write outside `projects/` | 403 `SandboxViolation`; `studio.sandbox_refused` logged |
 | Project doesn't compile (graph/chat) | 422 with `ValidationResult`; UI links to the config editor at the failing file |
