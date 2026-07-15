@@ -35,7 +35,9 @@ class Operator(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["meta_agent", "human", "ci"]
+    kind: Literal["meta_agent", "human", "ci", "studio"]
+    """``studio`` = an operator acting through the Foundry Studio control
+    plane (docs/72 § Observability of the studio itself)."""
     forge_run_id: str | None = None
     human_supervisor: str | None = None
     """Email/username when the meta-agent ran under human supervision."""

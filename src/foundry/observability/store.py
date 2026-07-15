@@ -17,6 +17,7 @@ every handler in a degradation guard.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import threading
@@ -115,6 +116,14 @@ CREATE TABLE IF NOT EXISTS evals (
     cases_passed INTEGER NOT NULL DEFAULT 0,
     cost_total_usd REAL,
     completed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS studio_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event TEXT NOT NULL,
+    studio_request_id TEXT NOT NULL DEFAULT '',
+    project TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    timestamp TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_llm_calls_project_ts ON llm_calls (project, timestamp);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_ref ON tool_calls (tool_ref, timestamp);
@@ -235,6 +244,62 @@ class ObservabilityStore:
             self._on_handoff(event)
         elif isinstance(event, ToolCompleted):
             self._on_tool_completed(event)
+        else:
+            # Studio control-plane acts mirror into their own table so
+            # `foundry obs` surfaces can show studio actions beside forge /
+            # human ones (docs/72 § Observability of the studio itself).
+            name = getattr(event, "event", None)
+            if isinstance(name, str) and name.startswith("studio."):
+                self._on_studio_event(event)
+
+    def _on_studio_event(self, event: BaseModel) -> None:
+        data = event.model_dump(mode="json")
+        with self._lock:
+            conn = self._connection()
+            conn.execute(
+                "INSERT INTO studio_events "
+                "(event, studio_request_id, project, detail, timestamp) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    str(data.get("event", "")),
+                    str(data.get("studio_request_id", "")),
+                    str(data.get("project", "")),
+                    json.dumps(data.get("payload") or {}, default=str),
+                    str(
+                        data.get("timestamp")
+                        or datetime.now(UTC).isoformat()
+                    ),
+                ),
+            )
+            conn.commit()
+
+    def studio_events(
+        self,
+        *,
+        project: str | None = None,
+        since: datetime | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Recent studio control-plane events, newest first."""
+        where, params = self._filters(project=project, since=since)
+        with self._lock:
+            conn = self._connection()
+            rows = conn.execute(
+                "SELECT event, studio_request_id, project, detail, timestamp "
+                f"FROM studio_events {where} "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        return [
+            {
+                "event": row[0],
+                "studio_request_id": row[1],
+                "project": row[2],
+                "detail": row[3],
+                "timestamp": row[4],
+            }
+            for row in rows
+        ]
 
     def _state(self, run_id: str) -> _RunState:
         return self._runs.setdefault(run_id, _RunState())
