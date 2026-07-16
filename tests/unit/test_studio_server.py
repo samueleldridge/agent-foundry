@@ -99,9 +99,24 @@ def test_assets_resolution_order(
 
 
 @pytest.mark.unit
-def test_placeholder_page_serves_when_no_frontend_built(
-    tmp_path: Path,
+def test_explicit_dist_override_is_authoritative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """FOUNDRY_STUDIO_DIST pointing at a non-build must serve the
+    placeholder — never silently fall back to a sibling checkout."""
+    from foundry.studio.app import resolve_assets_dir
+
+    monkeypatch.setenv("FOUNDRY_STUDIO_DIST", str(tmp_path / "not-a-build"))
+    assert resolve_assets_dir(REPO_ROOT) is None
+
+
+@pytest.mark.unit
+def test_placeholder_page_serves_when_no_frontend_built(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Isolate resolution from any sibling agent-foundry-studio/dist build:
+    # an explicit override that holds no build is authoritative (see above).
+    monkeypatch.setenv("FOUNDRY_STUDIO_DIST", str(tmp_path / "empty"))
     app = create_studio_app(REPO_ROOT)
     with TestClient(app) as client:
         response = client.get("/")

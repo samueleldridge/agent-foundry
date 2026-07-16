@@ -92,7 +92,11 @@ def resolve_assets_dir(repo_root: Path) -> Path | None:
     """Built-frontend resolution order (docs/72 § Packaging; the frontend
     lives in a SEPARATE repository):
 
-    1. ``FOUNDRY_STUDIO_DIST`` — absolute path to the built ``dist/``;
+    1. ``FOUNDRY_STUDIO_DIST`` — absolute path to the built ``dist/``.
+       AUTHORITATIVE when set: if it doesn't hold a build, the placeholder
+       is served rather than silently falling back to another checkout's
+       assets (explicit config never gets shadowed; tests rely on this to
+       isolate resolution).
     2. packaged assets under ``foundry/studio/_assets/`` (release wheels);
     3. the sibling frontend checkout's build,
        ``<repo_root>/../agent-foundry-studio/dist`` (dev default).
@@ -101,12 +105,18 @@ def resolve_assets_dir(repo_root: Path) -> Path | None:
     """
     import os
 
+    def _holds_build(candidate: Path) -> bool:
+        return candidate.is_dir() and (candidate / "index.html").is_file()
+
     override = os.environ.get("FOUNDRY_STUDIO_DIST", "").strip()
-    candidates = [Path(override)] if override else []
-    candidates.append(Path(__file__).parent / "_assets")
-    candidates.append(repo_root.parent / "agent-foundry-studio" / "dist")
-    for candidate in candidates:
-        if candidate.is_dir() and (candidate / "index.html").is_file():
+    if override:
+        candidate = Path(override)
+        return candidate if _holds_build(candidate) else None
+    for candidate in (
+        Path(__file__).parent / "_assets",
+        repo_root.parent / "agent-foundry-studio" / "dist",
+    ):
+        if _holds_build(candidate):
             return candidate
     return None
 
