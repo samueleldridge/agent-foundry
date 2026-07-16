@@ -295,15 +295,17 @@ def build_router(ctx: StudioContext) -> APIRouter:
 
     @router.get("/projects/{name}/files", response_model=FileTree)
     def files(name: str) -> FileTree:
-        project_dir = ctx.project_dir(name)
+        # allow_bootstrap: `foundry project new` skeletons are editable
+        # surfaces (the starter eval deep-link) before system.yaml exists.
+        project_dir = ctx.project_dir(name, allow_bootstrap=True)
         return FileTree(project=name, files=list_files(project_dir))
 
     @router.get(
         "/projects/{name}/files/{path:path}", response_model=FileContent
     )
     def read_file(name: str, path: str) -> FileContent:
-        project_dir = ctx.project_dir(name)
-        sandbox = ctx.sandbox_for(name)
+        project_dir = ctx.project_dir(name, allow_bootstrap=True)
+        sandbox = ctx.sandbox_for(name, allow_bootstrap=True)
         resolved = sandbox.check_read(project_dir / path)
         if not resolved.is_relative_to(project_dir) or not resolved.is_file():
             raise ConfigLoadError(
@@ -327,19 +329,19 @@ def build_router(ctx: StudioContext) -> APIRouter:
         "/projects/{name}/validate", response_model=ValidationResult
     )
     def validate(name: str, body: ValidateRequest) -> ValidationResult:
-        project_dir = ctx.project_dir(name)
+        project_dir = ctx.project_dir(name, allow_bootstrap=True)
         return validate_content(project_dir, body.path, body.content)
 
     @router.put("/projects/{name}/files/{path:path}")
     def write_file(
         name: str, path: str, body: WriteRequest, request: Request
     ) -> Any:
-        project_dir = ctx.project_dir(name)
+        project_dir = ctx.project_dir(name, allow_bootstrap=True)
         request_id = getattr(request.state, "studio_request_id", "")
 
         # 1. Sandbox FIRST: an out-of-tree path must never reach the
         #    validator or the filesystem (403 + studio.sandbox_refused).
-        sandbox = ctx.sandbox_for(name)
+        sandbox = ctx.sandbox_for(name, allow_bootstrap=True)
         try:
             resolved = sandbox.check_write(project_dir / path)
         except SandboxViolation:

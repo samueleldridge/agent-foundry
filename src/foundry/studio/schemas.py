@@ -45,6 +45,10 @@ class ProjectSummary(BaseModel):
     last_eval_score: float | None = None
     healthy: bool = True
     health_detail: str = ""
+    bootstrap: bool = False
+    """True for a ``foundry project new`` skeleton (no system.yaml yet) —
+    forge-able, not runnable. Listed only when the caller asks
+    (``?include_bootstrap=true``)."""
 
 
 class ProjectAgent(BaseModel):
@@ -84,12 +88,25 @@ class ProjectCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    scaffold_eval: bool = True
+    """Scaffold a starter eval template at ``evals/<name>.yaml`` (a
+    minimal exact-scorer set with TODO placeholders) so the forge launch
+    form has a valid --eval target immediately."""
 
 
 class ProjectCreateResponse(BaseModel):
     name: str
     branch: str
     project_dir: str
+    eval_path: str | None = None
+    """Project-relative starter-eval path (``evals/<name>.yaml``) when
+    scaffolded; the config editor deep-links it."""
+    eval_repo_path: str | None = None
+    """Repo-relative form (``projects/<name>/evals/<name>.yaml``) — what
+    the forge launch form's eval_path wants."""
+    files: list[str] = Field(default_factory=list)
+    """Project-relative files the scaffold created (the skeleton the UI
+    surfaces)."""
 
 
 class TaskLaunched(BaseModel):

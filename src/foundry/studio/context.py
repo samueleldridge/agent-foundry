@@ -88,9 +88,27 @@ class StudioContext:
             if (entry / "system.yaml").is_file()
         )
 
-    def project_dir(self, name: str) -> Path:
+    def bootstrap_project_names(self) -> list[str]:
+        """``foundry project new`` skeletons: a project directory WITHOUT
+        a system.yaml yet (forge-able, not runnable)."""
+        root = self.projects_root
+        if not root.is_dir():
+            return []
+        return sorted(
+            entry.name
+            for entry in root.iterdir()
+            if entry.is_dir()
+            and not entry.name.startswith(".")
+            and not (entry / "system.yaml").is_file()
+        )
+
+    def project_dir(self, name: str, *, allow_bootstrap: bool = False) -> Path:
         """Resolve a project NAME to its directory — 404-shaped error when
-        missing (same contract as the CLI's resolve_project_dir)."""
+        missing (same contract as the CLI's resolve_project_dir).
+
+        ``allow_bootstrap=True`` accepts a ``foundry project new`` skeleton
+        (a project directory with no system.yaml yet) — the config-editor
+        and forge surfaces work on those; run-shaped surfaces do not."""
         candidate = (self.projects_root / name).resolve()
         if not candidate.is_relative_to(self.projects_root.resolve()):
             raise ConfigLoadError(
@@ -98,6 +116,8 @@ class StudioContext:
                 context={"project": name},
             )
         if not (candidate / "system.yaml").is_file():
+            if allow_bootstrap and candidate.is_dir():
+                return candidate
             raise ConfigLoadError(
                 f"project {name!r} not found under {self.projects_root} "
                 "(need a directory containing system.yaml)",
@@ -108,11 +128,13 @@ class StudioContext:
     def backend(self) -> GitBackend:
         return GitBackend.discover(self.repo_root)
 
-    def sandbox_for(self, project: str) -> PathSandbox:
+    def sandbox_for(
+        self, project: str, *, allow_bootstrap: bool = False
+    ) -> PathSandbox:
         """The meta-agent-shaped write sandbox, scoped to one project:
         writes only under ``projects/<name>``; ``evals/`` + ``.foundry/``
         stay read-only (docs/72 § Security posture)."""
-        project_dir = self.project_dir(project)
+        project_dir = self.project_dir(project, allow_bootstrap=allow_bootstrap)
         return PathSandbox(
             base_dir=self.repo_root,
             read_roots=(self.repo_root,),

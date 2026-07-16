@@ -3,20 +3,18 @@ Projects)."""
 
 from __future__ import annotations
 
-import io
-from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query, Request
 
-from foundry.config.loader import load_project
+from foundry.config.loader import load_eval_spec, load_project
 from foundry.core.errors import (
-    ConfigValidationError,
     FoundryError,
     ProjectUnavailableError,
 )
 from foundry.observability.events import get_store
 from foundry.studio.context import StudioContext
+from foundry.studio.events import emit_studio_event
 from foundry.studio.schemas import (
     ProjectAgent,
     ProjectCreateRequest,
@@ -25,6 +23,51 @@ from foundry.studio.schemas import (
     ProjectSummary,
     ProjectUnavailableInfo,
 )
+
+STARTER_EVAL_TEMPLATE = """\
+# Starter eval set scaffolded by foundry studio (project new).
+#
+# TODO: replace every TODO placeholder with REAL cases before forging.
+# The eval set is the forge TARGET: the meta-agent optimises toward it
+# and is not allowed to modify it (docs/60 § Eval set immutability).
+name: {name}_starter
+description: >-
+  TODO: describe what a correct output looks like. Starter template:
+  three exact-match cases; extend freely (docs/40).
+scope: project
+target: {name}
+cases:
+  - id: case_1
+    input: {{ question: "TODO: first example input" }}
+    expected: {{ answer: "TODO: expected output" }}
+  - id: case_2
+    input: {{ question: "TODO: second example input" }}
+    expected: {{ answer: "TODO: expected output" }}
+  - id: case_3
+    input: {{ question: "TODO: third example input" }}
+    expected: {{ answer: "TODO: expected output" }}
+scorers:
+  - kind: exact
+    name: answer_match
+    config: {{ field: answer }}
+threshold: 0.9
+schema_version: 1
+"""
+
+
+def _bootstrap_summary(ctx: StudioContext, name: str, branch: str) -> ProjectSummary:
+    backend = ctx.backend()
+    project_dir = ctx.projects_root / name
+    commits = backend.log(1, paths=[backend.relpath(project_dir)])
+    return ProjectSummary(
+        name=name,
+        branch=branch,
+        last_commit=commits[0].short_sha if commits else None,
+        last_commit_subject=commits[0].subject if commits else None,
+        healthy=True,
+        health_detail="awaiting forge bootstrap (no system.yaml yet)",
+        bootstrap=True,
+    )
 
 
 def _summary(ctx: StudioContext, name: str, branch: str) -> ProjectSummary:
@@ -127,10 +170,23 @@ def build_router(ctx: StudioContext) -> APIRouter:
     router = APIRouter()
 
     @router.get("/projects", response_model=list[ProjectSummary])
-    def list_projects() -> list[ProjectSummary]:
+    def list_projects(
+        include_bootstrap: bool = Query(False),
+    ) -> list[ProjectSummary]:
         names = ctx.project_names()
-        branch = ctx.backend().current_branch() if names else ""
-        return [_summary(ctx, name, branch) for name in names]
+        bootstrap_names = (
+            ctx.bootstrap_project_names() if include_bootstrap else []
+        )
+        branch = (
+            ctx.backend().current_branch()
+            if names or bootstrap_names
+            else ""
+        )
+        rows = [_summary(ctx, name, branch) for name in names]
+        rows += [
+            _bootstrap_summary(ctx, name, branch) for name in bootstrap_names
+        ]
+        return sorted(rows, key=lambda row: row.name)
 
     @router.get("/projects/{name}", response_model=ProjectDetail)
     def get_project(name: str) -> ProjectDetail:
@@ -139,26 +195,68 @@ def build_router(ctx: StudioContext) -> APIRouter:
     @router.post(
         "/projects", response_model=ProjectCreateResponse, status_code=201
     )
-    def create_project(body: ProjectCreateRequest) -> ProjectCreateResponse:
-        from foundry.cli.project import execute_project_new
+    def create_project(
+        body: ProjectCreateRequest, request: Request
+    ) -> ProjectCreateResponse:
+        from foundry.cli.project import create_project_skeleton
 
-        buffer = io.StringIO()
-        with redirect_stdout(buffer), redirect_stderr(buffer):
-            code = execute_project_new(
-                body.name, projects_root=ctx.projects_root
-            )
-        if code != 0:
-            raise ConfigValidationError(
-                f"project scaffold refused: {buffer.getvalue().strip()}",
-                context={"name": body.name, "exit_code": code},
-            )
+        skeleton = create_project_skeleton(
+            body.name, projects_root=ctx.projects_root
+        )
+        files = ["README.md"]
+        eval_rel: str | None = None
+        if body.scaffold_eval:
+            eval_rel = _scaffold_starter_eval(ctx, body.name)
+            files.append(eval_rel)
+        emit_studio_event(
+            "studio.project_created",
+            project=body.name,
+            studio_request_id=getattr(
+                request.state, "studio_request_id", ""
+            ),
+            branch=skeleton.branch,
+            eval_path=eval_rel or "",
+        )
         return ProjectCreateResponse(
             name=body.name,
-            branch=f"foundry/{body.name}",
-            project_dir=str(ctx.projects_root / body.name),
+            branch=skeleton.branch,
+            project_dir=str(skeleton.project_dir),
+            eval_path=eval_rel,
+            eval_repo_path=(
+                f"projects/{body.name}/{eval_rel}" if eval_rel else None
+            ),
+            files=files,
         )
 
     return router
+
+
+def _scaffold_starter_eval(ctx: StudioContext, name: str) -> str:
+    """Write + validate + commit the starter eval template at
+    ``evals/<name>.yaml``.
+
+    The eval is the OPERATOR's artifact: the studio scaffolds it as part
+    of the human-initiated project-new action (the meta-agent-shaped
+    write sandbox keeps refusing ``evals/`` — docs/60 § Eval set
+    immutability), and the loader validates the template before anything
+    is committed."""
+    project_dir = ctx.project_dir(name, allow_bootstrap=True)
+    rel = f"evals/{name}.yaml"
+    target = project_dir / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(STARTER_EVAL_TEMPLATE.format(name=name))
+    try:
+        # The loaders are the single validator (docs/72) — nothing is
+        # committed unless the template parses as a real EvalSpec.
+        load_eval_spec(target)
+    except FoundryError:
+        target.unlink(missing_ok=True)
+        raise
+    backend = ctx.backend()
+    backend.commit(
+        [target], f"studio({name}): scaffold starter eval template ({rel})"
+    )
+    return rel
 
 
 __all__ = ["build_router", "project_detail"]
