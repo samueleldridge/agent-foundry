@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, get_origin
 
 from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import StreamingResponse
@@ -46,6 +46,7 @@ from foundry.studio.events import (
     sse_log_stream,
 )
 from foundry.studio.schemas import (
+    ChatInputField,
     ChatMessageRequest,
     ChatMessageResponse,
     ChatSessionInfo,
@@ -64,6 +65,7 @@ class ChatSession:
     turns: list[dict[str, str]] = field(default_factory=list)
     log: EventLog = field(default_factory=EventLog)
     replayed: bool = False
+    input_fields: list[ChatInputField] = field(default_factory=list)
 
     def info(self) -> ChatSessionInfo:
         return ChatSessionInfo(
@@ -75,6 +77,7 @@ class ChatSession:
             events_url=(
                 f"/api/chat/{self.project}/sessions/{self.session_id}/events"
             ),
+            input_fields=list(self.input_fields),
         )
 
 
@@ -84,6 +87,7 @@ class ProjectChat:
     manager: RunManager
     input_model: type[BaseModel]
     sessions: dict[str, ChatSession] = field(default_factory=dict)
+    input_fields: list[ChatInputField] = field(default_factory=list)
 
 
 class ChatRegistry:
@@ -134,10 +138,12 @@ class ChatRegistry:
             checkpoint=self._ctx.checkpoint,
         )
         manager.bind(self._ctx.task_group)
+        input_model = derive_input_model(compiled)
         chat = ProjectChat(
             project=project,
             manager=manager,
-            input_model=derive_input_model(compiled),
+            input_model=input_model,
+            input_fields=_input_fields(input_model),
         )
         self._chats[project] = chat
         self._restore_sessions(chat)
@@ -178,6 +184,7 @@ class ChatRegistry:
                 ),
                 run_ids=list(record.get("run_ids", [])),
                 multi_turn=bool(record.get("multi_turn", False)),
+                input_fields=list(chat.input_fields),
             )
 
     # --- session ops ------------------------------------------------------------------
@@ -188,6 +195,7 @@ class ChatRegistry:
             session_id=f"s_{RunId.new()}",
             project=project,
             multi_turn="turns" in chat.input_model.model_fields,
+            input_fields=list(chat.input_fields),
         )
         chat.sessions[session.session_id] = session
         self._record(session)
@@ -386,6 +394,39 @@ class ChatRegistry:
         return target, live_run.status
 
 
+def _placeholder(annotation: Any) -> Any:
+    """A fill-me-in JSON value for one input field (template building)."""
+    origin = get_origin(annotation) or annotation
+    if origin is bool:
+        return False
+    if origin is int:
+        return 0
+    if origin is float:
+        return 0.0
+    if origin in (list, tuple, set, frozenset):
+        return []
+    if origin is dict:
+        return {}
+    return "..."
+
+
+def _input_fields(input_model: type[BaseModel]) -> list[ChatInputField]:
+    """Project input model → composer field metadata. The auto-threaded
+    `turns` field is excluded (the session supplies it)."""
+    schema = input_model.model_json_schema()
+    required = set(schema.get("required", []))
+    properties = schema.get("properties", {})
+    return [
+        ChatInputField(
+            name=name,
+            type=str(prop.get("type", "json")),
+            required=name in required,
+        )
+        for name, prop in properties.items()
+        if name != "turns"
+    ]
+
+
 def _input_from_text(
     text: str, input_model: type[BaseModel]
 ) -> dict[str, Any]:
@@ -405,10 +446,15 @@ def _input_from_text(
     ]
     if len(required) == 1:
         return {required[0]: text}
+    template = {
+        name: _placeholder(input_model.model_fields[name].annotation)
+        for name in required
+    }
     raise ConfigValidationError(
         "chat text must be a JSON object matching the project input schema "
-        f"(required fields: {', '.join(required) or '(none)'})",
-        context={"required_fields": required},
+        f"(required fields: {', '.join(required) or '(none)'}) — "
+        f"ready-to-fill template: {json.dumps(template)}",
+        context={"required_fields": required, "template": template},
     )
 
 

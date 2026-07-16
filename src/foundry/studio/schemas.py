@@ -542,6 +542,18 @@ class ForgeRunInfo(BaseModel):
 # --- chat -------------------------------------------------------------------------
 
 
+class ChatInputField(BaseModel):
+    """One field of the project's derived input model — the composer
+    renders a per-field form from these instead of demanding raw JSON
+    (docs/72 § Chat UX)."""
+
+    name: str
+    type: str = "string"
+    """JSON-schema type ("string", "integer", "number", "boolean",
+    "array", "object"); "json" when the type is unknown/composite."""
+    required: bool = True
+
+
 class ChatSessionInfo(BaseModel):
     session_id: str
     project: str
@@ -551,6 +563,10 @@ class ChatSessionInfo(BaseModel):
     """True when the project declares the `turns` read-scope convention;
     otherwise each message is an independent run (single-turn project)."""
     events_url: str = ""
+    input_fields: list[ChatInputField] = Field(default_factory=list)
+    """The project input model's fields (minus the auto-threaded `turns`).
+    Empty when unknown, e.g. a stored session listed while the project is
+    unavailable."""
 
 
 class ChatMessageRequest(BaseModel):
@@ -684,6 +700,7 @@ __all__ = [
     "CatalogFile",
     "CatalogFiles",
     "CatalogVersionModel",
+    "ChatInputField",
     "ChatMessageRequest",
     "ChatMessageResponse",
     "ChatSessionInfo",

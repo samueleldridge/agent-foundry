@@ -98,6 +98,9 @@ async def test_sessions_list_returns_stored_sessions_without_compiling(
             sessions = listed.json()
             assert [s["session_id"] for s in sessions] == ["s_STORED01"]
             assert sessions[0]["run_ids"] == ["01KXSTOREDRUN01"]
+            # Schema unknown without a compile — the UI falls back to the
+            # plain composer (which it disables via the banner anyway).
+            assert sessions[0]["input_fields"] == []
 
             # Unknown projects still 404 (not 424, not an empty list).
             missing = await client.get("/api/chat/nope/sessions")
@@ -128,3 +131,10 @@ async def test_detail_block_clears_once_env_var_is_set(
             assert detail.json()["unavailable"] is None
             sessions = await client.get("/api/chat/hello/sessions")
             assert sessions.status_code == 200
+
+            # A compilable project's sessions carry the composer schema.
+            opened = await client.post("/api/chat/hello/sessions")
+            assert opened.status_code == 201
+            assert opened.json()["input_fields"] == [
+                {"name": "name", "type": "string", "required": True}
+            ]
