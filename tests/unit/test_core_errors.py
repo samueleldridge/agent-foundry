@@ -29,6 +29,10 @@ def test_to_dict_is_json_serialisable(cls: type[FoundryError]) -> None:
         # Typed control-flow signature (Phase 7, docs/32) — covered by
         # test_approval_required_shape below.
         pytest.skip("ApprovalRequired has a dedicated constructor test")
+    if cls is errors.ProjectUnavailableError:
+        # Typed unavailability signature (docs/72 § Failure modes) —
+        # covered by test_project_unavailable_shape below.
+        pytest.skip("ProjectUnavailableError has a dedicated constructor test")
     cause = ValueError("inner cause")
     exc = cls("boom", context={"key": "value", "n": 3}, cause=cause)
     d = exc.to_dict()
@@ -37,6 +41,31 @@ def test_to_dict_is_json_serialisable(cls: type[FoundryError]) -> None:
     assert d["message"] == "boom"
     assert d["context"] == {"key": "value", "n": 3}
     assert d["cause_chain"] == [{"error_class": "ValueError", "message": "inner cause"}]
+
+
+@pytest.mark.unit
+def test_project_unavailable_shape() -> None:
+    """ProjectUnavailableError is typed unavailability (docs/72 § Failure
+    modes): project + missing env vars + operator remedy, all in context."""
+    cause = ValueError("inner cause")
+    exc = errors.ProjectUnavailableError(
+        "project 'rag_hello' is unavailable",
+        project="rag_hello",
+        env_vars=["COHERE_API_KEY"],
+        remedy="set COHERE_API_KEY and restart foundry studio",
+        cause=cause,
+    )
+    assert exc.project == "rag_hello"
+    assert exc.env_vars == ["COHERE_API_KEY"]
+    assert "COHERE_API_KEY" in exc.remedy
+    d = exc.to_dict()
+    json.dumps(d)  # must not raise
+    assert d["error_class"] == "ProjectUnavailableError"
+    assert d["context"]["project"] == "rag_hello"
+    assert d["context"]["env_vars"] == ["COHERE_API_KEY"]
+    assert d["cause_chain"] == [
+        {"error_class": "ValueError", "message": "inner cause"}
+    ]
 
 
 @pytest.mark.unit

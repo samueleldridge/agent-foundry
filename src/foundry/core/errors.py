@@ -62,6 +62,38 @@ class StateVisibilityError(ConfigError):
     """Compile-time: an agent reads or writes a forbidden state field."""
 
 
+class ProjectUnavailableError(ConfigError):
+    """A project cannot be compiled in the CURRENT environment — its
+    runtime secrets (env-var credentials) are missing — while its stored
+    state (sessions, runs, versions) remains browsable. Read-only
+    surfaces catch this and degrade; the studio maps it to HTTP 424
+    (docs/72 § Failure modes)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        project: str,
+        env_vars: list[str],
+        remedy: str,
+        context: dict[str, Any] | None = None,
+        cause: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            context={
+                "project": project,
+                "env_vars": list(env_vars),
+                "remedy": remedy,
+                **(context or {}),
+            },
+            cause=cause,
+        )
+        self.project = project
+        self.env_vars = list(env_vars)
+        self.remedy = remedy
+
+
 # --- Provider ---------------------------------------------------------------
 
 
@@ -439,6 +471,7 @@ __all__ = [
     "MemoryLayerError",
     "OrchestrationError",
     "PinConflictError",
+    "ProjectUnavailableError",
     "ProviderAuthError",
     "ProviderConfigError",
     "ProviderContentPolicyError",

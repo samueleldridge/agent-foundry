@@ -56,6 +56,14 @@ class ProjectAgent(BaseModel):
     state_write: list[str] = Field(default_factory=list)
 
 
+class ProjectUnavailableInfo(BaseModel):
+    """Why a project cannot RUN in this studio process (missing runtime
+    secrets) — stored state stays browsable; the UI banners this."""
+
+    env_vars: list[str] = Field(default_factory=list)
+    remedy: str = ""
+
+
 class ProjectDetail(BaseModel):
     name: str
     description: str = ""
@@ -67,6 +75,9 @@ class ProjectDetail(BaseModel):
     connections: dict[str, str] = Field(default_factory=dict)
     guardrails: dict[str, Any] = Field(default_factory=dict)
     system_version: str = ""
+    unavailable: ProjectUnavailableInfo | None = None
+    """Set when the project's runtime secrets are missing (HTTP 424 on
+    run-shaped routes); None for a runnable project."""
 
 
 class ProjectCreateRequest(BaseModel):
@@ -715,6 +726,7 @@ __all__ = [
     "ProjectCreateResponse",
     "ProjectDetail",
     "ProjectSummary",
+    "ProjectUnavailableInfo",
     "PromoteRequest",
     "PromoteResponse",
     "ResumeRequest",

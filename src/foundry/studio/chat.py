@@ -33,6 +33,7 @@ from foundry.core.errors import (
     ConfigLoadError,
     ConfigValidationError,
     OrchestrationError,
+    ProjectUnavailableError,
 )
 from foundry.core.types import RunId
 from foundry.observability.logging import run_logger
@@ -191,6 +192,40 @@ class ChatRegistry:
         chat.sessions[session.session_id] = session
         self._record(session)
         return session
+
+    def session_infos(self, project: str) -> list[ChatSessionInfo]:
+        """Sessions for the chat screen. An UNAVAILABLE project (missing
+        runtime secrets → :class:`ProjectUnavailableError`) still lists
+        its stored sessions from the on-disk index — browsing history
+        never requires a compilable project (docs/72 § Failure modes).
+        Other compile failures propagate unchanged."""
+        try:
+            chat = self.project_chat(project)
+        except ProjectUnavailableError:
+            return [
+                self._stored_info(session_id, record)
+                for session_id, record in self._index.items()
+                if record.get("project") == project
+            ]
+        return [session.info() for session in chat.sessions.values()]
+
+    def _stored_info(
+        self, session_id: str, record: dict[str, Any]
+    ) -> ChatSessionInfo:
+        project = str(record.get("project", ""))
+        created = record.get("created_at")
+        return ChatSessionInfo(
+            session_id=session_id,
+            project=project,
+            created_at=(
+                datetime.fromisoformat(created)
+                if isinstance(created, str)
+                else None
+            ),
+            run_ids=[str(r) for r in record.get("run_ids", [])],
+            multi_turn=bool(record.get("multi_turn", False)),
+            events_url=f"/api/chat/{project}/sessions/{session_id}/events",
+        )
 
     def session(self, project: str, session_id: str) -> ChatSession:
         chat = self.project_chat(project)
@@ -395,8 +430,8 @@ def build_router(ctx: StudioContext) -> APIRouter:
     )
     async def list_sessions(project: str) -> list[ChatSessionInfo]:
         assert ctx.chat is not None
-        chat = ctx.chat.project_chat(project)
-        return [session.info() for session in chat.sessions.values()]
+        ctx.project_dir(project)  # 404 for unknown projects
+        return ctx.chat.session_infos(project)
 
     @router.post(
         "/chat/{project}/sessions/{session_id}/messages",

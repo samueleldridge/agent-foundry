@@ -10,7 +10,11 @@ from typing import Any
 from fastapi import APIRouter
 
 from foundry.config.loader import load_project
-from foundry.core.errors import ConfigValidationError, FoundryError
+from foundry.core.errors import (
+    ConfigValidationError,
+    FoundryError,
+    ProjectUnavailableError,
+)
 from foundry.observability.events import get_store
 from foundry.studio.context import StudioContext
 from foundry.studio.schemas import (
@@ -19,6 +23,7 @@ from foundry.studio.schemas import (
     ProjectCreateResponse,
     ProjectDetail,
     ProjectSummary,
+    ProjectUnavailableInfo,
 )
 
 
@@ -49,6 +54,24 @@ def _summary(ctx: StudioContext, name: str, branch: str) -> ProjectSummary:
         healthy=healthy,
         health_detail=detail,
     )
+
+
+def _unavailable_info(
+    ctx: StudioContext, name: str
+) -> ProjectUnavailableInfo | None:
+    """Probe whether the project compiles in THIS environment. Only the
+    missing-runtime-secrets case surfaces here (the UI banners it); other
+    compile failures keep their existing surfaces (graph's 422 envelope,
+    chat's structured 4xx)."""
+    try:
+        ctx.compiled(name)
+    except ProjectUnavailableError as exc:
+        return ProjectUnavailableInfo(
+            env_vars=list(exc.env_vars), remedy=exc.remedy
+        )
+    except FoundryError:
+        return None
+    return None
 
 
 def project_detail(ctx: StudioContext, name: str) -> ProjectDetail:
@@ -89,6 +112,7 @@ def project_detail(ctx: StudioContext, name: str) -> ProjectDetail:
         },
         guardrails=loaded.system.guardrails.model_dump(mode="json"),
         system_version=compute_system_version(project_dir),
+        unavailable=_unavailable_info(ctx, name),
     )
 
 

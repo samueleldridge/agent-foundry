@@ -38,7 +38,12 @@ from foundry.api.errors import (
     status_for,
     validation_error_body,
 )
-from foundry.core.errors import FoundryError, RollbackError, SandboxViolation
+from foundry.core.errors import (
+    FoundryError,
+    ProjectUnavailableError,
+    RollbackError,
+    SandboxViolation,
+)
 from foundry.observability.tracing import configure_observability, foundry_span
 from foundry.studio import (
     catalog,
@@ -126,6 +131,10 @@ def _studio_status_for(exc: FoundryError) -> int:
         return 403
     if isinstance(exc, RollbackError):
         return 409
+    if isinstance(exc, ProjectUnavailableError):
+        # Failed dependency: the project needs env vars this process
+        # doesn't have. The envelope carries env_vars + remedy.
+        return 424
     if exc.context.get("not_found"):
         return 404
     return status_for(exc)

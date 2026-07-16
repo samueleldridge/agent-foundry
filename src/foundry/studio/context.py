@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from foundry.core.errors import ConfigLoadError
+from foundry.core.errors import ConfigLoadError, ProjectUnavailableError
 from foundry.runtime.compiled import CompiledProject
 from foundry.security.sandbox import PathSandbox
 from foundry.versioning.git_backend import GitBackend
@@ -123,15 +123,36 @@ class StudioContext:
 
     def compiled(self, project: str) -> CompiledProject:
         """Compile (or reuse) a project. Invalidated on config writes and
-        rollbacks so chat/graph always reflect the committed tree."""
+        rollbacks so chat/graph always reflect the committed tree.
+
+        A compile that fails ONLY because a credentials env var is unset
+        re-raises as :class:`ProjectUnavailableError` (HTTP 424) — the
+        project's stored state stays browsable; compile semantics are
+        untouched (studio-surface handling only)."""
         cached = self._compiled_cache.get(project)
         if cached is not None:
             return cached
         from foundry.orchestration.compiler import compile_project
 
-        compiled = compile_project(
-            self.project_dir(project), transport=self.transport
-        )
+        project_dir = self.project_dir(project)  # 404 first, before compile
+        try:
+            compiled = compile_project(project_dir, transport=self.transport)
+        except ConfigLoadError as exc:
+            env_var = exc.context.get("env_var")
+            if not env_var:
+                raise
+            raise ProjectUnavailableError(
+                f"project {project!r} is unavailable: environment variable "
+                f"{env_var!r} is not set",
+                project=project,
+                env_vars=[str(env_var)],
+                remedy=(
+                    f"set {env_var} in the environment (e.g. the backend "
+                    "repo's .env) and restart foundry studio, or edit the "
+                    "connection to a different credentials_ref"
+                ),
+                cause=exc,
+            ) from exc
         self._compiled_cache[project] = compiled
         return compiled
 
