@@ -1654,9 +1654,9 @@ Per-phase status (mark on completion):
 - [x] Phase 7 — Multi-agent orchestration + HITL (2026-07-10)
 - [x] Phase 8 — API + streaming + scaling (2026-07-12)
 - [x] Phase 9 — Observability + dev UX + security + deploy (2026-07-13) — **v1 tagged v1.0.0**
-- [ ] Phase 10a — Studio control-plane API + `foundry studio` CLI (v1.1)
-- [ ] Phase 10b — Studio React foundation + core screens (v1.1)
-- [ ] Phase 10c — Studio chat + graph + forge console + widgets + packaging (v1.1) — **v1.1 tags v1.1.0 after the manual browser checklist passes**
+- [x] Phase 10a — Studio control-plane API + `foundry studio` CLI (v1.1) (2026-07-15)
+- [x] Phase 10b — Studio React foundation + core screens (v1.1) (2026-07-16)
+- [x] Phase 10c — Studio chat + graph + forge console + widgets + packaging (v1.1) (2026-07-16, implementation + AI-verifiable gates) — **v1.1 tags v1.1.0 after the manual browser checklist (`docs/_manual_tests/phase_10.md`) passes**
 
 ## Lessons-learned section (operator fills in)
 

@@ -10,7 +10,7 @@ Deferred-from-v1 items, consolidated from the per-phase handoffs and reviews so 
 - Connection + function-node scaffold meta-tools (`build_connection`, `build_function_node`).
 - Schema-only eval generation.
 - Drift daemon (scheduled re-eval + alerting).
-- ~~Forge web UI~~ — **being delivered by Phase 10 (Foundry Studio)**, expanded from a forge-only UI to a full webapp over every CLI feature; spec in `72-web-studio.md`, build plan in `03-development-phases.md` § Phases 10a–10c. Browser E2E automation (Playwright) is deliberately excluded from Phase 10 → tracked as a **v1.2 candidate** below.
+- ~~Forge web UI~~ — **DELIVERED by Phase 10 (Foundry Studio, v1.1)**: full webapp over every CLI feature incl. the forge console with live trajectory (10c complete 2026-07-16; v1.1.0 tags after the manual browser pass in `docs/_manual_tests/phase_10.md`). Spec: `72-web-studio.md`. Browser E2E automation (Playwright) stays excluded → **v1.2 candidate** below.
 - Cross-iteration learning / failure-pattern memory (docs/41).
 - Handler-scaffold forbidden-import lint (docs/20 deferral).
 
@@ -53,6 +53,8 @@ Deferred-from-v1 items, consolidated from the per-phase handoffs and reviews so 
 
 ## v1.2 candidates (deferred FROM v1.1 planning)
 
-- Playwright browser E2E for Foundry Studio (Phase 10 ships a manual browser checklist instead; `72-web-studio.md` § Testing strategy).
+- Playwright browser E2E for Foundry Studio (Phase 10 shipped the manual browser checklist `docs/_manual_tests/phase_10.md` instead; `72-web-studio.md` § Testing strategy).
+- Route-level code-splitting of the studio bundle (single 1.98 MB chunk as of 10c; cosmetic for a localhost tool).
+- Fix the 10a test-isolation bug: `test_placeholder_page_serves_when_no_frontend_built` fails whenever the sibling `../agent-foundry-studio/dist` exists (10c handoff § known issues).
 
 Canonical copy also lives in operator memory (`project_v1_1_backlog.md`); update both when planning v1.1.
