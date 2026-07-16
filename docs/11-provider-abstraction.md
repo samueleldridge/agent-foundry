@@ -568,6 +568,41 @@ attempt. Timeouts are per-attempt, not across all attempts — this is
 intentional (users want a single slow call to be retried, not count against
 a global budget).
 
+### Rate-limit errors get their own schedule
+
+`RetryPolicy` governs the *ordinary* retryables (timeouts et al.).
+`ProviderRateLimitError` (HTTP 429) is deliberately excluded from it:
+TPM/RPM limits clear on the **provider's** clock, so the right posture is
+patient — a 429 storm degrades a run to *slower*, never to
+`provider_failure` after two quick retries. The rate-limit schedule:
+
+- **Attempts**: up to **8** (`FOUNDRY_RATE_LIMIT_MAX_ATTEMPTS`).
+- **Backoff**: exponential, base **1s**, factor **2**, with **full
+  jitter** — `delay = uniform(0, min(cap, 1s * 2^(n-1)))` — capped at
+  **60s** per sleep (`FOUNDRY_RATE_LIMIT_MAX_BACKOFF_S`).
+- **Retry-After is honoured.** `_classify_http_error` captures the
+  provider's own signal into the error's `context["retry_after_s"]` —
+  from the `Retry-After` header (delta-seconds) or the body hint some
+  429s carry (OpenAI: "Please try again in 589ms"). When present it is
+  used verbatim (capped), replacing the jittered delay.
+- **Cancellation-aware sleeps.** Backoff waits are split into bounded
+  slices and the session cancel token is checked *during* the wait — a
+  60s backoff never pins a cancelled run.
+- **The cost-budget pre-check runs per attempt** (see § Cost-budget
+  integration) and every attempt re-acquires a rate-limiter permit.
+- **Every wait is observable**: the adapter logs `provider.retry`
+  (attempt, `delay_s`, `error_class`, `rate_limited`, `retry_after_s`)
+  and, when the runtime supplies its `on_retry` hook, the same payload is
+  emitted as the `provider.retry` RunEvent — live consoles (forge/chat
+  SSE) render it as "backing off Ns (rate limited)".
+
+Env knobs and their defaults:
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `FOUNDRY_RATE_LIMIT_MAX_ATTEMPTS` | `8` | Total attempts on rate-limit errors before giving up |
+| `FOUNDRY_RATE_LIMIT_MAX_BACKOFF_S` | `60` | Cap on any single backoff sleep (also caps an honoured Retry-After) |
+
 ## `ProviderAdapter` base
 
 (As implemented in Phase 1 — direct httpx; see the erratum under § Module

@@ -326,6 +326,8 @@ The meta-agent has no tool that writes to `projects/<scoped_project>/evals/`. Re
 
 `ForgeGuardrails` carries the budgets; the forge loop checks them after every iteration; the `CostBudget` on `Session` enforces per-call cost (per `Tier 1`). Exceeding any cap halts the loop cleanly with a `forge.terminated` event citing the cap that fired.
 
+The iteration cap is settable per run (`--max-iter` / the forge route's `max_iter`) and globally: when the flag/param is omitted, the default resolves from `FOUNDRY_FORGE_MAX_ITER` (else 5). An invalid env value is a `ConfigValidationError` at launch, never a silent fallback.
+
 ## Autonomous vs interactive mode
 
 ### Autonomous (`foundry forge ...` without `--interactive`)
@@ -575,6 +577,7 @@ Detail on session shapes (CLI / interactive / notebook) in `62-configurator-sess
 | Eval threshold never met within budget | `forge.terminated(reason="best_effort_max_iter")` or `(reason="cost_exhausted")`; trajectory captured; result includes best score across iterations |
 | Plateau detected (`no_improvement_after`) | `forge.terminated(reason="plateau")`; same as above |
 | Meta-agent's LLM call fails irrecoverably | `forge.terminated(reason="provider_failure")` with the underlying error; partial trajectory saved |
+| Provider rate limits (429 / TPM storms) | **Not** a termination: the adapter's rate-limit schedule (docs/11 § Retry policy) backs off patiently — up to 8 attempts, exponential full-jitter capped at 60s, honouring the provider's Retry-After — so the run degrades to *slower*, never straight to `provider_failure`. Every wait surfaces as a `provider.retry` event on the forge stream ("backing off Ns (rate limited)"). Only a storm that outlasts `FOUNDRY_RATE_LIMIT_MAX_ATTEMPTS` falls through to `provider_failure` |
 | Project compile fails after a meta-agent change | Iteration aborts; rollback the change; retry with different hypothesis; if 3 consecutive compile failures, halt with `forge.terminated(reason="repeated_compile_failure")` |
 | Eval harness crashes (infrastructure) | `forge.terminated(reason="eval_infrastructure_failure")`; partial trajectory saved; investigate before retrying |
 | Operator cancels (`Ctrl-C` or interactive `q`) | `forge.terminated(reason="user_cancelled")`; partial trajectory saved; current state preserved on disk |

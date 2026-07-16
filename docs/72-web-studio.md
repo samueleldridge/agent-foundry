@@ -166,10 +166,14 @@ The parity rule this surface encodes: **every CLI feature in `foundry.cli.__main
 
 | Method | Path | Purpose | CLI parity |
 |---|---|---|---|
-| `GET` | `/api/projects` | List projects: name, branch, agent/tool counts, last commit, last eval score, health digest | `foundry project list` |
+| `GET` | `/api/projects` | List projects: name, branch, agent/tool counts, last commit, last eval score, health digest. `?include_bootstrap=true` also lists `foundry project new` skeletons (no system.yaml yet) with `bootstrap: true` — the forge console asks for these; run-shaped surfaces never see them | `foundry project list` |
 | `GET` | `/api/projects/{name}` | Project detail: SystemSpec summary, agents, tools + pins, connections, flow pattern, guardrails | `foundry validate` (per-project view) + `GET /config` shape |
-| `POST` | `/api/projects` | `{name}` → scaffold skeleton + `foundry/<name>` branch | `foundry project new` |
+| `POST` | `/api/projects` | `{name, scaffold_eval=true}` → scaffold skeleton + `foundry/<name>` branch, PLUS (unless `scaffold_eval: false`) a validated starter eval template at `evals/<name>.yaml` — a minimal 3-case exact-scorer project-scope set with clearly-marked TODO placeholders, committed separately (`studio(<name>): scaffold starter eval template`). Forge requires an eval set; the template makes the new project forge-able immediately, and the operator fills the TODOs in before launching. Response carries `eval_path` (project-relative), `eval_repo_path` (what the forge form's `eval_path` wants) and `files`. Refusals are structured: a dirty working tree is a 400 whose `context.dirty_files` NAMES the uncommitted files; an existing project sets `context.exists` | `foundry project new` |
 | `POST` | `/api/projects/{name}/test` | Launch project pytest; returns `{task_id}`; results via task polling | `foundry test` |
+
+The starter eval is scaffolded **server-side by the project-new route**, not through `PUT /files/{path}`: the config-write path runs the meta-agent-shaped sandbox, which keeps `evals/` read-only (the eval is the target — docs/60). Scaffolding rides the same human-initiated action that created the project, and the template is validated by `load_eval_spec` before anything is committed. In the editor the file deep-links read-only; the operator edits the TODOs in their own tooling (or replaces the file) — the studio never opens an eval write path.
+
+Config-editor file routes (`/files`, `/files/{path}`, `/validate`, `PUT /files/{path}`) accept bootstrap skeletons too, so the starter eval is browsable before the forge bootstrap writes system.yaml.
 
 ### Configs + validation
 
@@ -301,13 +305,17 @@ All queries hit the local SQLite mirror via `foundry.observability.store` — ne
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/forge` | Launch: `{project, description, eval_path, threshold, max_iter, max_cost_usd, model, no_improvement_after}` → `{forge_run_id}`. Runs as a supervised background task in the studio server's lifespan task group |
+| `POST` | `/api/forge` | Launch: `{project, description, eval_path, threshold, max_iter?, max_cost_usd, model, no_improvement_after}` → `{forge_run_id}`. Runs as a supervised background task in the studio server's lifespan task group. `max_iter` omitted/null resolves the global default: `FOUNDRY_FORGE_MAX_ITER`, else 5 (CLI parity with the optional `--max-iter`); `GET /api/health` reports the resolved default as `forge_max_iter_default` so the launch form can prefill it |
 | `GET` | `/api/forge` | Forge runs (live + historical trajectories) — `foundry forge list` / `foundry obs forge` |
 | `GET` | `/api/forge/{forge_run_id}` | Trajectory artifact: per-iteration scores, commits, artifacts touched — `foundry forge show` |
-| `GET` | `/api/forge/{forge_run_id}/events` | **SSE**: live forge events — iteration started/completed, eval scores, per-iteration commit shas, meta-tool calls, sandbox violations, termination (threshold / plateau / budget / max-iter / error) |
+| `GET` | `/api/forge/{forge_run_id}/events` | **SSE**: live forge events — iteration started/completed, eval scores, per-iteration commit shas, meta-tool calls, sandbox violations, provider backoffs (`provider.retry`), termination (threshold / plateau / budget / max-iter / error) |
 | `POST` | `/api/forge/{forge_run_id}/cancel` | Graceful cancel; trajectory artifact finalised as `cancelled` |
 
 One forge run per project at a time (409 on concurrent launch for the same project). Sandbox violations and terminations are first-class event kinds so the UI can surface them loudly, not bury them in a log tail.
+
+**Rate-limit backoffs are surfaced, not hidden.** When a provider 429s, the adapter's rate-limit schedule (docs/11 § Retry policy) waits it out and the runtime emits `provider.retry` (attempt, `delay_s`, `rate_limited`, `retry_after_s`) on the same stream; the forge console renders the live frame as an amber "Backing off Ns (rate limited) — attempt k" banner that clears on the next event. A rate-limited run reads as *slower*, never as hung or failed (docs/60 § Failure modes).
+
+**New-project mode.** The forge console is also where NEW projects are born: a "New project" tab takes a name, calls `POST /api/projects` (skeleton + branch + starter eval template above), surfaces the created skeleton (branch, files), deep-links the starter eval into the config editor (`/projects/<name>/configs?file=evals/<name>.yaml`), and prefills the launch form with the new project + `eval_repo_path`. The dirty-working-tree refusal renders as actionable copy naming the uncommitted files from `context.dirty_files`.
 
 ### Chat
 
@@ -369,7 +377,7 @@ data: {"run_id":"01JXCHAT01","sequence":14,"event":"run.completed","status":"suc
 |---|---|---|
 | `GET/PUT` | `/api/layouts` | Widget-dashboard layouts document (§ Layout persistence) |
 | `GET` | `/api/tasks/{task_id}` · `/api/tasks/{task_id}/events` | Generic background-task status + SSE progress (evals, tests, gc — anything long-running that isn't forge/chat) |
-| `GET` | `/api/health` | Studio liveness: version, uptime, active forge runs, active chat sessions, RunManager pool size |
+| `GET` | `/api/health` | Studio liveness: version, uptime, active forge runs, active chat sessions, RunManager pool size, `forge_max_iter_default` (the resolved `FOUNDRY_FORGE_MAX_ITER`, else 5 — prefills the forge launch form) |
 | `GET` | `/api/openapi.json` | The control-plane OpenAPI schema (FastAPI-generated; feeds frontend type generation) |
 
 ## CLI: `foundry studio`
