@@ -95,8 +95,15 @@ class ForgeSupervisor:
             ForgeGuardrails,
             ForgeSession,
             MetaAgent,
+            forge_max_iter_default,
         )
         from foundry.providers import ModelBinding, ModelSettings
+
+        max_iter = (
+            body.max_iter
+            if body.max_iter is not None
+            else forge_max_iter_default()
+        )
 
         project_dir = self._resolve_project_dir(body.project)
         cost_cap: Decimal | None = None
@@ -141,7 +148,7 @@ class ForgeSupervisor:
             projects_root=project_dir.parent,
             model_binding=binding,
             guardrails=ForgeGuardrails(
-                max_iter=body.max_iter,
+                max_iter=max_iter,
                 max_cost_usd=cost_cap,
                 no_improvement_after=body.no_improvement_after,
             ),

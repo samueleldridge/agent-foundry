@@ -47,6 +47,7 @@ from foundry.configurator.tools import (
     meta_tool_names,
 )
 from foundry.core.agent import BaseAgent
+from foundry.core.errors import ConfigValidationError
 from foundry.core.session import Session
 from foundry.core.tool import RetryPolicy
 from foundry.orchestration.state_scope import compile_state
@@ -72,6 +73,33 @@ DEFAULT_META_MODEL_BINDING = ModelBinding(
 )
 """docs/60 § Recommended model binding: current top-tier reasoning model,
 temperature 0.1 (low, not zero), 4096 tokens per turn."""
+
+
+def forge_max_iter_default() -> int:
+    """The global default for ``--max-iter`` / the forge route's
+    ``max_iter`` when the caller omits it: ``FOUNDRY_FORGE_MAX_ITER``,
+    else 5 (docs/60 § Safety guards). Explicit-but-invalid config is an
+    error, never silently ignored."""
+    import os
+
+    raw = os.environ.get("FOUNDRY_FORGE_MAX_ITER", "").strip()
+    if not raw:
+        return 5
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigValidationError(
+            f"FOUNDRY_FORGE_MAX_ITER must be an integer, got {raw!r}",
+            context={"FOUNDRY_FORGE_MAX_ITER": raw},
+            cause=exc,
+        ) from exc
+    if not 1 <= value <= 100:
+        raise ConfigValidationError(
+            f"FOUNDRY_FORGE_MAX_ITER must be within 1..100 (the "
+            f"ForgeGuardrails bounds), got {value}",
+            context={"FOUNDRY_FORGE_MAX_ITER": raw},
+        )
+    return value
 
 
 class ForgeGuardrails(BaseModel):
@@ -375,5 +403,6 @@ __all__ = [
     "MetaAgent",
     "MetaAgentReport",
     "compute_meta_agent_version",
+    "forge_max_iter_default",
     "render_prompt",
 ]

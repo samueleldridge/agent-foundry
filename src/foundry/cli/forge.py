@@ -97,22 +97,29 @@ def execute_forge(
     description: str,
     eval_path: str,
     threshold: float = 0.9,
-    max_iter: int = 5,
+    max_iter: int | None = None,
     max_cost_usd: str | None = None,
     model: str | None = None,
     no_improvement_after: int = 3,
     quiet: bool = False,
 ) -> int:
-    """The `foundry forge` implementation. Returns the exit code."""
+    """The `foundry forge` implementation. Returns the exit code.
+
+    ``max_iter=None`` (flag omitted) resolves to the global default:
+    ``FOUNDRY_FORGE_MAX_ITER``, else 5."""
     configure_logging()
     try:
         from foundry.configurator import (
             ForgeGuardrails,
             ForgeSession,
             MetaAgent,
+            forge_max_iter_default,
             render_summary,
         )
         from foundry.providers import ModelBinding
+
+        if max_iter is None:
+            max_iter = forge_max_iter_default()
 
         project_dir = _resolve_forge_project_dir(project)
         cost_cap: Decimal | None = None

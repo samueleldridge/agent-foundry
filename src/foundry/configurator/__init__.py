@@ -15,6 +15,7 @@ from foundry.configurator.meta_agent import (
     MetaAgent,
     MetaAgentReport,
     compute_meta_agent_version,
+    forge_max_iter_default,
 )
 from foundry.configurator.session import (
     ForgeError,
@@ -45,6 +46,7 @@ __all__ = [
     "TerminationReason",
     "build_meta_tool_registry",
     "compute_meta_agent_version",
+    "forge_max_iter_default",
     "meta_tool_names",
     "render_summary",
 ]

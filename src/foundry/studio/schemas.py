@@ -527,7 +527,9 @@ class ForgeLaunchRequest(BaseModel):
     description: str
     eval_path: str
     threshold: float = 0.9
-    max_iter: int = 5
+    max_iter: int | None = None
+    """None (omitted) resolves to the global default:
+    ``FOUNDRY_FORGE_MAX_ITER``, else 5 — CLI parity with ``--max-iter``."""
     max_cost_usd: str | None = None
     model: str | None = None
     no_improvement_after: int = 3
@@ -704,6 +706,9 @@ class StudioHealth(BaseModel):
     active_forge_runs: int = 0
     active_chat_sessions: int = 0
     run_manager_pool: int = 0
+    forge_max_iter_default: int = 5
+    """The resolved global forge iteration cap (FOUNDRY_FORGE_MAX_ITER,
+    else 5) — the forge launch form prefills from this."""
 
 
 __all__ = [

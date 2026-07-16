@@ -216,7 +216,10 @@ _FORGE_THRESHOLD_OPTION = typer.Option(
     0.9, "--threshold", help="Aggregate score the forge must reach."
 )
 _FORGE_MAX_ITER_OPTION = typer.Option(
-    5, "--max-iter", help="Improvement iterations after bootstrap."
+    None,
+    "--max-iter",
+    help="Improvement iterations after bootstrap "
+    "(default: $FOUNDRY_FORGE_MAX_ITER, else 5).",
 )
 _FORGE_MAX_COST_OPTION = typer.Option(
     None,
@@ -248,7 +251,7 @@ def forge(
     description: str = _FORGE_DESCRIPTION_OPTION,
     eval_path: str = _FORGE_EVAL_OPTION,
     threshold: float = _FORGE_THRESHOLD_OPTION,
-    max_iter: int = _FORGE_MAX_ITER_OPTION,
+    max_iter: int | None = _FORGE_MAX_ITER_OPTION,
     max_cost_usd: str | None = _FORGE_MAX_COST_OPTION,
     model: str | None = _FORGE_MODEL_OPTION,
     no_improvement_after: int = _FORGE_PLATEAU_OPTION,

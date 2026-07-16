@@ -203,6 +203,8 @@ def create_studio_app(
 
     @api.get("/health", response_model=StudioHealth)
     def health() -> StudioHealth:
+        from foundry.configurator import forge_max_iter_default
+
         assert ctx.chat is not None and ctx.forge is not None
         return StudioHealth(
             status="ok",
@@ -211,6 +213,7 @@ def create_studio_app(
             active_forge_runs=ctx.forge.active_count(),
             active_chat_sessions=ctx.chat.active_sessions(),
             run_manager_pool=ctx.chat.pool_size(),
+            forge_max_iter_default=forge_max_iter_default(),
         )
 
     for module in (
