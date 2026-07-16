@@ -59,6 +59,7 @@ from foundry.core import (
     MemoryWrite,
     MessageRole,
     ModelResponse,
+    ProviderRetry,
     Reducer,
     RetryPolicy,
     Session,
@@ -88,7 +89,7 @@ from foundry.observability.tracing import (
 from foundry.orchestration.handoff import HandoffInput, HandoffOutput
 from foundry.orchestration.patterns import END_SENTINEL
 from foundry.orchestration.state_scope import AgentStateView
-from foundry.providers import ToolSchema
+from foundry.providers import RetryInfo, ToolSchema
 from foundry.retrieval import MappingRetrieverAccessor
 from foundry.runtime.compiled import (
     CompiledAgent,
@@ -687,6 +688,7 @@ class AgentStepRuntime:
                 self.schemas,
                 spec.model_binding.settings,
                 self.session,
+                on_retry=self._emit_provider_retry,
             )
             set_span_attributes(
                 span,
@@ -722,6 +724,22 @@ class AgentStepRuntime:
             stop_reason=response.stop_reason,
         )
         return {"conv": {**conv, "round": conv["round"] + 1, "response": response}}
+
+    def _emit_provider_retry(self, info: RetryInfo) -> None:
+        """Adapter backoff -> provider.retry RunEvent, so live consoles
+        (forge/chat SSE) can show "backing off Ns (rate limited)" instead
+        of a silent stall (docs/11 § Retry policy)."""
+        self.emitter.emit(
+            ProviderRetry,
+            agent_name=self.ca.name,
+            provider=self.ca.provider.name,
+            model=self.ca.provider.model,
+            attempt=info.attempt,
+            delay_s=round(info.delay_s, 3),
+            error_class=info.error_class,
+            rate_limited=info.rate_limited,
+            retry_after_s=info.retry_after_s,
+        )
 
     def route_after_llm(self, conv: dict[str, Any]) -> str:
         response: ModelResponse = conv["response"]

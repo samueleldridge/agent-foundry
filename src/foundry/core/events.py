@@ -98,6 +98,23 @@ class LLMCallCompleted(_RunEventBase):
     stop_reason: StopReason
 
 
+class ProviderRetry(_RunEventBase):
+    """One backoff inside the provider adapter's retry loop — surfaced so
+    live consoles can show "backing off Ns (rate limited)" instead of an
+    apparently hung call (docs/11 § Retry policy)."""
+
+    event: Literal["provider.retry"] = "provider.retry"
+    agent_name: str = ""
+    provider: str
+    model: str
+    attempt: int
+    delay_s: float
+    error_class: str
+    rate_limited: bool = False
+    retry_after_s: float | None = None
+    """The provider's own Retry-After signal, when it sent one."""
+
+
 class ToolStarted(_RunEventBase):
     event: Literal["tool.started"] = "tool.started"
     agent_name: str
@@ -383,6 +400,7 @@ RunEvent = Annotated[
     | LLMCallStarted
     | LLMDelta
     | LLMCallCompleted
+    | ProviderRetry
     | ToolStarted
     | ToolCompleted
     | ConnectionEvent
@@ -498,6 +516,7 @@ __all__ = [
     "MemoryWriteEvent",
     "MetaAgentViolation",
     "PauseRun",
+    "ProviderRetry",
     "RerankEvent",
     "ResumeRun",
     "RetrievalEvent",

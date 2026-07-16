@@ -101,7 +101,10 @@ async def test_no_budget_means_no_enforcement() -> None:
 
 
 @pytest.mark.unit
-async def test_retry_loop_retries_rate_limit_then_succeeds() -> None:
+async def test_retry_loop_retries_rate_limit_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOUNDRY_RATE_LIMIT_MAX_BACKOFF_S", "0.01")
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -123,8 +126,18 @@ async def test_retry_loop_retries_rate_limit_then_succeeds() -> None:
 
 
 @pytest.mark.unit
-async def test_retry_loop_gives_up_after_max_attempts() -> None:
+async def test_retry_loop_gives_up_after_max_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """429s follow the RATE-LIMIT schedule (FOUNDRY_RATE_LIMIT_MAX_
+    ATTEMPTS), not RetryPolicy.max_attempts."""
+    monkeypatch.setenv("FOUNDRY_RATE_LIMIT_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("FOUNDRY_RATE_LIMIT_MAX_BACKOFF_S", "0.01")
+    attempts = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
         return httpx.Response(429, json={"error": {"message": "slow down"}})
 
     adapter = resolve(
@@ -135,6 +148,7 @@ async def test_retry_loop_gives_up_after_max_attempts() -> None:
     )
     with pytest.raises(ProviderRateLimitError):
         await adapter.generate(_messages(), [])
+    assert attempts == 2
 
 
 @pytest.mark.unit

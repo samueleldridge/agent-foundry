@@ -11,7 +11,15 @@ lists exactly ``anthropic`` and ``openai``.
 
 from __future__ import annotations
 
-from foundry.providers._base import HttpRequestSpec, ProviderAdapter
+from foundry.providers._base import (
+    HttpRequestSpec,
+    OnRetry,
+    ProviderAdapter,
+    RetryInfo,
+    parse_retry_after,
+    rate_limit_max_attempts,
+    rate_limit_max_backoff_s,
+)
 from foundry.providers._manifests import all_capabilities, load_capabilities
 from foundry.providers._registry import (
     SecretsResolver,
@@ -54,6 +62,7 @@ __all__ = [
     "ModelBinding",
     "ModelPricing",
     "ModelSettings",
+    "OnRetry",
     "OpenAIProvider",
     "Provider",
     "ProviderAdapter",
@@ -63,6 +72,7 @@ __all__ = [
     "RedisTokenBucket",
     "ResolvedModelSettings",
     "ResponseFormat",
+    "RetryInfo",
     "SecretsResolver",
     "ToolSchema",
     "all_capabilities",
@@ -73,6 +83,9 @@ __all__ = [
     "estimate_cost",
     "estimate_pre_call_cost",
     "load_capabilities",
+    "parse_retry_after",
+    "rate_limit_max_attempts",
+    "rate_limit_max_backoff_s",
     "register_provider",
     "reset_default_rate_limiter",
     "resolve",

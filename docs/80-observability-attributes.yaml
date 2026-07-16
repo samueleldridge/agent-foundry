@@ -33,6 +33,9 @@ events:
   llm.delta: [agent_name, content_block_index, delta]
   llm.completed:
     [agent_name, cost_estimate_usd, latency_ms, stop_reason, usage]
+  provider.retry:
+    [agent_name, attempt, delay_s, error_class, model, provider,
+     rate_limited, retry_after_s]
   tool.started:
     [agent_name, input_hash, input_preview, tool_ref, tool_version]
   tool.completed:

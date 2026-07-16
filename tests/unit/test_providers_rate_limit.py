@@ -372,6 +372,7 @@ async def test_retried_attempts_reacquire_a_permit(
     """Phase 9 pre-work: a 429-retry loop must go back through the rate
     gate for every attempt — retries without a permit hammer a provider
     that just told us to slow down."""
+    monkeypatch.setenv("FOUNDRY_RATE_LIMIT_MAX_BACKOFF_S", "0.01")
     calls = itertools.count()
 
     def handler(request: httpx.Request) -> httpx.Response:
