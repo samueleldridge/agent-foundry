@@ -593,7 +593,7 @@ React Flow with a dagre auto-layout (left-to-right; top-down toggle). Custom nod
 - **HITL**: on `approval.required`, an approval card renders **in the thread** at the pause point — prompt, tool name, arguments (redacted per the redaction rules), Approve / Reject-with-reason controls. Resolution posts the `ApprovalResponse`; the stream resumes in place; the card collapses to a resolved badge (decision + reason + operator time). Pending approvals also appear in the global approvals inbox; resolving from either surface updates both (query invalidation on `approval.resolved`).
 - **Failures**: a failed run renders the structured error in-thread with a "retry message" affordance (new run, same input).
 - **Reload behaviour**: sessions are listed server-side; reattaching replays the thread from persisted run artifacts and resubscribes live streams. HITL pauses survive studio restarts (SQLite checkpointer).
-- **Suitability**: chat is offered for every project; for projects whose input schema isn't text-shaped, the composer falls back to a schema-driven input form (generated from the project input model) instead of a free-text box — this is what "chat frontend for any Q&A agent" degrades to for non-Q&A systems.
+- **Suitability — schema-aware composer**: chat is offered for every project; the composer adapts to the project input model, which every `ChatSessionInfo` carries as `input_fields` (name / JSON-schema type / required, minus the auto-threaded `turns`). One required field → the plain message box, placeholder naming the field, text auto-wrapped server-side. Two-plus required fields → a compact per-field form (text inputs for strings; JSON-ish inputs for other types) that assembles the input object client-side, with an "edit as JSON" toggle for power users. The operator is never told to hand-write JSON — and raw-API callers who post non-JSON text to a multi-field project get a `ConfigValidationError` whose message and `context.template` carry a ready-to-fill JSON template of the required fields. This is what "chat frontend for any Q&A agent" degrades to for non-Q&A systems.
 
 ## Config-editing UX
 
@@ -671,6 +671,7 @@ CI additions: the Node job (`npm ci && npm run gen:api -- --check && npm run lin
 | Studio killed mid-forge / mid-chat-HITL | forge trajectory finalised as interrupted (resumable via `foundry forge --resume` semantics); chat approvals persist via checkpointer and reappear on restart |
 | Non-loopback bind without token | refuses to start; actionable message |
 | Provider credentials absent | chat/eval/forge launches fail with the structured provider error; doctor panel points at the missing env var |
+| Project runtime secrets missing (connection `credentials_ref` env var unset, e.g. `COHERE_API_KEY`) | compile-dependent routes return **424** with a `ProjectUnavailableError` envelope (`context.env_vars` + `context.remedy`); the project detail exposes an `unavailable` block; the chat sessions list still returns stored sessions without compiling; the UI renders a `<ProjectUnavailableBanner>` (missing vars + remedy + link to the connections screen) with the composer disabled instead of an error wall. Compile semantics untouched — studio-surface handling only |
 
 ## Open questions
 
