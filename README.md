@@ -6,7 +6,7 @@ A personal developer kit for building, evaluating, versioning, and orchestrating
 
 ## Quickstart
 
-Requires Python 3.12 and [uv](https://docs.astral.sh/uv/). One provider API key is enough to run everything (Anthropic or OpenAI).
+Requires Python 3.12 and [uv](https://docs.astral.sh/uv/). One provider API key is enough to run everything — the examples and the meta-agent default to OpenAI (`openai/gpt-5-mini`), and swapping to Anthropic is a one-line YAML change.
 
 ```bash
 uv sync                          # install pinned deps
@@ -19,7 +19,7 @@ environment. For local work the easiest path is a `.env` in the repo root
 
 ```bash
 cat > .env <<'EOF'
-ANTHROPIC_API_KEY=sk-ant-...      # or OPENAI_API_KEY (see provider swap below)
+OPENAI_API_KEY=sk-...             # or ANTHROPIC_API_KEY (see provider swap below)
 HELLO_SERVICE_API_KEY=dummy       # hello's demo tool connection; any value works
 EOF
 uv run foundry doctor            # the `env_file` line confirms what was loaded
@@ -27,7 +27,7 @@ uv run foundry doctor            # the `env_file` line confirms what was loaded
 
 A real exported environment variable always wins over `.env`; opt out entirely
 with `FOUNDRY_NO_ENV_FILE=1`, or point elsewhere with `FOUNDRY_ENV_FILE=path`.
-Prefer not to use a file? Just `export ANTHROPIC_API_KEY=...` in your shell.
+Prefer not to use a file? Just `export OPENAI_API_KEY=...` in your shell.
 
 ### Run the hello project
 
@@ -40,9 +40,9 @@ uv run foundry run hello --input '{"name": "Ada"}'   # bare names resolve agains
 
 This compiles `projects/hello/system.yaml` → LangGraph, calls the model (plus one catalog tool through a pooled, authenticated connection), and writes a full run artifact (events, LLM calls, tool calls, final state) under `~/.foundry/runs/<run_id>/`.
 
-Provider swap is a one-line YAML change — edit `projects/hello/agents/hello_agent/agent.yaml` → `model_binding.provider: openai` + a model name, set `OPENAI_API_KEY`, re-run the same command.
+Provider swap is a one-line YAML change — edit `projects/hello/agents/hello_agent/agent.yaml` → `model_binding.provider: anthropic` + a model name (e.g. `claude-haiku-4-5`), set `ANTHROPIC_API_KEY`, re-run the same command.
 
-Other example projects: `projects/rag_hello` (semantic cache + hybrid retrieval), `projects/memory_hello` (three memory layers + function nodes), `projects/team_hello` (supervisor + workers + human-in-the-loop approval).
+Other example projects: `projects/rag_hello` (semantic cache + hybrid retrieval + a fully local rerank stage — runs on the same single `OPENAI_API_KEY`), `projects/memory_hello` (three memory layers + function nodes), `projects/team_hello` (supervisor + workers + human-in-the-loop approval).
 
 ### Serve a project as an API
 

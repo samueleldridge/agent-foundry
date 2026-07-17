@@ -531,7 +531,7 @@ class GraphNode(BaseModel):
     function: FunctionSummary | None # for kind == "function"
 
 class AgentSummary(BaseModel):
-    model_binding: str               # "anthropic/claude-opus-4-7"
+    model_binding: str               # "openai/gpt-5-mini"
     prompt_version: str              # "v3"
     tools: list[str]                 # pinned refs, e.g. "catalog/word_stats@v2"
     state_read: list[str]
@@ -576,15 +576,15 @@ GET /api/projects/team_hello/graph
     {"id": "__start__", "kind": "start", "role": null, "label": "start", "group": null},
     {"id": "coordinator", "kind": "agent", "role": "supervisor", "label": "coordinator",
      "group": null,
-     "agent": {"model_binding": "anthropic/claude-haiku-4-5", "prompt_version": "v1",
+     "agent": {"model_binding": "openai/gpt-5-mini", "prompt_version": "v1",
                "tools": [], "state_read": ["messages", "request"],
                "state_write": ["messages", "final_summary"]}},
     {"id": "drafter", "kind": "agent", "role": "worker", "label": "drafter", "group": null,
-     "agent": {"model_binding": "anthropic/claude-haiku-4-5", "prompt_version": "v1",
+     "agent": {"model_binding": "openai/gpt-5-mini", "prompt_version": "v1",
                "tools": [], "state_read": ["messages", "request"],
                "state_write": ["messages", "draft"]}},
     {"id": "publisher", "kind": "agent", "role": "worker", "label": "publisher", "group": null,
-     "agent": {"model_binding": "anthropic/claude-haiku-4-5", "prompt_version": "v1",
+     "agent": {"model_binding": "openai/gpt-5-mini", "prompt_version": "v1",
                "tools": ["local/publish_greeting@v1"],
                "state_read": ["messages", "draft"],
                "state_write": ["messages", "published"]}},

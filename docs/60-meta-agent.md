@@ -66,8 +66,8 @@ This means: institutions running `foundry==1.3.0` all get the same meta-agent be
 
 The meta-agent is reasoning-heavy: it reads structured eval failures, diagnoses root causes, proposes targeted edits, validates outcomes. Recommended:
 
+- **OpenAI `gpt-5-mini`** — the framework default (`DEFAULT_META_MODEL_BINDING`): current-generation reasoning at commodity cost; `reasoning_tokens` populated in `TokenUsage` per `10-core-framework.md`. Step up to **`gpt-5`** when forge quality plateaus below threshold.
 - **Anthropic `claude-opus-4-7`** (or current generation) — strong reasoning, generous output for prompt rewriting.
-- **OpenAI `gpt-5`** (current reasoning generation; `reasoning_tokens` populated in `TokenUsage` per `10-core-framework.md`).
 - **Bedrock-on-Anthropic** or **Azure-on-OpenAI** for institutions with data-residency constraints.
 
 Stay on the *current top-tier reasoning model* of whichever provider you're constrained to. Forge quality is highly sensitive to the meta-agent's reasoning capability — under-investing here is the wrong economy. The forge run's cost cap is what bounds spend; using a cheaper model to "save money" usually wastes more on iteration overhead than the model-cost delta.
@@ -86,7 +86,7 @@ foundry forge pipeline_recon \
 
 Model binding affects the meta-agent's `agent_version`. Two operators using the same forge invocation but different `--model` produce different meta-agent versions; results aren't directly comparable (different reasoning quality + style).
 
-The meta-agent's settings always use `temperature: 0.1` (low, but not zero — some exploratory variance helps when it's stuck). `max_tokens` per turn: `4096`. Capability-required: `tool_use` (always), `cache_control` (recommended for repeat reads of catalog descriptions), `extended_thinking` (recommended where available).
+The meta-agent's settings always use `temperature: 0.1` (low, but not zero — some exploratory variance helps when it's stuck; reasoning models drop it on the wire, since they accept only default sampling params). `max_tokens` per turn: `16384` — deliberately generous because on reasoning models it maps to `max_completion_tokens`, which budgets hidden reasoning AND visible output from the same pot; a small cap starves the visible completion. Capability-required: `tool_use` (always), `cache_control` (recommended for repeat reads of catalog descriptions), `extended_thinking` (recommended where available).
 
 ## Prompt structure
 
@@ -478,7 +478,7 @@ $ foundry forge pipeline_recon \
     --max-cost-usd 20
 
 [forge] forge_run_id: 01JKM4ABCDEF
-[forge] meta-agent: claude-opus-4-7 (foundry/configurator/prompts/v3.md)
+[forge] meta-agent: gpt-5-mini (foundry/configurator/prompts/v3.md)
 [forge] guardrails: max_iter=6, max_cost_usd=20, max_wall_time=2h
 [forge] mode: autonomous
 
