@@ -58,6 +58,7 @@ from foundry.studio import (
     layouts,
     obs,
     projects,
+    providers,
     runs,
     storage,
     tasks,
@@ -160,6 +161,10 @@ def create_studio_app(
     ctx.chat = chat.ChatRegistry(ctx)
     ctx.forge = forge.ForgeSupervisor(ctx)
     ctx.tasks = tasks.TaskRegistry(ctx)
+    # Studio-stored provider keys (docs/72 § Provider panel): loaded at
+    # startup into os.environ ONLY where the var isn't already set — the
+    # real environment always wins, mirroring the CLI .env loader.
+    providers.apply_stored_credentials(ctx)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -218,6 +223,7 @@ def create_studio_app(
 
     for module in (
         projects,
+        providers,
         configs,
         catalog,
         doctor,

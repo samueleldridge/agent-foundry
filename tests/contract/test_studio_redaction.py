@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO_ROOT / "tests" / "integration"))
 from studio_helpers import make_studio_repo, stream_sse  # noqa: E402
 
 PLANTED_SECRET = "studio-planted-fake-credential-a1b2c3d4e5f6"
+PLANTED_PROVIDER_KEY = "studio-planted-fake-provider-key-f6e5d4c3b2a1"
 
 
 @pytest.fixture(autouse=True)
@@ -82,6 +83,18 @@ async def test_planted_credential_reaches_zero_route_responses(
             )
             bodies["chat sse"] = json.dumps(frames)
 
+            # PLANT 2: a studio-stored provider key (docs/72 § Provider
+            # panel) — the key value must never appear in any response,
+            # including the save/verify/delete responses themselves.
+            saved = await client.put(
+                "/api/providers/openai/key",
+                json={"api_key": PLANTED_PROVIDER_KEY},
+            )
+            assert saved.status_code == 200, saved.text
+            bodies["providers key save"] = saved.text
+            verified = await client.post("/api/providers/openai/key/verify")
+            bodies["providers key verify"] = verified.text
+
             get_routes = [
                 "/api/health",
                 "/api/projects",
@@ -111,6 +124,8 @@ async def test_planted_credential_reaches_zero_route_responses(
                 "/api/layouts",
                 "/api/chat/hello/sessions",
                 "/api/doctor",
+                "/api/providers",
+                "/api/providers/keys",
                 "/api/openapi.json",
             ]
             for route in get_routes:
@@ -121,10 +136,13 @@ async def test_planted_credential_reaches_zero_route_responses(
             run_events = await client.get(f"/api/runs/{run_id}/events")
             bodies["run events sse"] = run_events.text
 
+            deleted = await client.delete("/api/providers/openai/key")
+            bodies["providers key delete"] = deleted.text
+
     hits = {
         route: body
         for route, body in bodies.items()
-        if PLANTED_SECRET in body
+        if PLANTED_SECRET in body or PLANTED_PROVIDER_KEY in body
     }
     assert hits == {}, f"credential leaked via: {sorted(hits)}"
 

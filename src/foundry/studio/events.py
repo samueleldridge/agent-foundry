@@ -31,6 +31,8 @@ STUDIO_EVENT_KINDS = (
     "studio.sandbox_refused",
     "studio.forge_launched",
     "studio.approval_resolved",
+    "studio.provider_key_saved",
+    "studio.provider_key_deleted",
 )
 
 

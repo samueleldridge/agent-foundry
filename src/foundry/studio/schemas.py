@@ -711,6 +711,84 @@ class StudioHealth(BaseModel):
     else 5) — the forge launch form prefills from this."""
 
 
+# --- providers (docs/72 § Provider panel) ---------------------------------------------
+
+
+class ProviderModelPricing(BaseModel):
+    """Per-1M-token USD prices, mirrored from the shipped manifests
+    (indicative, not authoritative — docs/11 § ModelPricing)."""
+
+    input_per_1m: float
+    output_per_1m: float
+    cache_read_per_1m: float = 0.0
+    cache_write_per_1m: float = 0.0
+
+
+class ProviderModelInfo(BaseModel):
+    """One generation model from a provider's capability/pricing manifest."""
+
+    id: str
+    context_window: int
+    max_output_tokens: int
+    capabilities: list[str] = Field(default_factory=list)
+    """The capability flags that are TRUE for this model (docs/11
+    CapabilityName values, e.g. "tool_use", "vision")."""
+    reasoning: bool = False
+    """extended_thinking or reasoning_effort supported."""
+    pricing: ProviderModelPricing
+
+
+class ProviderEmbeddingModelInfo(BaseModel):
+    """One embedding model from the embedder registry."""
+
+    id: str
+    dimensions: int
+    max_input_tokens: int
+    max_batch_size: int
+    input_per_1m: float
+
+
+class ProviderInfo(BaseModel):
+    name: str
+    label: str
+    kind: Literal["llm", "embedder"]
+    stub: bool = False
+    note: str = ""
+    """For stubs: why the studio doesn't manage keys for it yet."""
+    credentials_env: str | None = None
+    """The default credentials env var (docs/11), e.g. ANTHROPIC_API_KEY.
+    None for stubs whose auth is not a single API key."""
+    models: list[ProviderModelInfo] = Field(default_factory=list)
+    embedding_models: list[ProviderEmbeddingModelInfo] = Field(
+        default_factory=list
+    )
+
+
+class ProviderKeyStatus(BaseModel):
+    """Key status ONLY — the stored key value never appears in any
+    response (docs/72 § Provider panel, redaction rule)."""
+
+    provider: str
+    var_name: str
+    set: bool = False
+    source: Literal["studio", "environment", "unset"] = "unset"
+    last4: str | None = None
+    """Last four characters, studio-stored keys only; env-sourced keys
+    reveal nothing."""
+
+
+class ProviderKeyRequest(BaseModel):
+    api_key: str = Field(min_length=1)
+
+
+class ProviderKeyVerifyResult(BaseModel):
+    provider: str
+    var_name: str
+    ok: bool
+    status_code: int | None = None
+    detail: str = ""
+
+
 __all__ = [
     "AgentSummary",
     "ApprovalItem",
@@ -768,6 +846,13 @@ __all__ = [
     "ProjectUnavailableInfo",
     "PromoteRequest",
     "PromoteResponse",
+    "ProviderEmbeddingModelInfo",
+    "ProviderInfo",
+    "ProviderKeyRequest",
+    "ProviderKeyStatus",
+    "ProviderKeyVerifyResult",
+    "ProviderModelInfo",
+    "ProviderModelPricing",
     "ResumeRequest",
     "ResumeResponse",
     "RollbackRequest",

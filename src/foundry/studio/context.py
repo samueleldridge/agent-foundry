@@ -64,6 +64,13 @@ class StudioContext:
     _tg: Any = None
     _compiled_cache: dict[str, CompiledProject] = field(default_factory=dict)
 
+    studio_env_applied: set[str] = field(default_factory=set)
+    """Env-var names the studio itself loaded from the credentials store
+    (docs/72 § Provider panel). Distinguishes ``source: "studio"`` from
+    ``source: "environment"`` in key statuses, and marks which vars a
+    save may refresh / a delete must unset — real env vars are never
+    touched."""
+
     # --- repo layout -------------------------------------------------------------
 
     @property
@@ -182,6 +189,13 @@ class StudioContext:
         self._compiled_cache.pop(project, None)
         if self.chat is not None:
             self.chat.invalidate(project)
+
+    def invalidate_all(self) -> None:
+        """Drop every compiled project (credential changes affect any
+        project) — a 424-unavailable project recovers on its next
+        request without a studio restart."""
+        for project in list(self._compiled_cache):
+            self.invalidate(project)
 
     # --- lifespan task group ---------------------------------------------------------
 
