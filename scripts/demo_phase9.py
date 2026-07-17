@@ -64,10 +64,14 @@ def marker_gated_transport() -> httpx.MockTransport:
     """The stand-in LLM: correct behaviour iff the prompt keeps MARKER."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.host == "api.anthropic.com", request.url.host
+        assert request.url.host == "api.openai.com", request.url.host
         body = json.loads(request.content)
-        system = str(body.get("system", ""))
-        user_text = body["messages"][0]["content"][0]["text"]
+        system = "".join(
+            m["content"] for m in body["messages"] if m["role"] == "system"
+        )
+        user_text = next(
+            m["content"] for m in body["messages"] if m["role"] == "user"
+        )
         try:
             name = json.loads(user_text).get("name", "world")
         except json.JSONDecodeError:
@@ -78,10 +82,15 @@ def marker_gated_transport() -> httpx.MockTransport:
             else "Hello there."
         )
         payload: dict[str, Any] = {
-            "content": [{"type": "text", "text": json.dumps({"greeting": greeting})}],
-            "stop_reason": "end_turn",
-            "model": "claude-haiku-4-5",
-            "usage": {"input_tokens": 60, "output_tokens": 18},
+            "model": "gpt-5-mini",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({"greeting": greeting}),
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 60, "completion_tokens": 18},
         }
         return httpx.Response(200, json=payload)
 
@@ -97,7 +106,7 @@ def main() -> int:
     # the mock transport (never sent anywhere).
     os.environ["FOUNDRY_HOME"] = str(workspace / ".foundry_home")
     os.environ["FOUNDRY_CATALOG_ROOTS"] = str(REPO_ROOT / "catalog")
-    os.environ.setdefault("ANTHROPIC_API_KEY", "fake-anthropic-key-for-demo")
+    os.environ.setdefault("OPENAI_API_KEY", "fake-openai-key-for-demo")
     os.environ.setdefault("HELLO_SERVICE_API_KEY", "fake-service-key-for-demo")
     transport = marker_gated_transport()
 

@@ -72,17 +72,21 @@ async def main() -> int:
 
     tmp = Path(tempfile.mkdtemp(prefix="studio-smoke-"))
     os.environ["FOUNDRY_HOME"] = str(tmp / "foundry_home")
-    os.environ["ANTHROPIC_API_KEY"] = "fake-anthropic-key-for-smoke"
+    os.environ["OPENAI_API_KEY"] = "fake-openai-key-for-smoke"
     os.environ["HELLO_SERVICE_API_KEY"] = "fake-service-key-for-smoke"
     repo = make_repo(tmp)
     os.environ["FOUNDRY_CATALOG_ROOTS"] = str(repo / "catalog")
 
     def hello_handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        system = str(body.get("system", ""))
+        system = "".join(
+            m["content"] for m in body["messages"] if m["role"] == "system"
+        )
         if "system prompt" in system and "hello_agent" not in system:
             return team_handler(request)
-        user_text = body["messages"][0]["content"][0]["text"]
+        user_text = next(
+            m["content"] for m in body["messages"] if m["role"] == "user"
+        )
         try:
             name = json.loads(user_text).get("name", "world")
         except json.JSONDecodeError:
@@ -90,15 +94,19 @@ async def main() -> int:
         return httpx.Response(
             200,
             json={
-                "content": [
+                "model": "gpt-5-mini",
+                "choices": [
                     {
-                        "type": "text",
-                        "text": json.dumps({"greeting": f"Hello, {name}!"}),
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps(
+                                {"greeting": f"Hello, {name}!"}
+                            ),
+                        },
+                        "finish_reason": "stop",
                     }
                 ],
-                "stop_reason": "end_turn",
-                "model": "claude-haiku-4-5",
-                "usage": {"input_tokens": 50, "output_tokens": 20},
+                "usage": {"prompt_tokens": 50, "completion_tokens": 20},
             },
         )
 
