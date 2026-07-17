@@ -458,6 +458,10 @@ class CredentialsRef(BaseModel):
 
 The `SecretsProvider` interface in `foundry.config.secrets` resolves these refs. Providers never read environment variables directly — they ask the `SecretsProvider` threaded in at startup. This keeps secrets discovery testable and allows pluggable backends (Vault, AWS Secrets Manager, GCP Secret Manager).
 
+### Studio-stored credentials
+
+Foundry Studio's provider panel can store per-provider API keys server-side (`<FOUNDRY_HOME>/studio/credentials.env`, mode `0600`). Those keys layer **under** real environment variables: the studio loads them into `os.environ` only where the var isn't already set, so an exported var, CI secret, or `.env`-loaded value always wins. This is a studio-layer convenience only — the provider layer and `SecretsProvider` are unaffected and never read credential files. Routes, storage, and redaction guarantees: [docs/72-web-studio.md § Provider panel](72-web-studio.md).
+
 ## Cost estimation
 
 Every `ModelResponse` carries `cost_estimate_usd: Decimal | None`. Computed by `pricing.py`:

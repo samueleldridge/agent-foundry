@@ -301,6 +301,22 @@ All queries hit the local SQLite mirror via `foundry.observability.store` — ne
 | `GET` | `/api/projects/{name}/connections/{conn}` | describe (redacted `ConnectionDescriptor`) |
 | `POST` | `/api/projects/{name}/connections/{conn}/refresh` | force pool refresh |
 
+### Provider panel
+
+The Providers screen is where an operator adds API keys and reviews the models each provider offers before pinning a `model_binding` (or embedder binding) in a project.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/providers` | Every shipped provider with its generation models (from the docs/11 capability/pricing manifests: model id, context window, max output tokens, capability flags, per-1M pricing, reasoning flag) and embedding models (from the embedder registry: dimensions, max input tokens, batch size, price). Bedrock/Azure/Vertex appear as `stub: true` with a `note` explaining why the studio manages no key for them |
+| `GET` | `/api/providers/keys` | Per-provider key STATUS: `{var_name, set, source: "studio"\|"environment"\|"unset", last4}` |
+| `PUT` | `/api/providers/{name}/key` | `{api_key}` — store a key server-side; loads it into the process env (precedence rule below), invalidates the compiled-project cache so a 424-unavailable project recovers on its next request, and emits a `studio.provider_key_saved` event (`operator: studio`, never the key value) |
+| `DELETE` | `/api/providers/{name}/key` | Remove a **studio-stored** key (file + process env). Env-sourced keys refuse with a structured error naming where to unset them — the studio never mutates the real environment |
+| `POST` | `/api/providers/{name}/key/verify` | Live round-trip using the provider's cheapest authenticated call (a models-list `GET`, or a one-token embed for Voyage) → `{ok, status_code, detail}` |
+
+**Storage + precedence.** Keys entered in the UI are written to `<FOUNDRY_HOME>/studio/credentials.env` (`~/.foundry/studio/credentials.env` by default; file mode `0600`, parent dir `0700`), one `VAR=value` line per provider's `default_credentials_env` (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `VOYAGE_API_KEY`, `COHERE_API_KEY`). At studio startup **and** on every save they are loaded into `os.environ` **only where the var isn't already set** — the real process environment always wins, the same rule as the CLI `.env` loader (`foundry.cli.dotenv`). This is a studio-layer convenience: the library proper still resolves secrets exclusively through `SecretsProvider`/`os.environ` and never reads credential files (docs/11 § Studio-stored credentials).
+
+**Redaction guarantees (absolute).** No route ever returns a stored key: status responses carry `{set, source, last4}` only (`last4` for studio-stored keys, nothing for env-sourced ones); verify failures scrub the key value from any provider/transport message; the audit event carries the provider + var *name* only. The credential-leak contract test plants a key through `PUT .../key` and sweeps every route (including save/verify/delete responses) for it.
+
 ### Forge lifecycle + streaming
 
 | Method | Path | Purpose |
