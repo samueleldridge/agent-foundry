@@ -1,10 +1,12 @@
 name: rag_agent
 description: Answers questions strictly from the retrieved knowledge-base context, citing document ids.
 model_binding:
-  provider: anthropic
-  model: claude-haiku-4-5
+  provider: openai
+  model: gpt-5-mini
   settings:
-    max_tokens: 512
+    # gpt-5-mini is a reasoning model: max_tokens maps to max_completion_tokens,
+    # which budgets hidden reasoning + visible output together.
+    max_tokens: 4096
     temperature: 0.0
 prompt:
   version: v1
@@ -18,8 +20,8 @@ state_visibility:
   write: [answer]
 semantic_cache:
   embedder_binding:
-    provider: voyage
-    model: voyage-3
+    provider: openai
+    model: text-embedding-3-small
   similarity_threshold: 0.95
   ttl_s: 3600
   scope: agent
@@ -35,19 +37,21 @@ retrievers:
         version: v1
         config:
           corpus_path: corpus.json
-          dimensions: 1024
+          # text-embedding-3-small emits 1536-dim vectors; the load-time
+          # dimension check rejects any mismatch before a single call.
+          dimensions: 1536
           embedder_binding:
-            provider: voyage
-            model: voyage-3
+            provider: openai
+            model: text-embedding-3-small
       sparse:
         ref: local/docs_sparse
         version: v1
         config:
           corpus_path: corpus.json
       rrf_k: 60
+    # Local lexical-overlap rerank stage: zero egress, zero extra keys —
+    # the whole project runs on OPENAI_API_KEY alone.
     reranker:
-      ref: catalog/cohere_rerank
+      ref: catalog/local_rerank
       version: v1
-      connection_bindings:
-        cohere: cohere_api
       top_k: 3

@@ -18,7 +18,7 @@ normalize_input (function) → hello_agent (agent, 3 memory layers) → format_o
 Run it (multi-turn input drives the agent's turn loop):
 
 ```bash
-export ANTHROPIC_API_KEY=...
+export OPENAI_API_KEY=...
 uv run python -m foundry run projects/memory_hello --input '{
   "raw_turns": [
     "  hi, my name is Sam  ",

@@ -15,7 +15,7 @@ declared scope.
 ## Run it
 
 ```bash
-export ANTHROPIC_API_KEY=...
+export OPENAI_API_KEY=...
 
 # 1. Start the run — it PAUSES at the publish approval:
 uv run python -m foundry run projects/team_hello \
