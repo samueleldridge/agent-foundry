@@ -230,7 +230,7 @@ _FORGE_MODEL_OPTION = typer.Option(
     None,
     "--model",
     help="Meta-agent model binding, '<provider>/<model>' "
-    "(default anthropic/claude-opus-4-7).",
+    "(default openai/gpt-5-mini).",
 )
 _FORGE_PLATEAU_OPTION = typer.Option(
     3,

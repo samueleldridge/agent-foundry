@@ -67,12 +67,18 @@ meta-agent itself). Bumping this is a framework release."""
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
 DEFAULT_META_MODEL_BINDING = ModelBinding(
-    provider="anthropic",
-    model="claude-opus-4-7",
-    settings=ModelSettings(temperature=0.1, max_tokens=4096),
+    provider="openai",
+    model="gpt-5-mini",
+    settings=ModelSettings(temperature=0.1, max_tokens=16384),
 )
-"""docs/60 § Recommended model binding: current top-tier reasoning model,
-temperature 0.1 (low, not zero), 4096 tokens per turn."""
+"""docs/60 § Recommended model binding: current default reasoning model,
+temperature 0.1 (low, not zero — dropped on the wire for reasoning models,
+which accept only default sampling params), 16384 tokens per turn.
+
+The 16384 budget is deliberate: gpt-5-mini is a reasoning model, so the
+adapter sends ``max_completion_tokens``, which pays for hidden reasoning
+AND visible output from one pot — a 4096 budget starves the visible
+completion."""
 
 
 def forge_max_iter_default() -> int:
