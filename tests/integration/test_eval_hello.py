@@ -4,8 +4,8 @@ httpx.MockTransport fakes — the established no-live-keys pattern.
 
 Gates covered here (docs/03 § Phase 4):
 - 5-case hello project eval runs -> result with score + per-case details.
-- llm_judge goes through the provider abstraction (anthropic agent judged
-  by an openai-bound judge through ONE transport).
+- llm_judge goes through the provider abstraction (gpt-5-mini agent judged
+  by a separately-bound gpt-4o-mini judge through ONE transport).
 - eval artifact lands under ~/.foundry/runs/<eval_run_id>/ and reads back.
 - determinism: same eval + seed -> same score.
 - --fail-under 0.9 exits non-zero below the floor.
@@ -48,33 +48,42 @@ def _isolated_env(
             shutil.rmtree(state)
 
 
-def _anthropic_reply(payload: dict[str, Any]) -> httpx.Response:
+def _openai_reply(payload: dict[str, Any]) -> httpx.Response:
     return httpx.Response(
         200,
         json={
-            "content": [{"type": "text", "text": json.dumps(payload)}],
-            "stop_reason": "end_turn",
-            "model": "claude-haiku-4-5",
-            "usage": {"input_tokens": 50, "output_tokens": 20},
+            "model": "gpt-5-mini",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps(payload),
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 50, "completion_tokens": 20},
         },
     )
 
 
 def _greeter_transport(*, name_in_greeting: bool = True) -> httpx.MockTransport:
-    """Anthropic fake that reads the caller's name out of the request and
+    """OpenAI fake that reads the caller's name out of the request and
     greets (or pointedly fails to greet) by name."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.host == "api.anthropic.com"
+        assert request.url.host == "api.openai.com"
         body = json.loads(request.content)
-        user_text = body["messages"][0]["content"][0]["text"]
+        user_text = next(
+            m for m in body["messages"] if m["role"] == "user"
+        )["content"]
         name = json.loads(user_text)["name"]
         greeting = (
             f"Hello, {name}! Lovely to meet you."
             if name_in_greeting
             else "Hello there, wonderful stranger!"
         )
-        return _anthropic_reply({"greeting": greeting})
+        return _openai_reply({"greeting": greeting})
 
     return httpx.MockTransport(handler)
 
@@ -125,13 +134,17 @@ def test_hello_project_eval_five_cases_scores_and_details(
 def test_deterministic_eval_reproduces_the_score(tmp_path: Path) -> None:
     """Same system + eval set + seed -> same score (mock transport makes
     the model side exactly reproducible; the harness must not add noise).
-    Deterministic mode also forces temperature 0 on the request."""
-    seen_temperatures: list[Any] = []
+    Deterministic mode still forces temperature 0 in settings, but
+    gpt-5-mini is a REASONING model: those accept only default sampling
+    params (non-default temperature/top_p is a 400), so the adapter DROPS
+    temperature from the wire entirely. The equal-strength wire check is
+    therefore its ABSENCE: no sampling override may leak through."""
+    seen_bodies: list[dict[str, Any]] = []
     base = _greeter_transport()
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        seen_temperatures.append(body.get("temperature"))
+        seen_bodies.append(body)
         return base.handler(request)  # type: ignore[attr-defined]
 
     scores: list[float] = []
@@ -145,7 +158,10 @@ def test_deterministic_eval_reproduces_the_score(tmp_path: Path) -> None:
     for run_dir in sorted(_eval_runs_root(tmp_path).iterdir()):
         scores.append(load_eval_result(run_dir).score)
     assert scores == [1.0, 1.0]
-    assert all(t == 0.0 for t in seen_temperatures), seen_temperatures
+    assert seen_bodies
+    # reasoning model: the adapter must not leak ANY sampling override
+    assert all("temperature" not in b for b in seen_bodies), seen_bodies
+    assert all("top_p" not in b for b in seen_bodies), seen_bodies
 
 
 # --- fail-under gate --------------------------------------------------------------------
@@ -211,21 +227,25 @@ def test_all_cases_erroring_is_infrastructure_exit_2(tmp_path: Path) -> None:
 def test_llm_judge_uses_provider_abstraction_cross_vendor(
     tmp_path: Path,
 ) -> None:
-    """The agent under test is anthropic-bound; the judge ModelBinding is
-    openai-bound. ONE transport serves both hosts — proving the judge call
-    goes through the registered provider adapters, nothing hardcoded."""
+    """The agent under test is bound to gpt-5-mini; the judge ModelBinding
+    is its OWN binding (gpt-4o-mini). ONE transport serves both, keyed on
+    the requested model — proving the judge call goes through the
+    registered provider adapters with its own binding, nothing hardcoded."""
     judge_calls: list[dict[str, Any]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "api.anthropic.com":
-            body = json.loads(request.content)
-            user_text = body["messages"][0]["content"][0]["text"]
+        assert request.url.host == "api.openai.com"
+        body = json.loads(request.content)
+        if body["model"] == "gpt-5-mini":  # the agent under test
+            user_text = next(
+                m for m in body["messages"] if m["role"] == "user"
+            )["content"]
             name = json.loads(user_text)["name"]
-            return _anthropic_reply(
+            return _openai_reply(
                 {"greeting": f"Hello, {name}! Wonderful to see you."}
             )
-        assert request.url.host == "api.openai.com"
-        judge_calls.append(json.loads(request.content))
+        assert body["model"] == "gpt-4o-mini"  # the judge's own binding
+        judge_calls.append(body)
         return httpx.Response(
             200,
             json={
@@ -256,7 +276,9 @@ def test_llm_judge_uses_provider_abstraction_cross_vendor(
     # the rendered rubric reached the judge with the actual output woven in
     judge_prompt = json.dumps(judge_calls[0])
     assert "Actual output" in judge_prompt
-    # judge is deterministic-mode too: temperature 0 + seed (openai supports it)
+    # judge is deterministic-mode too: gpt-4o-mini is NOT a reasoning model,
+    # so temperature 0 + seed genuinely ride the wire (unlike the gpt-5-mini
+    # agent under test, where the adapter drops sampling params).
     assert judge_calls[0]["temperature"] == 0.0
     assert judge_calls[0]["seed"] == 42
 
@@ -318,21 +340,28 @@ def test_memory_agent_eval_drives_the_turn_loop(tmp_path: Path) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal agent_turns
-        assert request.url.host == "api.anthropic.com"
+        assert request.url.host == "api.openai.com"
         body = json.loads(request.content)
-        user_text = body["messages"][-1]["content"][0]["text"]
+        user_text = body["messages"][-1]["content"]
         if "user_facts consolidator" in user_text:
             return httpx.Response(
                 200,
                 json={
-                    "content": [{"type": "text", "text": "- knows Sam"}],
-                    "stop_reason": "end_turn",
-                    "model": "claude-haiku-4-5",
-                    "usage": {"input_tokens": 40, "output_tokens": 10},
+                    "model": "gpt-5-mini",
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "- knows Sam",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 40, "completion_tokens": 10},
                 },
             )
         agent_turns += 1
-        return _anthropic_reply({"reply": f"ack-{agent_turns}"})
+        return _openai_reply({"reply": f"ack-{agent_turns}"})
 
     eval_dir = tmp_path / "memory_eval"
     eval_dir.mkdir()

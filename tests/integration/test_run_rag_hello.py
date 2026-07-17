@@ -28,51 +28,66 @@ INPUT = '{"query": "what is the capital of France?"}'
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake-voyage-key-for-tests")
-    monkeypatch.setenv("COHERE_API_KEY", "fake-cohere-key-for-tests")
+    # Single-key project: LLM + embedder both ride OPENAI_API_KEY; the
+    # rerank stage is catalog/local_rerank (no key, no egress).
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(REPO_ROOT / "catalog"))
 
 
-def _vector(text: str, dims: int = 1024) -> list[float]:
+def _vector(text: str, dims: int = 1536) -> list[float]:
     """Deterministic pseudo-embedding: identical text → identical vector
     (cosine 1.0), different text → uncorrelated vector."""
     rng = random.Random(text)
     return [rng.uniform(-1, 1) for _ in range(dims)]
 
 
-def _tool_use_turn(*blocks: dict[str, Any]) -> dict[str, Any]:
+def _tool_use_turn(*calls: dict[str, Any]) -> dict[str, Any]:
     return {
-        "content": [{"type": "text", "text": "Searching."}, *blocks],
-        "stop_reason": "tool_use",
-        "model": "claude-haiku-4-5",
-        "usage": {"input_tokens": 100, "output_tokens": 30},
+        "model": "gpt-5-mini",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "Searching.",
+                "tool_calls": list(calls),
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 30},
     }
 
 
 def _search_block(block_id: str = "tu_1") -> dict[str, Any]:
     return {
-        "type": "tool_use",
         "id": block_id,
-        "name": "search_docs",
-        "input": {"query": "capital of France"},
+        "type": "function",
+        "function": {
+            "name": "search_docs",
+            "arguments": json.dumps({"query": "capital of France"}),
+        },
     }
 
 
 def _final_turn() -> dict[str, Any]:
     return {
-        "content": [{"type": "text", "text": json.dumps(
-            {"answer": "Paris is the capital of France.",
-             "sources": ["FR-001"]}
-        )}],
-        "stop_reason": "end_turn",
-        "model": "claude-haiku-4-5",
-        "usage": {"input_tokens": 200, "output_tokens": 40},
+        "model": "gpt-5-mini",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": json.dumps(
+                    {"answer": "Paris is the capital of France.",
+                     "sources": ["FR-001"]}
+                ),
+            },
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 200, "completion_tokens": 40},
     }
 
 
 class RagTransport:
-    """Scripted fake for the three vendors rag_hello touches."""
+    """Scripted fake for the ONE vendor rag_hello touches (openai serves
+    both chat and embeddings; rerank is local — any other host/path is a
+    hard failure, which doubles as the zero-extra-egress assertion)."""
 
     def __init__(self, llm_turns: list[dict[str, Any]] | None = None) -> None:
         self.llm_turns = llm_turns or [
@@ -80,36 +95,23 @@ class RagTransport:
         ]
         self.llm_requests: list[dict[str, Any]] = []
         self.embed_requests: list[dict[str, Any]] = []
-        self.rerank_requests: list[dict[str, Any]] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         host = request.url.host
-        if host == "api.anthropic.com":
+        path = request.url.path
+        if host == "api.openai.com" and path == "/v1/chat/completions":
             self.llm_requests.append(json.loads(request.content))
             index = min(len(self.llm_requests) - 1, len(self.llm_turns) - 1)
             return httpx.Response(200, json=self.llm_turns[index])
-        if host == "api.voyageai.com":
+        if host == "api.openai.com" and path == "/v1/embeddings":
             body = json.loads(request.content)
             self.embed_requests.append(body)
             return httpx.Response(200, json={
                 "data": [{"index": i, "embedding": _vector(t)}
                          for i, t in enumerate(body["input"])],
-                "usage": {"total_tokens": 7 * len(body["input"])},
+                "usage": {"prompt_tokens": 7 * len(body["input"])},
             })
-        if host == "api.cohere.com":
-            body = json.loads(request.content)
-            self.rerank_requests.append(body)
-            count = len(body["documents"])
-            # reverse the input order so reordering is observable
-            results = [
-                {"index": count - 1 - i, "relevance_score": 0.9 - 0.1 * i}
-                for i in range(min(count, body.get("top_n", count)))
-            ]
-            return httpx.Response(200, json={
-                "results": results,
-                "meta": {"billed_units": {"search_units": 1}},
-            })
-        raise AssertionError(f"unexpected host: {host}")
+        raise AssertionError(f"unexpected host/path: {host}{path}")
 
     def build(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handler)
@@ -172,12 +174,16 @@ def test_first_run_retrieves_reranks_and_populates_caches(
     kinds = {e["kind"] for e in _by_event(events, "retrieval")}
     assert kinds == {"dense", "sparse", "hybrid"}
 
-    # rerank: reordered (Cohere fake reverses), truncated to 3, cost present
+    # rerank: the local lexical stage reorders deterministically — FR-001
+    # covers every query token ("capital of France") so it MUST lead, and
+    # the pseudo-embedding order puts a different doc first before rerank —
+    # truncated to 3; cost always populated, and exactly 0 (local = free)
     rerank = _by_event(events, "rerank")[0]
     assert rerank["before_ids"] != rerank["after_ids"]
+    assert rerank["after_ids"][0] == "FR-001"
     assert len(rerank["after_ids"]) == 3
     assert rerank["cost_estimate_usd"] is not None
-    assert float(rerank["cost_estimate_usd"]) > 0
+    assert float(rerank["cost_estimate_usd"]) == 0
 
     # tool-result cache stored; embed events emitted; one run_id throughout
     assert len(_by_event(events, "cache.tool.store")) == 1
@@ -188,9 +194,7 @@ def test_first_run_retrieves_reranks_and_populates_caches(
     assert metadata["llm_call_count"] == 2
     # no secret material anywhere in the artifact
     combined = "".join(p.read_text() for p in run_dir.iterdir() if p.is_file())
-    for secret in ("fake-anthropic-key-for-tests", "fake-voyage-key-for-tests",
-                   "fake-cohere-key-for-tests"):
-        assert secret not in combined
+    assert "fake-openai-key-for-tests" not in combined
 
 
 @pytest.mark.integration
@@ -364,7 +368,7 @@ def test_dimension_mismatch_fails_at_load_before_any_call(
     project = _copy_rag(tmp_path, "rag_dims")
     agent_yaml = project / "agents" / "rag_agent" / "agent.yaml"
     agent_yaml.write_text(
-        agent_yaml.read_text().replace("dimensions: 1024", "dimensions: 1536")
+        agent_yaml.read_text().replace("dimensions: 1536", "dimensions: 1024")
     )
     transport = RagTransport()
     code = execute_run(project, INPUT, transport=transport.build())
@@ -372,7 +376,7 @@ def test_dimension_mismatch_fails_at_load_before_any_call(
     err = capsys.readouterr().err
     assert "EmbedderConfigError" in err
     assert "1024" in err and "1536" in err  # names both dims
-    assert "voyage/voyage-3" in err        # and the disagreeing artifacts
+    assert "openai/text-embedding-3-small" in err  # and the disagreeing artifacts
     # AT LOAD: nothing was called, no artifact written
     assert transport.embed_requests == []
     assert transport.llm_requests == []

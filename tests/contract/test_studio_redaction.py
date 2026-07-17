@@ -25,7 +25,7 @@ PLANTED_PROVIDER_KEY = "studio-planted-fake-provider-key-f6e5d4c3b2a1"
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     # THE PLANT: the fixture connection's credential env var.
     monkeypatch.setenv("HELLO_SERVICE_API_KEY", PLANTED_SECRET)
 
@@ -35,15 +35,17 @@ def _hello_transport() -> httpx.MockTransport:
         return httpx.Response(
             200,
             json={
-                "content": [
+                "model": "gpt-5-mini",
+                "choices": [
                     {
-                        "type": "text",
-                        "text": json.dumps({"greeting": "Hello, leak!"}),
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({"greeting": "Hello, leak!"}),
+                        },
+                        "finish_reason": "stop",
                     }
                 ],
-                "stop_reason": "end_turn",
-                "model": "claude-haiku-4-5",
-                "usage": {"input_tokens": 50, "output_tokens": 20},
+                "usage": {"prompt_tokens": 50, "completion_tokens": 20},
             },
         )
 

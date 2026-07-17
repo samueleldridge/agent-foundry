@@ -57,9 +57,11 @@ def hello_copy(tmp_path: Path) -> Path:
 
 def _greeter_transport(*, name_in_greeting: bool = True) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.host == "api.anthropic.com"
+        assert request.url.host == "api.openai.com"
         body = json.loads(request.content)
-        user_text = body["messages"][0]["content"][0]["text"]
+        user_text = next(
+            m for m in body["messages"] if m["role"] == "user"
+        )["content"]
         name = json.loads(user_text)["name"]
         greeting = (
             f"Hello, {name}! Lovely to meet you."
@@ -69,12 +71,17 @@ def _greeter_transport(*, name_in_greeting: bool = True) -> httpx.MockTransport:
         return httpx.Response(
             200,
             json={
-                "content": [
-                    {"type": "text", "text": json.dumps({"greeting": greeting})}
+                "model": "gpt-5-mini",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({"greeting": greeting}),
+                        },
+                        "finish_reason": "stop",
+                    }
                 ],
-                "stop_reason": "end_turn",
-                "model": "claude-haiku-4-5",
-                "usage": {"input_tokens": 50, "output_tokens": 20},
+                "usage": {"prompt_tokens": 50, "completion_tokens": 20},
             },
         )
 

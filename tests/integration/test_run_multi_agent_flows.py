@@ -31,7 +31,7 @@ TEAM_DIR = REPO_ROOT / "projects" / "team_hello"
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(REPO_ROOT / "catalog"))
 
 
@@ -59,8 +59,8 @@ def _write_agent(
         name: {name}
         description: test agent {name}
         model_binding:
-          provider: anthropic
-          model: claude-haiku-4-5
+          provider: openai
+          model: gpt-5-mini
           settings: {{max_tokens: 256, temperature: 0.0}}
         prompt: {{version: v1, path: prompts/v1.md}}
         output: {{schema: output_schema.py::Output}}
@@ -115,22 +115,49 @@ def _final_state(tmp_path: Path, run_id: str) -> dict[str, Any]:
 
 def _turn(text: str) -> dict[str, Any]:
     return {
-        "content": [{"type": "text", "text": text}],
-        "stop_reason": "end_turn",
-        "model": "claude-haiku-4-5",
-        "usage": {"input_tokens": 40, "output_tokens": 20},
+        "model": "gpt-5-mini",
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 40, "completion_tokens": 20},
     }
 
 
 def _tool_turn(name: str, inputs: dict[str, Any], block_id: str) -> dict[str, Any]:
     return {
-        "content": [
-            {"type": "tool_use", "id": block_id, "name": name, "input": inputs}
+        "model": "gpt-5-mini",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": block_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(inputs),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
         ],
-        "stop_reason": "tool_use",
-        "model": "claude-haiku-4-5",
-        "usage": {"input_tokens": 40, "output_tokens": 20},
+        "usage": {"prompt_tokens": 40, "completion_tokens": 20},
     }
+
+
+def _system_text(body: dict[str, Any]) -> str:
+    """openai wire shape: the system prompt is a role=system message."""
+    return next(
+        (m["content"] for m in body.get("messages", [])
+         if m.get("role") == "system"),
+        "",
+    )
 
 
 class MarkerTransport:
@@ -142,7 +169,7 @@ class MarkerTransport:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        system = body.get("system", "")
+        system = _system_text(body)
         for marker, queue in self.turns.items():
             if marker in system:
                 self.requests.append((marker, body))

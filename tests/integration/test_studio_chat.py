@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 import pytest
+from api_helpers import hello_transport
 from studio_helpers import (
     TEAM_INPUT,
     make_studio_repo,
@@ -25,7 +26,7 @@ pytestmark = pytest.mark.integration
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("HELLO_SERVICE_API_KEY", "fake-service-key-for-tests")
 
 
@@ -34,34 +35,6 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     repo = make_studio_repo(tmp_path, projects=("hello", "team_hello"))
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(repo / "catalog"))
     return repo
-
-
-def _hello_transport() -> httpx.MockTransport:
-    import json
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        user_text = body["messages"][0]["content"][0]["text"]
-        try:
-            name = json.loads(user_text).get("name", "world")
-        except json.JSONDecodeError:
-            name = "world"
-        return httpx.Response(
-            200,
-            json={
-                "content": [
-                    {
-                        "type": "text",
-                        "text": json.dumps({"greeting": f"Hello, {name}!"}),
-                    }
-                ],
-                "stop_reason": "end_turn",
-                "model": "claude-haiku-4-5",
-                "usage": {"input_tokens": 50, "output_tokens": 20},
-            },
-        )
-
-    return httpx.MockTransport(handler)
 
 
 async def _lifespan_client(app: Any) -> Any:
@@ -73,8 +46,9 @@ async def _lifespan_client(app: Any) -> Any:
 async def test_chat_message_streams_llm_deltas_over_session_sse(
     repo: Path,
 ) -> None:
+    # api_helpers.hello_transport: openai-shaped, input-reflecting.
     app = create_studio_app(
-        repo, transport=_hello_transport(), serve_assets=False
+        repo, transport=hello_transport(), serve_assets=False
     )
     async with app.router.lifespan_context(app):
         async with await _lifespan_client(app) as client:

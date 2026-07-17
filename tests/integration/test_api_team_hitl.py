@@ -27,7 +27,7 @@ RUN_INPUT = {"request": "the new release shipping", "audience": "the team"}
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(REPO_ROOT / "catalog"))
 
 
@@ -41,11 +41,34 @@ _AGENT_MARKERS = {
 
 
 def _turn(*blocks: dict[str, Any], stop: str = "end_turn") -> dict[str, Any]:
+    """Assemble an openai chat-completions turn from text/tool_use blocks."""
+    text_parts = [b["text"] for b in blocks if b["type"] == "text"]
+    tool_calls = [
+        {
+            "id": b["id"],
+            "type": "function",
+            "function": {
+                "name": b["name"],
+                "arguments": json.dumps(b["input"]),
+            },
+        }
+        for b in blocks
+        if b["type"] == "tool_use"
+    ]
+    message: dict[str, Any] = {"role": "assistant"}
+    if text_parts:
+        message["content"] = "\n".join(text_parts)
+    if tool_calls:
+        message["tool_calls"] = tool_calls
     return {
-        "content": list(blocks),
-        "stop_reason": stop,
-        "model": "claude-haiku-4-5",
-        "usage": {"input_tokens": 60, "output_tokens": 30},
+        "model": "gpt-5-mini",
+        "choices": [
+            {
+                "message": message,
+                "finish_reason": "tool_calls" if stop == "tool_use" else "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 60, "completion_tokens": 30},
     }
 
 
@@ -112,7 +135,12 @@ def _team_transport() -> httpx.MockTransport:
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        system = body.get("system", "")
+        # openai wire shape: the system prompt is a role=system message
+        system = next(
+            (m["content"] for m in body.get("messages", [])
+             if m.get("role") == "system"),
+            "",
+        )
         agent = next(
             agent
             for agent, marker in _AGENT_MARKERS.items()

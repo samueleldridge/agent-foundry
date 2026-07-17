@@ -3,7 +3,7 @@
 Same posture as the 2a/2b suites: no live API keys — the full real path
 (compile, function nodes, memory layers, episodic retrieval, consolidation)
 runs with only the HTTP layer replaced by httpx.MockTransport serving
-api.anthropic.com.
+api.openai.com.
 """
 
 from __future__ import annotations
@@ -27,13 +27,15 @@ MEMORY_DIR = REPO_ROOT / "projects" / "memory_hello"
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(REPO_ROOT / "catalog"))
 
 
 class MemoryTransport:
-    """Scripted anthropic fake: JSON replies for agent turns, Markdown for
-    consolidator calls (recognised by the consolidator prompt heading)."""
+    """Scripted openai fake: JSON replies for agent turns, Markdown for
+    consolidator calls (recognised by the consolidator prompt heading).
+    Any request that is not a chat completion (e.g. an embedding call from
+    a semantic cache that should be bypassed) is a hard failure."""
 
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
@@ -41,26 +43,24 @@ class MemoryTransport:
         self.consolidations = 0
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        assert request.url.host == "api.anthropic.com"
+        assert request.url.host == "api.openai.com"
+        assert request.url.path == "/v1/chat/completions"
         body = json.loads(request.content)
         self.requests.append(body)
-        user_text = body["messages"][-1]["content"][0]["text"]
+        user_text = body["messages"][-1]["content"]
         if "user_facts consolidator" in user_text:
             self.consolidations += 1
-            content = [{
-                "type": "text",
-                "text": f"- FACTS v{self.consolidations}: name Sam, Paris trip",
-            }]
+            text = f"- FACTS v{self.consolidations}: name Sam, Paris trip"
         else:
             self.agent_turns += 1
-            content = [{
-                "type": "text",
-                "text": json.dumps({"reply": f"ack-{self.agent_turns}"}),
-            }]
+            text = json.dumps({"reply": f"ack-{self.agent_turns}"})
         return httpx.Response(200, json={
-            "content": content, "stop_reason": "end_turn",
-            "model": "claude-haiku-4-5",
-            "usage": {"input_tokens": 120, "output_tokens": 25},
+            "model": "gpt-5-mini",
+            "choices": [{
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 25},
         })
 
     def build(self) -> httpx.MockTransport:
@@ -69,9 +69,19 @@ class MemoryTransport:
     def agent_requests(self) -> list[dict[str, Any]]:
         return [
             r for r in self.requests
-            if "user_facts consolidator"
-            not in r["messages"][-1]["content"][0]["text"]
+            if "user_facts consolidator" not in r["messages"][-1]["content"]
         ]
+
+
+def _chat(request: dict[str, Any]) -> list[dict[str, Any]]:
+    """The conversation as the model saw it, system message excluded (the
+    anthropic wire carried system separately; openai inlines it first)."""
+    return [m for m in request["messages"] if m["role"] != "system"]
+
+
+def _system(request: dict[str, Any]) -> str:
+    return next(m["content"] for m in request["messages"]
+                if m["role"] == "system")
 
 
 def _turns(n: int, suffix: str = "") -> str:
@@ -120,9 +130,9 @@ def test_working_window_shows_exactly_last_5_messages_on_10_turn_run(
 
     # Turn 10's request: exactly 5 windowed messages + the current user turn.
     last = transport.agent_requests()[-1]
-    chat = last["messages"]
+    chat = _chat(last)
     assert len(chat) == 6
-    texts = [m["content"][0]["text"] for m in chat]
+    texts = [m["content"] for m in chat]
     roles = [m["role"] for m in chat]
     # Last 5 of the 18 pre-turn state messages: a7, u8, a8, u9, a9.
     assert roles == ["assistant", "user", "assistant", "user", "assistant", "user"]
@@ -152,7 +162,7 @@ def test_episodic_snippets_land_in_system_suffix_and_memory_read_lists_layer(
     assert code == 0
 
     request = transport.agent_requests()[0]
-    system = request["system"]
+    system = _system(request)
     # The seeded EP-001 episode mentions Paris → retrieved into the
     # configured system_suffix placement, AFTER the hand-authored prompt.
     assert "Relevant past context:" in system
@@ -194,9 +204,9 @@ def test_semantic_consolidation_every_3_turns_writes_state_field(
         "- FACTS v3: name Sam, Paris trip"
     )
     # And turn 4 onwards sees it in the system_prefix placement.
-    turn_4 = transport.agent_requests()[3]
-    assert "FACTS v1" in turn_4["system"]
-    assert turn_4["system"].index("FACTS v1") < turn_4["system"].index(
+    turn_4 = _system(transport.agent_requests()[3])
+    assert "FACTS v1" in turn_4
+    assert turn_4.index("FACTS v1") < turn_4.index(
         "hello_agent — system prompt v1"
     )
 
@@ -235,7 +245,7 @@ def test_failed_episodic_retriever_degrades_with_warning_and_run_completes(
     read = _by_event(events, "memory.read")[0]
     assert read["layers_failed"] == ["past_sessions"]
     # the prompt carries NO episodic snippets — the layer contributed nothing
-    assert "Relevant past context" not in transport.agent_requests()[0]["system"]
+    assert "Relevant past context" not in _system(transport.agent_requests()[0])
 
 
 @pytest.mark.integration
@@ -535,8 +545,8 @@ def test_graph_flow_refs_resolve_across_agents_and_functions(
 _SEMANTIC_CACHE_YAML = """
 semantic_cache:
   embedder_binding:
-    provider: voyage
-    model: voyage-3
+    provider: openai
+    model: text-embedding-3-small
   similarity_threshold: 0.95
   ttl_s: 3600
   scope: agent
@@ -553,15 +563,15 @@ def test_memory_plus_semantic_cache_warns_about_bypass(
     """An agent configuring BOTH memory and semantic_cache gets the cache
     bypassed at runtime (2c deviation 4); the bypass must be VISIBLE — a
     compile warning on stderr + a WarningEvent in the audit trail."""
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake-voyage-key-for-tests")
+    _ = monkeypatch  # signature parity with the other fixture-driven tests
     project = _copy_project(tmp_path, "memory_cached")
     agent_yaml = project / "agents" / "hello_agent" / "agent.yaml"
     agent_yaml.write_text(agent_yaml.read_text() + _SEMANTIC_CACHE_YAML)
 
     transport = MemoryTransport()
-    # MemoryTransport asserts every request hits api.anthropic.com — a
-    # consulted semantic cache would embed via voyage and fail the run, so
-    # exit 0 also proves the bypass itself.
+    # MemoryTransport asserts every request is a chat completion — a
+    # consulted semantic cache would call /v1/embeddings and fail the run,
+    # so exit 0 also proves the bypass itself.
     assert execute_run(project, _turns(2), transport=transport.build()) == 0
     err = capsys.readouterr().err
     assert "cache.semantic.bypassed_by_memory" in err
@@ -588,4 +598,4 @@ def test_run_id_threaded_and_no_secrets_in_artifact(tmp_path: Path) -> None:
     assert {"memory.read", "memory.write", "memory.consolidate",
             "function_node.started", "function_node.completed"} <= kinds
     combined = "".join(p.read_text() for p in run_dir.iterdir() if p.is_file())
-    assert "fake-anthropic-key-for-tests" not in combined
+    assert "fake-openai-key-for-tests" not in combined

@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 import pytest
 from starlette.testclient import TestClient
-from studio_helpers import make_studio_repo
+from studio_helpers import git, make_studio_repo
 
 from foundry.studio.app import create_studio_app
 
@@ -331,20 +331,37 @@ def test_provider_models_match_capability_and_pricing_manifests(
 # --- compile-cache invalidation: 424 project recovers after a key save --------------------
 
 
+def _repo_with_unset_connection_credential(tmp_path: Path) -> Path:
+    """Purpose-built unavailable project: hello with its catalog
+    connection's ``credentials_ref`` pointed at COHERE_API_KEY — a
+    panel-managed provider var the autouse fixture guarantees unset — so
+    compile fails with the missing-env ConfigLoadError (HTTP 424) until
+    the key is saved through the panel. This reproduces the operator
+    report's rag_hello / COHERE_API_KEY shape, which the shipped
+    rag_hello no longer has (it runs on a single OPENAI_API_KEY)."""
+    repo = make_studio_repo(tmp_path, projects=("hello",))
+    system = repo / "projects" / "hello" / "system.yaml"
+    system.write_text(
+        system.read_text().replace("HELLO_SERVICE_API_KEY", "COHERE_API_KEY")
+    )
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "fixture: credential from COHERE_API_KEY")
+    return repo
+
+
 def test_unavailable_project_recovers_after_key_save_without_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The operator-report shape (rag_hello / COHERE_API_KEY): chat is 424
-    while the provider var is missing; saving the key through the panel
-    loads the env + invalidates the compile cache, and the very next
-    request compiles."""
-    os.environ["ANTHROPIC_API_KEY"] = "fake-anthropic-key-for-tests"
-    os.environ["VOYAGE_API_KEY"] = "fake-voyage-key-for-tests"
-    repo = make_studio_repo(tmp_path, projects=("rag_hello",))
+    """The operator-report shape: chat is 424 while the connection's
+    provider var is missing; saving the key through the panel loads the
+    env + invalidates the compile cache, and the very next request
+    compiles."""
+    os.environ["OPENAI_API_KEY"] = "fake-openai-key-for-tests"  # model key
+    repo = _repo_with_unset_connection_credential(tmp_path)
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(repo / "catalog"))
 
     with _client(repo) as client:
-        opened = client.post("/api/chat/rag_hello/sessions")
+        opened = client.post("/api/chat/hello/sessions")
         assert opened.status_code == 424
         body = opened.json()
         assert body["error_class"] == "ProjectUnavailableError"
@@ -356,7 +373,7 @@ def test_unavailable_project_recovers_after_key_save_without_restart(
         )
         assert saved.status_code == 200
 
-        recovered = client.post("/api/chat/rag_hello/sessions")
+        recovered = client.post("/api/chat/hello/sessions")
         assert recovered.status_code == 201, recovered.text
 
 
@@ -365,7 +382,7 @@ def test_key_save_drops_previously_compiled_projects(
 ) -> None:
     """Rotating a key must also drop already-compiled projects (their
     adapters hold the resolved credential)."""
-    os.environ["ANTHROPIC_API_KEY"] = "fake-anthropic-key-for-tests"
+    os.environ["OPENAI_API_KEY"] = "fake-openai-key-for-tests"
     monkeypatch.setenv("HELLO_SERVICE_API_KEY", "fake-service-key-for-tests")
     repo = make_studio_repo(tmp_path, projects=("hello",))
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(repo / "catalog"))

@@ -23,8 +23,8 @@ from foundry.studio.app import create_studio_app
 BAD_AGENT_YAML = """\
 name: hello_agent
 model_binding:
-  provider: anthropic
-  model: claude-haiku-4-5
+  provider: openai
+  model: gpt-5-mini
 prompt:
   version: v2
   path: prompts/v2.md
@@ -40,7 +40,7 @@ schema_version: 1
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("HELLO_SERVICE_API_KEY", "fake-service-key-for-tests")
 
 

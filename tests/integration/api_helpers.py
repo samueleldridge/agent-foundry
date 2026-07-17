@@ -21,12 +21,19 @@ HELLO_DIR = REPO_ROOT / "projects" / "hello"
 TEAM_DIR = REPO_ROOT / "projects" / "team_hello"
 
 
-def anthropic_ok(payload: dict[str, Any]) -> dict[str, Any]:
+def openai_ok(payload: dict[str, Any]) -> dict[str, Any]:
     return {
-        "content": [{"type": "text", "text": json.dumps(payload)}],
-        "stop_reason": "end_turn",
-        "model": "claude-haiku-4-5",
-        "usage": {"input_tokens": 50, "output_tokens": 20},
+        "model": "gpt-5-mini",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps(payload),
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 20},
     }
 
 
@@ -35,13 +42,16 @@ def hello_transport() -> httpx.MockTransport:
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        user_text = body["messages"][0]["content"][0]["text"]
+        # openai wire shape: user message content is a plain string
+        user_text = next(
+            m for m in body["messages"] if m["role"] == "user"
+        )["content"]
         try:
             name = json.loads(user_text).get("name", "world")
         except json.JSONDecodeError:
             name = "world"
         return httpx.Response(
-            200, json=anthropic_ok({"greeting": f"Hello, {name}!"})
+            200, json=openai_ok({"greeting": f"Hello, {name}!"})
         )
 
     return httpx.MockTransport(handler)
@@ -61,7 +71,7 @@ class GatedTransport:
         if self.calls <= self.hang_calls and not self.release.is_set():
             await self.release.wait()
         return httpx.Response(
-            200, json=anthropic_ok({"greeting": "Hello, late world!"})
+            200, json=openai_ok({"greeting": "Hello, late world!"})
         )
 
     def build(self) -> httpx.MockTransport:

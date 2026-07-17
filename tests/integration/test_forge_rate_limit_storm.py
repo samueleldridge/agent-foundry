@@ -80,6 +80,8 @@ class StormTransport:
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
+    # meta-agent binds openai/gpt-5-mini; the toy project stays anthropic
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
     # Keep any jittered (hint-less) backoff test-fast; attempts default (8).
     monkeypatch.setenv("FOUNDRY_RATE_LIMIT_MAX_BACKOFF_S", "0.05")

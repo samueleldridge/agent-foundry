@@ -34,7 +34,7 @@ HELLO_DIR = REPO_ROOT / "projects" / "hello"
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("HELLO_SERVICE_API_KEY", "fake-service-key-for-tests")
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(REPO_ROOT / "catalog"))
 
@@ -45,7 +45,7 @@ class Transport:
         self.llm_requests: list[dict[str, Any]] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        if request.url.host == "api.anthropic.com":
+        if request.url.host == "api.openai.com":
             self.llm_requests.append(json.loads(request.content))
             return httpx.Response(
                 200, json=self.llm_turns[len(self.llm_requests) - 1]
@@ -63,26 +63,42 @@ class Transport:
 def _tool_turns() -> list[dict[str, Any]]:
     return [
         {
-            "content": [
-                {"type": "text", "text": "Checking."},
+            "model": "gpt-5-mini",
+            "choices": [
                 {
-                    "type": "tool_use",
-                    "id": "tu_1",
-                    "name": "get_time",
-                    "input": {"path": "/api/timezone/Etc/UTC"},
-                },
+                    "message": {
+                        "role": "assistant",
+                        "content": "Checking.",
+                        "tool_calls": [
+                            {
+                                "id": "tu_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_time",
+                                    "arguments": json.dumps(
+                                        {"path": "/api/timezone/Etc/UTC"}
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
             ],
-            "stop_reason": "tool_use",
-            "model": "claude-haiku-4-5",
-            "usage": {"input_tokens": 50, "output_tokens": 30},
+            "usage": {"prompt_tokens": 50, "completion_tokens": 30},
         },
         {
-            "content": [
-                {"type": "text", "text": json.dumps({"greeting": "Hello at 10:00!"})}
+            "model": "gpt-5-mini",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps({"greeting": "Hello at 10:00!"}),
+                    },
+                    "finish_reason": "stop",
+                }
             ],
-            "stop_reason": "end_turn",
-            "model": "claude-haiku-4-5",
-            "usage": {"input_tokens": 90, "output_tokens": 25},
+            "usage": {"prompt_tokens": 90, "completion_tokens": 25},
         },
     ]
 
@@ -279,7 +295,7 @@ def test_metric_stream_isolates_project_cost(
     # cumulative counter: at least this run's cost, attributable to hello
     assert hello_cost >= expected_cost * 0.999
     assert any(
-        attrs.get("model") == "claude-haiku-4-5"
+        attrs.get("model") == "gpt-5-mini"
         for attrs, _ in points
         if attrs.get("project") == "hello"
     )

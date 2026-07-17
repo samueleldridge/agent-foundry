@@ -42,7 +42,7 @@ from foundry.api import create_app
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("HELLO_SERVICE_API_KEY", "fake-service-key-for-tests")
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(REPO_ROOT / "catalog"))
 
@@ -177,12 +177,17 @@ def test_graceful_shutdown_drains_in_flight_runs(tmp_path: Path) -> None:
         return httpx.Response(
             200,
             json={
-                "content": [
-                    {"type": "text", "text": json.dumps({"greeting": "hi"})}
+                "model": "gpt-5-mini",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({"greeting": "hi"}),
+                        },
+                        "finish_reason": "stop",
+                    }
                 ],
-                "stop_reason": "end_turn",
-                "model": "claude-haiku-4-5",
-                "usage": {"input_tokens": 5, "output_tokens": 5},
+                "usage": {"prompt_tokens": 5, "completion_tokens": 5},
             },
         )
 

@@ -3,13 +3,17 @@
 Everything runs in THROWAWAY temp git repos (the Phase 5 pattern). No
 provider keys anywhere: ONE ``httpx.MockTransport`` serves BOTH sides —
 
-- the META-AGENT's LLM turns (model ``claude-opus-4-7``) are SCRIPTED: a
-  fixed list of responses whose tool_use blocks drive the REAL meta-tools
-  against the temp repo;
-- the FORGED PROJECT's LLM turns (model ``claude-haiku-4-5``) are COMPUTED
-  by a deterministic responder whose correctness depends on MARKER strings
-  in the live system prompt — so a real prompt-file edit + pin move by the
-  meta-agent produces a real eval-score movement.
+- the META-AGENT's LLM turns (default binding ``openai/gpt-5-mini``, the
+  chat.completions wire shape) are SCRIPTED: a fixed list of responses
+  whose tool_calls drive the REAL meta-tools against the temp repo;
+- the FORGED PROJECT's LLM turns (fixture-pinned ``anthropic`` /
+  ``claude-haiku-4-5``, the messages wire shape) are COMPUTED by a
+  deterministic responder whose correctness depends on MARKER strings in
+  the live system prompt — so a real prompt-file edit + pin move by the
+  meta-agent produces a real eval-score movement. Keeping the toy project
+  on the anthropic wire also proves the forge stays provider-agnostic:
+  meta traffic and project traffic ride different adapters through the
+  same transport.
 
 The toy problem (docs/03 § Phase 6 exit gate): a numeric-answer QA agent.
 Question kinds: ``words: <phrase>`` (answered via the CATALOG word_count
@@ -33,7 +37,7 @@ import httpx
 from foundry.security.injection import unwrap_tool_output
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-META_MODEL = "claude-opus-4-7"
+META_MODEL = "gpt-5-mini"  # DEFAULT_META_MODEL_BINDING (openai)
 PROJECT_MODEL = "claude-haiku-4-5"
 
 DIGIT_MARKER = "DIGIT_RULE"
@@ -306,25 +310,47 @@ def write_scaffolded_project(
 
 
 def meta_tool_turn(*calls: tuple[str, dict[str, Any]]) -> dict[str, Any]:
-    blocks: list[dict[str, Any]] = [{"type": "text", "text": "Working."}]
-    blocks += [
-        {"type": "tool_use", "id": f"tu_{i}", "name": name, "input": inputs}
-        for i, (name, inputs) in enumerate(calls)
-    ]
+    """One scripted meta turn on the openai chat.completions wire shape:
+    ``tool_calls`` with JSON-STRING arguments, finish_reason tool_calls."""
     return {
-        "content": blocks,
-        "stop_reason": "tool_use",
         "model": META_MODEL,
-        "usage": {"input_tokens": 40, "output_tokens": 20},
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Working.",
+                    "tool_calls": [
+                        {
+                            "id": f"tu_{i}",
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(inputs),
+                            },
+                        }
+                        for i, (name, inputs) in enumerate(calls)
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 40, "completion_tokens": 20},
     }
 
 
 def meta_final(report: dict[str, Any]) -> dict[str, Any]:
     return {
-        "content": [{"type": "text", "text": json.dumps(report)}],
-        "stop_reason": "end_turn",
         "model": META_MODEL,
-        "usage": {"input_tokens": 40, "output_tokens": 30},
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps(report),
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 40, "completion_tokens": 30},
     }
 
 
@@ -399,8 +425,8 @@ def project_response(body: dict[str, Any]) -> dict[str, Any]:
 
 
 class ForgeTransport:
-    """Routes anthropic requests: scripted meta turns vs computed project
-    turns, keyed on the request's model."""
+    """Routes requests: scripted meta turns (openai host, gpt-5-mini) vs
+    computed project turns (anthropic host), keyed on the request's host."""
 
     def __init__(self, meta_turns: list[dict[str, Any]]) -> None:
         self.meta_turns = meta_turns
@@ -409,19 +435,36 @@ class ForgeTransport:
         self.project_requests: list[dict[str, Any]] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        assert request.url.host == "api.anthropic.com", request.url
         body = json.loads(request.content)
-        if body["model"] == META_MODEL:
+        if request.url.host == "api.openai.com":
+            assert body["model"] == META_MODEL, body["model"]
+            # gpt-5-mini is a REASONING model: the adapter budgets hidden
+            # reasoning + visible output via max_completion_tokens and
+            # DROPS sampling params (reasoning models 400 on non-default
+            # temperature/top_p) — so the binding's 0.1 never hits the wire.
+            assert body["max_completion_tokens"] == 16384, body
+            assert "max_tokens" not in body, body
+            assert "temperature" not in body, body
             self.meta_requests.append(body)
             if self.meta_index >= len(self.meta_turns):
+                system = next(
+                    (
+                        m["content"]
+                        for m in body["messages"]
+                        if m["role"] == "system"
+                    ),
+                    "",
+                )
                 raise AssertionError(
                     f"meta-agent made more LLM calls than scripted "
                     f"({len(self.meta_turns)}); last system prompt started: "
-                    f"{str(body.get('system', ''))[:120]}"
+                    f"{str(system)[:120]}"
                 )
             turn = self.meta_turns[self.meta_index]
             self.meta_index += 1
             return httpx.Response(200, json=turn)
+        assert request.url.host == "api.anthropic.com", request.url
+        assert body["model"] == PROJECT_MODEL, body["model"]
         self.project_requests.append(body)
         return httpx.Response(200, json=project_response(body))
 

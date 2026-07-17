@@ -16,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("HELLO_SERVICE_API_KEY", "fake-service-key-for-tests")
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(REPO_ROOT / "catalog"))
 
@@ -36,7 +36,7 @@ def test_single_pattern_export_matches_docs72_shape() -> None:
     assert agent_node.kind == "agent"
     assert agent_node.role == "single"
     assert agent_node.agent is not None
-    assert agent_node.agent.model_binding == "anthropic/claude-haiku-4-5"
+    assert agent_node.agent.model_binding == "openai/gpt-5-mini"
     assert agent_node.agent.prompt_version == "v2"
     assert agent_node.agent.tools == ["catalog/http_get_json@v1"]
     assert agent_node.agent.state_read == ["name"]

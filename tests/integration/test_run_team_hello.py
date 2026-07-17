@@ -39,7 +39,7 @@ RUN_INPUT = json.dumps(
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(REPO_ROOT / "catalog"))
 
 
@@ -50,11 +50,34 @@ def _copy_team(tmp_path: Path) -> Path:
 
 
 def _turn(*blocks: dict[str, Any], stop: str = "end_turn") -> dict[str, Any]:
+    """Assemble an openai chat-completions turn from text/tool_use blocks."""
+    text_parts = [b["text"] for b in blocks if b["type"] == "text"]
+    tool_calls = [
+        {
+            "id": b["id"],
+            "type": "function",
+            "function": {
+                "name": b["name"],
+                "arguments": json.dumps(b["input"]),
+            },
+        }
+        for b in blocks
+        if b["type"] == "tool_use"
+    ]
+    message: dict[str, Any] = {"role": "assistant"}
+    if text_parts:
+        message["content"] = "\n".join(text_parts)
+    if tool_calls:
+        message["tool_calls"] = tool_calls
     return {
-        "content": list(blocks),
-        "stop_reason": stop,
-        "model": "claude-haiku-4-5",
-        "usage": {"input_tokens": 60, "output_tokens": 30},
+        "model": "gpt-5-mini",
+        "choices": [
+            {
+                "message": message,
+                "finish_reason": "tool_calls" if stop == "tool_use" else "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 60, "completion_tokens": 30},
     }
 
 
@@ -83,14 +106,19 @@ class TeamTransport:
         self._calls = 0
 
     def agent_of(self, body: dict[str, Any]) -> str:
-        system = body.get("system", "")
+        # openai wire shape: the system prompt is a role=system message
+        system = next(
+            (m["content"] for m in body.get("messages", [])
+             if m.get("role") == "system"),
+            "",
+        )
         for agent, marker in _AGENT_MARKERS.items():
             if marker in system:
                 return agent
         raise AssertionError(f"unrecognised system prompt: {system[:120]}")
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        assert request.url.host == "api.anthropic.com"
+        assert request.url.host == "api.openai.com"
         body = json.loads(request.content)
         agent = self.agent_of(body)
         self.requests.append((agent, body))
@@ -269,14 +297,13 @@ def test_supervisor_hitl_pause_then_approve_end_to_end(
 
     # STRUCTURAL visibility (exit gate): the publisher's prompts only ever
     # carried its read scope ({draft}) — never request/audience; the
-    # drafter never saw publish_status/final_summary.
+    # drafter never saw publish_status/final_summary. (openai wire shape:
+    # user message content is a plain string.)
     for agent, body in transport.requests:
         user_texts = [
-            block["text"]
+            message["content"]
             for message in body["messages"]
             if message["role"] == "user"
-            for block in message["content"]
-            if block.get("type") == "text"
         ]
         first_input = json.loads(user_texts[0])
         if agent == "publisher":

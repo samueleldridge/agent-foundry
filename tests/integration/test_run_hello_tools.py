@@ -28,14 +28,14 @@ FAKE_SERVICE_KEY = "fake-service-key-for-tests"
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("HELLO_SERVICE_API_KEY", FAKE_SERVICE_KEY)
     # copies of hello live under tmp_path; point them at the repo catalog
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(REPO_ROOT / "catalog"))
 
 
 class Transport:
-    """Scripted fake: anthropic turns + time-service responses, with request
+    """Scripted fake: openai turns + time-service responses, with request
     capture for auth/header assertions."""
 
     def __init__(
@@ -49,7 +49,7 @@ class Transport:
         self.time_requests: list[httpx.Request] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        if request.url.host == "api.anthropic.com":
+        if request.url.host == "api.openai.com":
             self.llm_requests.append(json.loads(request.content))
             return httpx.Response(200, json=self.llm_turns[len(self.llm_requests) - 1])
         if request.url.host == "worldtimeapi.org":
@@ -64,30 +64,47 @@ class Transport:
         return httpx.MockTransport(self.handler)
 
 
-def _tool_use_turn(*blocks: dict[str, Any]) -> dict[str, Any]:
+def _tool_use_turn(*calls: dict[str, Any]) -> dict[str, Any]:
     return {
-        "content": [{"type": "text", "text": "Checking."}, *blocks],
-        "stop_reason": "tool_use",
-        "model": "claude-haiku-4-5",
-        "usage": {"input_tokens": 50, "output_tokens": 30},
+        "model": "gpt-5-mini",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Checking.",
+                    "tool_calls": list(calls),
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 30},
     }
 
 
 def _final_turn(greeting: str) -> dict[str, Any]:
     return {
-        "content": [{"type": "text", "text": json.dumps({"greeting": greeting})}],
-        "stop_reason": "end_turn",
-        "model": "claude-haiku-4-5",
-        "usage": {"input_tokens": 90, "output_tokens": 25},
+        "model": "gpt-5-mini",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({"greeting": greeting}),
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 90, "completion_tokens": 25},
     }
 
 
 def _get_time_block(block_id: str = "tu_1") -> dict[str, Any]:
     return {
-        "type": "tool_use",
         "id": block_id,
-        "name": "get_time",
-        "input": {"path": "/api/timezone/Etc/UTC"},
+        "type": "function",
+        "function": {
+            "name": "get_time",
+            "arguments": json.dumps({"path": "/api/timezone/Etc/UTC"}),
+        },
     }
 
 
@@ -130,11 +147,13 @@ def test_one_tool_agent_end_to_end(
         transport.time_requests[0].headers["Authorization"]
         == f"Bearer {FAKE_SERVICE_KEY}"
     )
-    # the second LLM turn saw the tool result
+    # the second LLM turn saw the tool result (openai wire: one
+    # role=tool message per result, content is a plain string)
     second_turn = transport.llm_requests[1]
-    tool_result = second_turn["messages"][-1]["content"][0]
-    assert tool_result["type"] == "tool_result"
-    assert "2026-07-08T12:34:56" in json.dumps(tool_result["content"])
+    tool_result = second_turn["messages"][-1]
+    assert tool_result["role"] == "tool"
+    assert tool_result["tool_call_id"] == "tu_1"
+    assert "2026-07-08T12:34:56" in tool_result["content"]
 
     run_dir = _run_dir(tmp_path)
     tool_calls = _read_jsonl(run_dir / "tool_calls.jsonl")
@@ -164,7 +183,7 @@ def test_one_tool_agent_end_to_end(
         p.read_text() for p in run_dir.iterdir() if p.is_file()
     )
     assert FAKE_SERVICE_KEY not in combined
-    assert "fake-anthropic-key-for-tests" not in combined
+    assert "fake-openai-key-for-tests" not in combined
 
 
 @pytest.mark.integration
@@ -240,8 +259,9 @@ def test_tool_pin_v1_to_v2_changes_loaded_version(tmp_path: Path) -> None:
     tool_calls = _read_jsonl(_run_dir(tmp_path) / "tool_calls.jsonl")
     assert tool_calls[0]["tool_version"] == "v2"
     # v2 behaviour: the tool_result carries the resolved request URL
-    tool_result = transport.llm_requests[1]["messages"][-1]["content"][0]
-    assert "worldtimeapi.org" in json.dumps(tool_result["content"])
+    tool_result = transport.llm_requests[1]["messages"][-1]
+    assert tool_result["role"] == "tool"
+    assert "worldtimeapi.org" in tool_result["content"]
 
 
 @pytest.mark.integration
@@ -312,10 +332,13 @@ def test_tool_not_in_allowlist_refused_and_surfaced_to_llm(tmp_path: Path) -> No
     code = execute_run(project, '{"name": "world"}', transport=transport.build())
     assert code == 0  # dispatcher refuses; error goes to the LLM, run recovers
     assert transport.time_requests == []  # tool never ran
-    tool_result = transport.llm_requests[1]["messages"][-1]["content"][0]
-    assert tool_result["is_error"] is True
-    assert "ToolNotAllowedError" in json.dumps(tool_result["content"])
-    assert "hello_agent" in json.dumps(tool_result["content"])
+    tool_result = transport.llm_requests[1]["messages"][-1]
+    assert tool_result["role"] == "tool"
+    # openai's wire has no is_error flag; the error surfaces as the typed
+    # boundary's error attribute — equal-strength check on the same contract.
+    assert 'error="true"' in tool_result["content"]
+    assert "ToolNotAllowedError" in tool_result["content"]
+    assert "hello_agent" in tool_result["content"]
 
 
 @pytest.mark.integration
@@ -379,16 +402,26 @@ def test_invalid_tool_output_raises_structured_error_to_llm(tmp_path: Path) -> N
     transport = Transport(
         [
             _tool_use_turn(
-                {"type": "tool_use", "id": "tu_9", "name": "broken_time", "input": {}}
+                {
+                    "id": "tu_9",
+                    "type": "function",
+                    "function": {
+                        "name": "broken_time",
+                        "arguments": json.dumps({}),
+                    },
+                }
             ),
             _final_turn("Tool misbehaved."),
         ]
     )
     code = execute_run(project, '{"name": "world"}', transport=transport.build())
     assert code == 0
-    tool_result = transport.llm_requests[1]["messages"][-1]["content"][0]
-    assert tool_result["is_error"] is True
-    assert "ToolOutputValidationError" in json.dumps(tool_result["content"])
+    tool_result = transport.llm_requests[1]["messages"][-1]
+    assert tool_result["role"] == "tool"
+    # openai's wire has no is_error flag; the typed boundary's error
+    # attribute carries the same contract.
+    assert 'error="true"' in tool_result["content"]
+    assert "ToolOutputValidationError" in tool_result["content"]
     tool_calls = _read_jsonl(_run_dir(tmp_path) / "tool_calls.jsonl")
     assert tool_calls[0]["error_category"] == "ToolOutputValidationError"
 

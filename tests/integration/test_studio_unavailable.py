@@ -24,10 +24,14 @@ def _missing_secret_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    # hello binds openai/gpt-5-mini — the model key must be present so the
+    # ONLY thing standing between the project and a compile is the
+    # connection credential below.
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     # hello's connection credentials_ref names this env var — unset, the
-    # project compiles nowhere in this process (the rag_hello /
-    # COHERE_API_KEY shape from the operator report).
+    # project compiles nowhere in this process (the shape the operator
+    # report hit with rag_hello / COHERE_API_KEY before rag_hello went
+    # single-key openai).
     monkeypatch.delenv("HELLO_SERVICE_API_KEY", raising=False)
 
 

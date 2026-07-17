@@ -30,7 +30,30 @@ def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(HELLO_DIR.parents[1] / "catalog"))
 
 
-def _anthropic_transport(greeting: str = "Hello, world!") -> httpx.MockTransport:
+def _openai_transport(greeting: str = "Hello, world!") -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.openai.com"
+        return httpx.Response(
+            200,
+            json={
+                "model": "gpt-5-mini",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({"greeting": greeting}),
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 50, "completion_tokens": 20},
+            },
+        )
+
+    return httpx.MockTransport(handler)
+
+
+def _anthropic_transport(greeting: str = "Hi from anthropic!") -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "api.anthropic.com"
         return httpx.Response(
@@ -41,30 +64,7 @@ def _anthropic_transport(greeting: str = "Hello, world!") -> httpx.MockTransport
                 ],
                 "stop_reason": "end_turn",
                 "model": "claude-haiku-4-5",
-                "usage": {"input_tokens": 50, "output_tokens": 20},
-            },
-        )
-
-    return httpx.MockTransport(handler)
-
-
-def _openai_transport(greeting: str = "Hi from openai!") -> httpx.MockTransport:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.host == "api.openai.com"
-        return httpx.Response(
-            200,
-            json={
-                "model": "gpt-4o-mini",
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": json.dumps({"greeting": greeting}),
-                        },
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {"prompt_tokens": 40, "completion_tokens": 12},
+                "usage": {"input_tokens": 40, "output_tokens": 12},
             },
         )
 
@@ -84,17 +84,17 @@ def _single_run_dir(tmp_path: Path) -> Path:
 def _swap_provider(project_dir: Path, provider: str, model: str) -> None:
     agent_yaml = project_dir / "agents" / "hello_agent" / "agent.yaml"
     text = agent_yaml.read_text()
-    text = text.replace("provider: anthropic", f"provider: {provider}")
-    text = text.replace("model: claude-haiku-4-5", f"model: {model}")
+    text = text.replace("provider: openai", f"provider: {provider}")
+    text = text.replace("model: gpt-5-mini", f"model: {model}")
     agent_yaml.write_text(text)
 
 
 @pytest.mark.integration
-def test_hello_runs_end_to_end_against_anthropic_fake(
+def test_hello_runs_end_to_end_against_openai_fake(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     code = execute_run(
-        HELLO_DIR, '{"name": "world"}', transport=_anthropic_transport()
+        HELLO_DIR, '{"name": "world"}', transport=_openai_transport()
     )
     assert code == 0
     printed = json.loads(capsys.readouterr().out)
@@ -103,7 +103,8 @@ def test_hello_runs_end_to_end_against_anthropic_fake(
     run_dir = _single_run_dir(tmp_path)
     metadata = json.loads((run_dir / "metadata.json").read_text())
     assert metadata["status"] == "completed"
-    assert metadata["provider"] == "anthropic"
+    assert metadata["provider"] == "openai"
+    assert metadata["model"] == "gpt-5-mini"
     assert metadata["run_id"] == run_dir.name
 
     llm_calls = [
@@ -123,7 +124,7 @@ def test_bare_project_name_resolves_against_projects_dir(
     name against ./projects/ from the cwd, like the Phase 5 CLI verbs."""
     monkeypatch.chdir(HELLO_DIR.parents[1])
     code = execute_run(
-        Path("hello"), '{"name": "world"}', transport=_anthropic_transport()
+        Path("hello"), '{"name": "world"}', transport=_openai_transport()
     )
     assert code == 0
     printed = json.loads(capsys.readouterr().out)
@@ -134,18 +135,18 @@ def test_bare_project_name_resolves_against_projects_dir(
 def test_provider_swap_is_a_yaml_only_change(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    project = tmp_path / "hello_openai"
+    project = tmp_path / "hello_anthropic"
     shutil.copytree(HELLO_DIR, project)
-    _swap_provider(project, "openai", "gpt-4o-mini")
+    _swap_provider(project, "anthropic", "claude-haiku-4-5")
 
-    code = execute_run(project, '{"name": "world"}', transport=_openai_transport())
+    code = execute_run(project, '{"name": "world"}', transport=_anthropic_transport())
     assert code == 0
     printed = json.loads(capsys.readouterr().out)
-    assert printed == {"greeting": "Hi from openai!"}
+    assert printed == {"greeting": "Hi from anthropic!"}
 
     metadata = json.loads((_single_run_dir(tmp_path) / "metadata.json").read_text())
-    assert metadata["provider"] == "openai"
-    assert metadata["model"] == "gpt-4o-mini"
+    assert metadata["provider"] == "anthropic"
+    assert metadata["model"] == "claude-haiku-4-5"
 
 
 @pytest.mark.integration
@@ -232,7 +233,7 @@ def test_cost_budget_exceeded_pre_call_terminates_run_failed(
 @pytest.mark.integration
 def test_run_id_threads_through_events_and_artifacts(tmp_path: Path) -> None:
     code = execute_run(
-        HELLO_DIR, '{"name": "world"}', transport=_anthropic_transport()
+        HELLO_DIR, '{"name": "world"}', transport=_openai_transport()
     )
     assert code == 0
     run_dir = _single_run_dir(tmp_path)
@@ -254,10 +255,10 @@ def test_run_id_threads_through_events_and_artifacts(tmp_path: Path) -> None:
 def test_no_secret_material_in_artifacts_or_output(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    execute_run(HELLO_DIR, '{"name": "world"}', transport=_anthropic_transport())
+    execute_run(HELLO_DIR, '{"name": "world"}', transport=_openai_transport())
     out = capsys.readouterr()
     combined = out.out + out.err
     run_dir = _single_run_dir(tmp_path)
     for f in run_dir.iterdir():
         combined += f.read_text()
-    assert "fake-anthropic-key-for-tests" not in combined
+    assert "fake-openai-key-for-tests" not in combined

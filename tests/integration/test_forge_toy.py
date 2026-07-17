@@ -34,6 +34,8 @@ pytestmark = pytest.mark.integration
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
+    # meta-agent binds openai/gpt-5-mini; the toy project stays anthropic
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("GITHUB_ACTOR", raising=False)
@@ -141,13 +143,14 @@ async def test_forge_bootstraps_and_improves_to_threshold(
     # --- catalog tool used in the solution (discovery + pinning) ---
     system_yaml = (project_dir / "system.yaml").read_text()
     assert "ref: catalog/word_count" in system_yaml
+    # meta traffic is openai chat.completions: assistant tool calls live in
+    # the message's tool_calls array (function.name), not content blocks.
     assert any(
-        call["name"] == "list_catalog"
+        call["function"]["name"] == "list_catalog"
         for body in transport.meta_requests
         for msg in body["messages"]
-        if isinstance(msg["content"], list)
-        for call in msg["content"]
-        if isinstance(call, dict) and call.get("type") == "tool_use"
+        for call in msg.get("tool_calls") or []
+        if isinstance(call, dict) and call.get("type") == "function"
     )
     # ... and the forged agent actually CALLED it during evals.
     assert any(

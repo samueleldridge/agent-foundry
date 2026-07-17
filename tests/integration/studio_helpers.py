@@ -143,82 +143,101 @@ _AGENT_MARKERS = {
 }
 
 
-def _turn(*blocks: dict[str, Any], stop: str = "end_turn") -> dict[str, Any]:
+def _text_turn(payload: dict[str, Any]) -> dict[str, Any]:
     return {
-        "content": list(blocks),
-        "stop_reason": stop,
-        "model": "claude-haiku-4-5",
-        "usage": {"input_tokens": 60, "output_tokens": 30},
+        "model": "gpt-5-mini",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps(payload),
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 60, "completion_tokens": 30},
     }
 
 
-def _text(payload: dict[str, Any]) -> dict[str, Any]:
-    return {"type": "text", "text": json.dumps(payload)}
-
-
-def _tool_use(
-    name: str, inputs: dict[str, Any], block_id: str
+def _tool_call_turn(
+    name: str, arguments: dict[str, Any], call_id: str
 ) -> dict[str, Any]:
-    return {"type": "tool_use", "id": block_id, "name": name, "input": inputs}
+    return {
+        "model": "gpt-5-mini",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(arguments),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 100, "completion_tokens": 30},
+    }
 
 
 def team_transport() -> httpx.MockTransport:
     """coordinator → drafter → publisher (HITL-gated tool) → coordinator →
-    END; per-agent scripted turns keyed on system-prompt markers."""
+    END; per-agent scripted openai chat.completions turns keyed on
+    system-prompt markers (the system prompt is the ``role: system``
+    message — openai has no top-level ``system`` key)."""
     turns: dict[str, list[dict[str, Any]]] = {
         "coordinator": [
-            _turn(
-                _tool_use(
-                    "transfer_to_drafter",
-                    {"reason": "draft the greeting"},
-                    "tu_c1",
-                ),
-                stop="tool_use",
+            _tool_call_turn(
+                "transfer_to_drafter",
+                {"reason": "draft the greeting"},
+                "tu_c1",
             ),
-            _turn(
-                _tool_use(
-                    "transfer_to_publisher",
-                    {"reason": "publish the draft"},
-                    "tu_c2",
-                ),
-                stop="tool_use",
+            _tool_call_turn(
+                "transfer_to_publisher",
+                {"reason": "publish the draft"},
+                "tu_c2",
             ),
-            _turn(
-                _tool_use(
-                    "transfer_to_end",
-                    {"reason": "published; all done"},
-                    "tu_c3",
-                ),
-                stop="tool_use",
+            _tool_call_turn(
+                "transfer_to_end",
+                {"reason": "published; all done"},
+                "tu_c3",
             ),
-            _turn(
-                _text(
-                    {
-                        "final_summary": "Drafted and published the "
-                        "release greeting."
-                    }
-                )
+            _text_turn(
+                {
+                    "final_summary": "Drafted and published the "
+                    "release greeting."
+                }
             ),
         ],
         "drafter": [
-            _turn(_text({"draft": "Hello team - the release shipped!"})),
+            _text_turn({"draft": "Hello team - the release shipped!"}),
         ],
         "publisher": [
-            _turn(
-                _tool_use(
-                    "publish_greeting",
-                    {"text": "Hello team - the release shipped!"},
-                    "tu_p1",
-                ),
-                stop="tool_use",
+            _tool_call_turn(
+                "publish_greeting",
+                {"text": "Hello team - the release shipped!"},
+                "tu_p1",
             ),
-            _turn(_text({"publish_status": "published"})),
+            _text_turn({"publish_status": "published"}),
         ],
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        system = body.get("system", "")
+        system = next(
+            (
+                m["content"]
+                for m in body["messages"]
+                if m["role"] == "system"
+            ),
+            "",
+        )
         agent = next(
             agent
             for agent, marker in _AGENT_MARKERS.items()

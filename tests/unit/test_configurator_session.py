@@ -43,7 +43,9 @@ def _git(repo: Path, *args: str) -> str:
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    # DEFAULT_META_MODEL_BINDING is openai/gpt-5-mini: binding the meta
+    # agent resolves OPENAI_API_KEY (no anthropic credential needed here).
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
 
 
 @pytest.fixture

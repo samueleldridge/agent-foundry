@@ -37,13 +37,13 @@ INJECTION_TEXT = (
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("HELLO_SERVICE_API_KEY", FAKE_SERVICE_KEY)
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(REPO_ROOT / "catalog"))
 
 
 class Transport:
-    """Anthropic turns scripted; the tool's time-service returns a payload
+    """OpenAI turns scripted; the tool's time-service returns a payload
     carrying a prompt-injection attempt."""
 
     def __init__(self, llm_turns: list[dict[str, Any]]) -> None:
@@ -51,7 +51,7 @@ class Transport:
         self.llm_requests: list[dict[str, Any]] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        if request.url.host == "api.anthropic.com":
+        if request.url.host == "api.openai.com":
             self.llm_requests.append(json.loads(request.content))
             return httpx.Response(
                 200, json=self.llm_turns[len(self.llm_requests) - 1]
@@ -69,26 +69,42 @@ class Transport:
 def _turns() -> list[dict[str, Any]]:
     return [
         {
-            "content": [
-                {"type": "text", "text": "Checking."},
+            "model": "gpt-5-mini",
+            "choices": [
                 {
-                    "type": "tool_use",
-                    "id": "tu_1",
-                    "name": "get_time",
-                    "input": {"path": "/api/timezone/Etc/UTC"},
-                },
+                    "message": {
+                        "role": "assistant",
+                        "content": "Checking.",
+                        "tool_calls": [
+                            {
+                                "id": "tu_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "get_time",
+                                    "arguments": json.dumps(
+                                        {"path": "/api/timezone/Etc/UTC"}
+                                    ),
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
             ],
-            "stop_reason": "tool_use",
-            "model": "claude-haiku-4-5",
-            "usage": {"input_tokens": 50, "output_tokens": 30},
+            "usage": {"prompt_tokens": 50, "completion_tokens": 30},
         },
         {
-            "content": [
-                {"type": "text", "text": json.dumps({"greeting": "Hello, world!"})}
+            "model": "gpt-5-mini",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps({"greeting": "Hello, world!"}),
+                    },
+                    "finish_reason": "stop",
+                }
             ],
-            "stop_reason": "end_turn",
-            "model": "claude-haiku-4-5",
-            "usage": {"input_tokens": 90, "output_tokens": 25},
+            "usage": {"prompt_tokens": 90, "completion_tokens": 25},
         },
     ]
 
@@ -101,11 +117,13 @@ def test_injected_tool_output_arrives_inside_typed_boundary(
     code = execute_run(HELLO_DIR, '{"name": "world"}', transport=transport.build())
     assert code == 0
 
-    # Turn 2's last message carries the tool result the LLM saw.
+    # Turn 2's last message carries the tool result the LLM saw (openai
+    # wire shape: one role=tool message, content is a plain string).
     second = transport.llm_requests[1]
-    result_block = second["messages"][-1]["content"][0]
-    assert result_block["type"] == "tool_result"
-    text = result_block["content"][0]["text"]
+    result_message = second["messages"][-1]
+    assert result_message["role"] == "tool"
+    assert result_message["tool_call_id"] == "tu_1"
+    text = result_message["content"]
 
     # The injection pattern is present — but INSIDE the typed boundary.
     assert INJECTION_TEXT in text
@@ -116,8 +134,15 @@ def test_injected_tool_output_arrives_inside_typed_boundary(
     assert injection_pos > text.find(">")  # after the opening tag
     assert injection_pos < text.rfind("</tool_result>")  # before the close
 
-    # And the agent's system prompt references the boundary explicitly.
-    system_text = str(second.get("system", ""))
+    # And the agent's system prompt references the boundary explicitly
+    # (openai wire shape: the system prompt is a role=system message).
+    system_text = str(
+        next(
+            (m["content"] for m in second["messages"]
+             if m.get("role") == "system"),
+            "",
+        )
+    )
     assert "<tool_result" in system_text
     assert TOOL_RESULT_BOUNDARY_NOTE in system_text
 
@@ -132,7 +157,7 @@ def test_credential_leak_contract_zero_hits_across_all_surfaces(
     code = execute_run(HELLO_DIR, '{"name": "world"}', transport=transport.build())
     assert code == 0
 
-    secrets = [FAKE_SERVICE_KEY, "fake-anthropic-key-for-tests"]
+    secrets = [FAKE_SERVICE_KEY, "fake-openai-key-for-tests"]
 
     # 1. Every exported span attribute.
     for span in span_exporter.get_finished_spans():

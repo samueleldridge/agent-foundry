@@ -27,7 +27,7 @@ HELLO_DIR = REPO_ROOT / "projects" / "hello"
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("HELLO_SERVICE_API_KEY", "fake-service-key-for-tests")
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(REPO_ROOT / "catalog"))
 
@@ -79,10 +79,15 @@ def _prompt_sensitive_transport() -> httpx.MockTransport:
     does not)."""
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.host == "api.anthropic.com"
+        assert request.url.host == "api.openai.com"
         body = json.loads(request.content)
-        system_text = body.get("system", "")
-        user_text = body["messages"][0]["content"][0]["text"]
+        system_text = next(
+            (m["content"] for m in body["messages"] if m["role"] == "system"),
+            "",
+        )
+        user_text = next(
+            m for m in body["messages"] if m["role"] == "user"
+        )["content"]
         name = json.loads(user_text)["name"]
         greeting = (
             f"Hello, {name}! It is a fine hour."
@@ -92,13 +97,17 @@ def _prompt_sensitive_transport() -> httpx.MockTransport:
         return httpx.Response(
             200,
             json={
-                "content": [
-                    {"type": "text",
-                     "text": json.dumps({"greeting": greeting})}
+                "model": "gpt-5-mini",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": json.dumps({"greeting": greeting}),
+                        },
+                        "finish_reason": "stop",
+                    }
                 ],
-                "stop_reason": "end_turn",
-                "model": "claude-haiku-4-5",
-                "usage": {"input_tokens": 50, "output_tokens": 20},
+                "usage": {"prompt_tokens": 50, "completion_tokens": 20},
             },
         )
 

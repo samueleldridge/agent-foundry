@@ -38,8 +38,10 @@ def _single_run_dir(tmp_path: Path) -> Path:
 def test_scripted_transport_runs_hello_end_to_end(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # hello binds openai/gpt-5-mini, so the shipped hello project now
+    # exercises scripted_transport's openai branch.
     transport = scripted_transport(
-        [json.dumps({"greeting": "Hello from the script!"})]
+        [json.dumps({"greeting": "Hello from the script!"})], provider="openai"
     )
     code = execute_run(HELLO_DIR, '{"name": "world"}', transport=transport)
     assert code == 0
@@ -49,30 +51,37 @@ def test_scripted_transport_runs_hello_end_to_end(
     run_dir = _single_run_dir(tmp_path)
     metadata = json.loads((run_dir / "metadata.json").read_text())
     assert metadata["status"] == "completed"
-    assert metadata["provider"] == "anthropic"
+    assert metadata["provider"] == "openai"
     assert metadata["run_id"] == run_dir.name
 
 
 @pytest.mark.integration
-def test_scripted_transport_openai_shape(
+def test_scripted_transport_anthropic_shape(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    project = tmp_path / "hello_openai"
+    """The anthropic branch of scripted_transport, against an
+    anthropic-bound copy of hello — hello itself moved to openai, so this
+    keeps BOTH provider branches of the fixture covered.
+
+    (Formerly test_scripted_transport_openai_shape, whose coverage is now
+    carried by the hello end-to-end test above.)"""
+    project = tmp_path / "hello_anthropic"
     shutil.copytree(HELLO_DIR, project)
     agent_yaml = project / "agents" / "hello_agent" / "agent.yaml"
     text = agent_yaml.read_text()
-    text = text.replace("provider: anthropic", "provider: openai")
-    text = text.replace("model: claude-haiku-4-5", "model: gpt-4o-mini")
+    text = text.replace("provider: openai", "provider: anthropic")
+    text = text.replace("model: gpt-5-mini", "model: claude-haiku-4-5")
     agent_yaml.write_text(text)
 
     transport = scripted_transport(
-        [json.dumps({"greeting": "Hi from scripted openai!"})], provider="openai"
+        [json.dumps({"greeting": "Hi from scripted anthropic!"})],
+        provider="anthropic",
     )
     code = execute_run(project, '{"name": "world"}', transport=transport)
     assert code == 0
     printed = json.loads(capsys.readouterr().out)
-    assert printed == {"greeting": "Hi from scripted openai!"}
+    assert printed == {"greeting": "Hi from scripted anthropic!"}
 
     metadata = json.loads((_single_run_dir(tmp_path) / "metadata.json").read_text())
-    assert metadata["provider"] == "openai"
-    assert metadata["model"] == "gpt-4o-mini"
+    assert metadata["provider"] == "anthropic"
+    assert metadata["model"] == "claude-haiku-4-5"

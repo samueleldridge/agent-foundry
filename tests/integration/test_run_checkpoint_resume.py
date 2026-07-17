@@ -33,40 +33,57 @@ MEMORY_DIR = REPO_ROOT / "projects" / "memory_hello"
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("HELLO_SERVICE_API_KEY", "fake-service-key-for-tests")
     monkeypatch.setenv("FOUNDRY_CATALOG_ROOTS", str(REPO_ROOT / "catalog"))
 
 
-def _tool_use_turn(*blocks: dict[str, Any]) -> dict[str, Any]:
+def _tool_use_turn(*calls: dict[str, Any]) -> dict[str, Any]:
     return {
-        "content": [{"type": "text", "text": "Checking."}, *blocks],
-        "stop_reason": "tool_use",
-        "model": "claude-haiku-4-5",
-        "usage": {"input_tokens": 50, "output_tokens": 30},
+        "model": "gpt-5-mini",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Checking.",
+                    "tool_calls": list(calls),
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 50, "completion_tokens": 30},
     }
 
 
 def _final_turn(greeting: str) -> dict[str, Any]:
     return {
-        "content": [{"type": "text", "text": json.dumps({"greeting": greeting})}],
-        "stop_reason": "end_turn",
-        "model": "claude-haiku-4-5",
-        "usage": {"input_tokens": 90, "output_tokens": 25},
+        "model": "gpt-5-mini",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": json.dumps({"greeting": greeting}),
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 90, "completion_tokens": 25},
     }
 
 
 def _get_time_block(block_id: str = "tu_1") -> dict[str, Any]:
     return {
-        "type": "tool_use",
         "id": block_id,
-        "name": "get_time",
-        "input": {"path": "/api/timezone/Etc/UTC"},
+        "type": "function",
+        "function": {
+            "name": "get_time",
+            "arguments": json.dumps({"path": "/api/timezone/Etc/UTC"}),
+        },
     }
 
 
 class KillableTransport:
-    """Scripted anthropic + time-service fake that can 401 chosen LLM calls
+    """Scripted openai + time-service fake that can 401 chosen LLM calls
     (the docs/03 'raise after N tool calls' kill simulation)."""
 
     def __init__(
@@ -81,7 +98,7 @@ class KillableTransport:
         self.time_requests: list[httpx.Request] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        if request.url.host == "api.anthropic.com":
+        if request.url.host == "api.openai.com":
             self.llm_requests.append(json.loads(request.content))
             call_number = len(self.llm_requests)
             if call_number in self.kill_on_llm_calls:
@@ -162,9 +179,9 @@ def test_kill_after_tool_call_then_resume_completes(
     # result restored from the checkpoint...
     assert len(process2.llm_requests) == 1
     resumed_messages = process2.llm_requests[0]["messages"]
-    tool_result = resumed_messages[-1]["content"][0]
-    assert tool_result["type"] == "tool_result"
-    assert "2026-07-09T10:00:00" in json.dumps(tool_result["content"])
+    tool_result = resumed_messages[-1]
+    assert tool_result["role"] == "tool"
+    assert "2026-07-09T10:00:00" in tool_result["content"]
     # ...and the tool did NOT re-execute in process 2.
     assert len(process2.time_requests) == 0
 
@@ -200,20 +217,32 @@ def test_memory_turn_loop_resumes_mid_conversation(
 
     def agent_reply(n: int) -> dict[str, Any]:
         return {
-            "content": [
-                {"type": "text", "text": json.dumps({"reply": f"ack-{n}"})}
+            "model": "gpt-5-mini",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps({"reply": f"ack-{n}"}),
+                    },
+                    "finish_reason": "stop",
+                }
             ],
-            "stop_reason": "end_turn",
-            "model": "claude-haiku-4-5",
-            "usage": {"input_tokens": 120, "output_tokens": 25},
+            "usage": {"prompt_tokens": 120, "completion_tokens": 25},
         }
 
     def consolidation() -> dict[str, Any]:
         return {
-            "content": [{"type": "text", "text": "- FACTS: three turns seen"}],
-            "stop_reason": "end_turn",
-            "model": "claude-haiku-4-5",
-            "usage": {"input_tokens": 120, "output_tokens": 25},
+            "model": "gpt-5-mini",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "- FACTS: three turns seen",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 25},
         }
 
     input_json = json.dumps(
@@ -244,8 +273,9 @@ def test_memory_turn_loop_resumes_mid_conversation(
 
     # Turn 1 was NOT re-asked; process 2 starts at turn 2, and its request
     # already carries turn 1 in the restored working-memory window.
+    # (openai wire: message content is a plain string)
     first_resumed = process2.llm_requests[0]["messages"]
-    assert "turn-02" in first_resumed[-1]["content"][0]["text"]
+    assert "turn-02" in first_resumed[-1]["content"]
     window_texts = json.dumps(first_resumed)
     assert "turn-01" in window_texts  # restored from the checkpointed state
     assert "ack-1" in window_texts
@@ -337,7 +367,7 @@ def test_spans_include_run_id_system_and_agent(
     for attrs in llm_attrs:
         assert attrs["run_id"] == run_id
         assert attrs["agent"] == "hello_agent"
-        assert attrs["provider"] == "anthropic"
+        assert attrs["provider"] == "openai"
         assert attrs["prompt_tokens"] > 0
         assert "stop_reason" in attrs
 

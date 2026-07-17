@@ -39,6 +39,8 @@ pytestmark = pytest.mark.integration
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
+    # meta-agent binds openai/gpt-5-mini; the toy project stays anthropic
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
     monkeypatch.delenv("CI", raising=False)
     monkeypatch.delenv("GITHUB_ACTOR", raising=False)

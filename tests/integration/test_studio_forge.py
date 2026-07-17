@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 import pytest
 from forge_helpers import (
+    META_MODEL,
     PROMPT_WITH_BOTH,
     ForgeTransport,
     make_repo,
@@ -42,6 +43,8 @@ LAUNCH_BODY = {
 @pytest.fixture(autouse=True)
 def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_HOME", str(tmp_path / "foundry_home"))
+    # meta-agent binds openai/gpt-5-mini; the toy project stays anthropic
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-openai-key-for-tests")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-anthropic-key-for-tests")
 
 
@@ -121,7 +124,7 @@ async def test_concurrent_forge_for_same_project_is_409(repo: Path) -> None:
 
     async def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        if body["model"] == "claude-opus-4-7":
+        if body["model"] == META_MODEL:
             await gate.wait()  # hold the meta turn open
         from forge_helpers import project_response
 
@@ -164,7 +167,7 @@ async def test_forge_cancel_finalises_artifact_as_cancelled(
 
     async def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        if body["model"] == "claude-opus-4-7":
+        if body["model"] == META_MODEL:
             await gate.wait()
         from forge_helpers import project_response
 
