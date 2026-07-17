@@ -13,3 +13,4 @@ retrievers:
   - pgvector_dense
   - hybrid_rrf
   - cohere_rerank
+  - local_rerank

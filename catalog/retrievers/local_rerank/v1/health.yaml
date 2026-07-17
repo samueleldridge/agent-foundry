@@ -1,0 +1,17 @@
+name: local_rerank_v1_health
+description: A two-document rerank must return both documents reordered by score.
+scope: retriever
+target: catalog/local_rerank@v1
+cases:
+  - id: rerank_two_docs
+    input:
+      query: "smoke test"
+      documents: ["first document", "a smoke test document"]
+    expected:
+      min_documents: 2
+scorers:
+  - kind: exact
+    name: min_documents_check
+threshold: 1.0
+deterministic: true
+schema_version: 1

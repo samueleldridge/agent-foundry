@@ -1,0 +1,19 @@
+name: local_rerank
+version: v1
+description: |
+  Fully local, dependency-free rerank stage: deterministic lexical-overlap
+  scoring (query tokens found in the document / query tokens total), ties
+  broken by the incoming order. No connection, no API key, zero egress —
+  drop-in stand-in for a hosted cross-encoder so single-key example
+  projects still demonstrate the rerank pipeline. Reorders + truncates
+  only — never introduces documents. Emits a `rerank` event with
+  cost_estimate_usd always populated (0 — local calls are free).
+kind: reranker
+config_schema: schemas.py::LocalRerankStageConfig
+factory: factory.py::build_reranker
+connections_required: []
+health_check: health.yaml
+tags: [retrieval, rerank, local]
+author: foundry-team
+created_at: 2026-07-17T00:00:00Z
+schema_version: 1
