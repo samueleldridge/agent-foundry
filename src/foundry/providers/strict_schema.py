@@ -28,7 +28,9 @@ __all__ = ["to_strict_json_schema"]
 
 def to_strict_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Return a deep copy of ``schema`` satisfying OpenAI strict mode."""
-    return _walk(schema)
+    transformed = _walk(schema)
+    assert isinstance(transformed, dict)  # dict in → dict out, by _walk
+    return transformed
 
 
 def _walk(node: Any) -> Any:
