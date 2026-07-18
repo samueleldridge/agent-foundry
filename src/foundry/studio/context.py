@@ -148,6 +148,22 @@ class StudioContext:
             write_root=project_dir,
         )
 
+    def human_sandbox_for(
+        self, project: str, *, allow_bootstrap: bool = False
+    ) -> PathSandbox:
+        """The HUMAN write sandbox (config editor saves, eval-set saves):
+        like :meth:`sandbox_for` but ``evals/`` is writable — docs/60
+        makes the eval set immutable to the OPTIMIZER, not to the operator
+        who owns it (docs/72 § Eval assistant). ``.foundry/`` (audit log,
+        runtime state) stays read-only for everyone."""
+        project_dir = self.project_dir(project, allow_bootstrap=allow_bootstrap)
+        return PathSandbox(
+            base_dir=self.repo_root,
+            read_roots=(self.repo_root,),
+            write_root=project_dir,
+            denied_write_subdirs=(".foundry",),
+        )
+
     # --- compiled-project cache ---------------------------------------------------
 
     def compiled(self, project: str) -> CompiledProject:

@@ -143,10 +143,12 @@ def _state_file_name(project_dir: Path) -> str:
 
 
 def _editable(rel_path: str) -> bool:
-    """The sandbox denies ``evals/`` + ``.foundry/`` writes; everything
-    else in the project tree is studio-editable."""
+    """The human write surface denies only ``.foundry/`` (audit log +
+    runtime state). ``evals/`` IS human-editable — the eval set is the
+    operator's artifact (docs/72 § Eval assistant); only the meta-agent's
+    sandbox keeps refusing it (docs/60 § Eval set immutability)."""
     first = Path(rel_path).parts[0].casefold() if Path(rel_path).parts else ""
-    return first not in ("evals", ".foundry")
+    return first != ".foundry"
 
 
 def list_files(project_dir: Path) -> list[FileEntry]:
@@ -341,7 +343,9 @@ def build_router(ctx: StudioContext) -> APIRouter:
 
         # 1. Sandbox FIRST: an out-of-tree path must never reach the
         #    validator or the filesystem (403 + studio.sandbox_refused).
-        sandbox = ctx.sandbox_for(name, allow_bootstrap=True)
+        #    HUMAN-shaped: evals/ is writable here (the operator owns the
+        #    eval set); the meta-agent's own sandbox still refuses it.
+        sandbox = ctx.human_sandbox_for(name, allow_bootstrap=True)
         try:
             resolved = sandbox.check_write(project_dir / path)
         except SandboxViolation:

@@ -81,8 +81,9 @@ def test_starter_eval_is_deep_linkable_in_the_config_editor(
     repo: Path,
 ) -> None:
     """The config-editor routes work on a bootstrap skeleton: file tree
-    lists the starter eval, the file content loads (read-only — evals/
-    stays sandbox-protected), and validation runs."""
+    lists the starter eval, the file content loads human-editable (the
+    eval is the operator's artifact — docs/72 § Eval assistant), and
+    validation runs."""
     client = _client(repo)
     assert client.post(
         "/api/projects", json={"name": "qa_bot"}
@@ -93,7 +94,9 @@ def test_starter_eval_is_deep_linkable_in_the_config_editor(
     files = {entry["path"]: entry for entry in tree.json()["files"]}
     eval_entry = files["evals/qa_bot.yaml"]
     assert eval_entry["kind"] == "eval"
-    assert eval_entry["editable"] is False  # the eval is the target
+    # Human-editable: the operator owns the eval; only the META-AGENT's
+    # sandbox refuses evals/ writes (docs/60 § Eval set immutability).
+    assert eval_entry["editable"] is True
 
     content = client.get("/api/projects/qa_bot/files/evals/qa_bot.yaml")
     assert content.status_code == 200, content.text

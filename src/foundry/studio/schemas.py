@@ -413,6 +413,79 @@ class EvalCompareRequest(BaseModel):
     eval_set: str | None = None
 
 
+# --- eval assistant (docs/72 § Eval assistant) ----------------------------------------
+
+
+class EvalAssistQuestionsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: str
+    description: str = Field(min_length=1)
+    """What the operator wants the agent to do (the forge form prefills
+    this when the wizard opens from the new-project flow)."""
+    model: str | None = None
+    """"<provider>/<model>"; None = the assistant default
+    (openai/gpt-5-mini)."""
+
+
+class EvalAssistQuestion(BaseModel):
+    id: str
+    question: str
+    why: str = ""
+    suggested_answer: str | None = None
+    """A guess the human can accept as-is; rendered as the answer
+    placeholder."""
+
+
+class EvalAssistQuestionsResponse(BaseModel):
+    project: str
+    model: str
+    """The "<provider>/<model>" that actually answered."""
+    questions: list[EvalAssistQuestion] = Field(default_factory=list)
+
+
+class EvalAssistAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    answer: str
+
+
+class EvalAssistDraftRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: str
+    description: str = Field(min_length=1)
+    answers: list[EvalAssistAnswer] = Field(default_factory=list)
+    """Skipped questions simply don't appear."""
+    case_count: int = Field(default=10, ge=1, le=50)
+    model: str | None = None
+
+
+class EvalAssistCase(BaseModel):
+    """One drafted case, pre-parsed for the review table."""
+
+    id: str
+    input: dict[str, Any] = Field(default_factory=dict)
+    expected: Any = None
+    line: int | None = None
+    """1-based line of the case's ``id:`` in the YAML (jump-to-line)."""
+
+
+class EvalAssistDraftResponse(BaseModel):
+    """The draft NEVER touches disk here: saving is the human's explicit
+    act through the config-write route (docs/72 § Eval assistant)."""
+
+    project: str
+    model: str
+    yaml: str
+    validation: ValidationResult
+    cases: list[EvalAssistCase] = Field(default_factory=list)
+    suggested_path: str = ""
+    """Project-relative save target (``evals/<project>.yaml``)."""
+    notes: list[str] = Field(default_factory=list)
+
+
 # --- versions / diff / rollback ---------------------------------------------------------
 
 
@@ -816,6 +889,13 @@ __all__ = [
     "DiffResponse",
     "DoctorCheckModel",
     "DoctorReport",
+    "EvalAssistAnswer",
+    "EvalAssistCase",
+    "EvalAssistDraftRequest",
+    "EvalAssistDraftResponse",
+    "EvalAssistQuestion",
+    "EvalAssistQuestionsRequest",
+    "EvalAssistQuestionsResponse",
     "EvalCompareRequest",
     "EvalLaunchRequest",
     "EvalRunRow",

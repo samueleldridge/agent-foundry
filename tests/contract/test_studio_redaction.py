@@ -30,8 +30,49 @@ def _isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HELLO_SERVICE_API_KEY", PLANTED_SECRET)
 
 
+_ASSIST_DRAFT_YAML = """\
+name: hello_assist_draft
+description: Greeting must address the caller.
+scope: project
+target: hello
+cases:
+  - id: plain_name
+    input: { name: "world" }
+    expected: { greeting: "Hello, world!" }
+scorers:
+  - kind: exact
+    name: greeting_match
+    config: { field: greeting }
+threshold: 0.9
+deterministic: true
+seed: 42
+schema_version: 1
+"""
+
+
 def _hello_transport() -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode()) if request.content else {}
+        system_text = str(
+            (body.get("messages") or [{}])[0].get("content", "")
+        )
+        if "clarifying questions" in system_text:
+            content = json.dumps(
+                {
+                    "questions": [
+                        {
+                            "id": "output_shape",
+                            "question": "What does a correct output look like?",
+                            "why": "Expected values are the target.",
+                            "suggested_answer": None,
+                        }
+                    ]
+                }
+            )
+        elif "COMPLETE eval set" in system_text:
+            content = json.dumps({"yaml": _ASSIST_DRAFT_YAML, "notes": []})
+        else:
+            content = json.dumps({"greeting": "Hello, leak!"})
         return httpx.Response(
             200,
             json={
@@ -40,7 +81,7 @@ def _hello_transport() -> httpx.MockTransport:
                     {
                         "message": {
                             "role": "assistant",
-                            "content": json.dumps({"greeting": "Hello, leak!"}),
+                            "content": content,
                         },
                         "finish_reason": "stop",
                     }
@@ -96,6 +137,32 @@ async def test_planted_credential_reaches_zero_route_responses(
             bodies["providers key save"] = saved.text
             verified = await client.post("/api/providers/openai/key/verify")
             bodies["providers key verify"] = verified.text
+
+            # Eval-assistant surfaces (docs/72 § Eval assistant): both
+            # LLM-backed routes run with the planted credentials in the
+            # environment — neither response may carry them.
+            questions = await client.post(
+                "/api/evals/assist/questions",
+                json={
+                    "project": "hello",
+                    "description": "Greet the caller by name.",
+                },
+            )
+            assert questions.status_code == 200, questions.text
+            bodies["eval assist questions"] = questions.text
+            draft = await client.post(
+                "/api/evals/assist/draft",
+                json={
+                    "project": "hello",
+                    "description": "Greet the caller by name.",
+                    "answers": [
+                        {"id": "output_shape", "answer": "a greeting"}
+                    ],
+                    "case_count": 1,
+                },
+            )
+            assert draft.status_code == 200, draft.text
+            bodies["eval assist draft"] = draft.text
 
             get_routes = [
                 "/api/health",

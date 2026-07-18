@@ -206,7 +206,6 @@ def test_sandbox_refuses_out_of_project_writes(repo: Path) -> None:
         "..%2F..%2F..%2Fsrc%2Ffoundry%2Fevil.py",  # encoded traversal
         "..%2F..%2Fcatalog%2Ftools%2Fevil.yaml",  # catalog escape
         "escape_link/outside.txt",  # symlink escape
-        "evals/greeting.yaml",  # denied subtree
         ".foundry/audit.jsonl",  # denied subtree
     ]
     with _client(repo) as client:
@@ -225,6 +224,42 @@ def test_sandbox_refuses_out_of_project_writes(repo: Path) -> None:
         if row["event"] == "studio.sandbox_refused"
     ]
     assert len(refused) == len(cases)
+
+
+@pytest.mark.integration
+def test_human_eval_save_commits_while_meta_agent_sandbox_still_refuses(
+    repo: Path,
+) -> None:
+    """The eval set is the OPERATOR's artifact (docs/72 § Eval assistant):
+    the human config-write route accepts a valid evals/ save and commits
+    it, while the meta-agent-shaped PathSandbox keeps refusing the same
+    path — the optimizer can never move its own target (docs/60)."""
+    from foundry.core.errors import SandboxViolation
+    from foundry.security.sandbox import PathSandbox
+
+    eval_path = repo / "projects" / "hello" / "evals" / "greeting.yaml"
+    content = eval_path.read_text().replace(
+        'input: { name: "world" }', 'input: { name: "reviewed world" }'
+    )
+    with _client(repo) as client:
+        response = client.put(
+            "/api/projects/hello/files/evals/greeting.yaml",
+            json={"content": content},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["commit_message"] == "studio(hello): edit evals/greeting.yaml"
+    assert "reviewed world" in eval_path.read_text()
+    assert "evals/greeting.yaml" in git(repo, "show", "--stat", "HEAD")
+
+    # The meta-agent's sandbox (default denied subtrees) is unchanged.
+    meta_sandbox = PathSandbox(
+        base_dir=repo,
+        read_roots=(repo,),
+        write_root=repo / "projects" / "hello",
+    )
+    with pytest.raises(SandboxViolation):
+        meta_sandbox.check_write(eval_path)
 
 
 # --- rollback via API ---------------------------------------------------------------
