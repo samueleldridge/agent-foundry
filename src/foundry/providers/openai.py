@@ -173,11 +173,18 @@ class OpenAIProvider(ProviderAdapter):
             body["reasoning_effort"] = settings.reasoning_effort.value
         if settings.response_format is not None:
             if settings.response_format.type == "json_schema":
+                from foundry.providers.strict_schema import to_strict_json_schema
+
+                # strict: true rejects schemas without additionalProperties:
+                # false + full `required` on every object node — normalize
+                # any caller schema to OpenAI's documented strict shape.
                 body["response_format"] = {
                     "type": "json_schema",
                     "json_schema": {
                         "name": "output",
-                        "schema": settings.response_format.json_schema or {},
+                        "schema": to_strict_json_schema(
+                            settings.response_format.json_schema or {}
+                        ),
                         "strict": True,
                     },
                 }
