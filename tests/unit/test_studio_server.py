@@ -233,3 +233,13 @@ async def test_event_log_replays_then_hands_over_live() -> None:
     assert resume_sequence("41", 0) == 42
     assert resume_sequence(None, 7) == 7
     assert resume_sequence("junk", 7) == 7
+
+
+@pytest.mark.unit
+def test_studio_refuses_non_workspace_root(tmp_path: Path) -> None:
+    """Launching from a directory without projects/ (e.g. the frontend
+    repo) must fail loudly, not serve an empty workspace."""
+    from foundry.studio.server import execute_studio
+
+    code = execute_studio(tmp_path, open_browser=False)
+    assert code == 2

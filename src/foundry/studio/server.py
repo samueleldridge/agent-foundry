@@ -59,6 +59,16 @@ def execute_studio(
                 context={"host": host},
             )
         repo_root = Path(project_root or Path.cwd()).resolve()
+        if not (repo_root / "projects").is_dir():
+            # Launching from the wrong directory (e.g. the frontend repo)
+            # would silently serve an empty workspace — fail loudly instead.
+            raise ConfigValidationError(
+                f"{repo_root} does not look like a foundry workspace "
+                "(no projects/ directory). Run `foundry studio` from the "
+                "framework repo root, or pass the workspace path as the "
+                "first argument.",
+                context={"repo_root": str(repo_root)},
+            )
         app = create_studio_app(
             repo_root, auth_token=token, serve_assets=not dev
         )
