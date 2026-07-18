@@ -8,7 +8,7 @@ Deferred-from-v1 items, consolidated from the per-phase handoffs and reviews so 
 - Mid-iteration HITL pause inside a forge run.
 - Multi-agent system forging (v1 meta-agent designs single-agent systems).
 - Connection + function-node scaffold meta-tools (`build_connection`, `build_function_node`).
-- Schema-only eval generation.
+- ~~Schema-only eval generation~~ — **DELIVERED WITH GUARDRAILS (2026-07): the studio eval assistant** (`docs/72-web-studio.md` § Eval assistant): a two-step LLM flow (clarifying questions → complete `EvalSpec` draft via the provider abstraction, NOT the meta-agent) with a hard human-review gate — the draft never touches disk until the operator explicitly saves through the validated config-write route. Deterministic scorers only in generated drafts (llm_judge requires human opt-in).
 - Drift daemon (scheduled re-eval + alerting).
 - ~~Forge web UI~~ — **DELIVERED by Phase 10 (Foundry Studio, v1.1)**: full webapp over every CLI feature incl. the forge console with live trajectory (10c complete 2026-07-16; v1.1.0 tags after the manual browser pass in `docs/_manual_tests/phase_10.md`). Spec: `72-web-studio.md`. Browser E2E automation (Playwright) stays excluded → **v1.2 candidate** below.
 - Cross-iteration learning / failure-pattern memory (docs/41).

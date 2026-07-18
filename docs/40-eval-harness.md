@@ -64,6 +64,8 @@ The mental model: eval is the **contract** (what should this thing DO?); pytest 
 
 Detail on testing conventions in `82-dev-ux.md` (Tier 8). What follows in this doc is the eval surface specifically.
 
+> **Errata (2026-07, authoring):** eval sets remain human-owned, but they no longer have to be hand-written from scratch. The studio ships an **eval assistant** (`docs/72-web-studio.md` § Eval assistant): a two-step LLM flow (clarifying questions → complete `EvalSpec` YAML draft) that runs through the provider abstraction — deliberately *not* the meta-agent, since docs/41 forbids the optimizer authoring its own target. Drafts are validated by the real `load_eval_spec` loader, restricted to deterministic exact/numeric scorers, and reach disk only through the human-review save in the config editor. The human owns every `expected` value.
+
 ## Three scopes
 
 Eval shape doesn't change between scopes. The differences are: where the spec lives, what target is evaluated, what the input/output schemas are.
