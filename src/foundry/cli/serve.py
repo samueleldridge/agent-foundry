@@ -23,7 +23,7 @@ import os
 import sys
 from pathlib import Path
 
-from foundry.core.errors import FoundryError
+from foundry.core.errors import ConfigValidationError, FoundryError
 from foundry.observability.logging import configure_logging
 from foundry.runtime.checkpointers import CHECKPOINTER_CHOICES
 
@@ -61,8 +61,21 @@ def execute_serve(
 
     try:
         # Fail fast + report structured errors before uvicorn boots.
+        from foundry.api.auth import is_loopback_host
         from foundry.cli._helpers import resolve_project_dir
         from foundry.runtime.langgraph_adapter import compile_project
+
+        # Non-loopback bind requires an auth token (parity with `foundry
+        # studio`; docs/70 § Authentication — NoAuth never faces a network).
+        if not is_loopback_host(host) and not os.environ.get(
+            "FOUNDRY_API_TOKENS", ""
+        ).strip():
+            raise ConfigValidationError(
+                f"refusing to bind non-loopback host {host!r} without an "
+                "API token — set FOUNDRY_API_TOKENS (comma-separated "
+                "bearer tokens; docs/70 § Authentication)",
+                context={"host": host},
+            )
 
         resolved = resolve_project_dir(str(project_path))
         compiled = compile_project(resolved)
