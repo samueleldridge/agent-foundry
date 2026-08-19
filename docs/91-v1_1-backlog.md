@@ -28,7 +28,7 @@ Deferred-from-v1 items, consolidated from the per-phase handoffs and reviews so 
 
 ## Providers / integrations
 
-- Bedrock (SigV4/boto3) provider + embedder beyond registered stubs; Azure/Vertex adapters.
+- Bedrock (SigV4/boto3) provider + embedder beyond registered stubs; Azure/Vertex adapters. (The docstring-only placeholder modules `providers/{azure,bedrock,vertex}.py` were deleted post-v1.1 — the studio's stub provider cards reference names, not files; the adapters themselves remain backlog items.)
 - `jwt_bearer` RS256 (needs `cryptography` pin); HS256-only today.
 - Live-service validation for Redis/pgvector cache + retrieval backends (fake-tested shapes in CI; manual checklists cover live).
 - Judge calibration sets + configurable judge output schema (docs/40).
