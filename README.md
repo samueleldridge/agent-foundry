@@ -4,6 +4,14 @@ A personal developer kit for building, evaluating, versioning, and orchestrating
 
 **Status: v1.1.** All ten core build phases plus Foundry Studio (Phase 10 — a full React web console in the companion [agent-foundry-studio](https://github.com/samueleldridge/agent-foundry-studio) repo) are implemented and independently reviewed. Design docs (normative, 35 specs) live in [docs/](docs/README.md). This is a reference release — not currently accepting external contributions.
 
+**Highlights**
+
+- **A meta-agent that builds agents** — `foundry forge` discovers catalog tools, scaffolds new ones, writes agent configs, evals every iteration, commits each one to git, and rolls back regressions — sandboxed, cost-capped, and rate-limit resilient.
+- **Everything is text, everything is versioned** — agents are YAML + markdown + Pydantic; tools, prompts, and connections version independently with one-command audited rollback.
+- **Eval-driven by construction** — a deterministic eval harness (tool/agent/project scopes, LLM-judge scorers, cross-version comparison) is the meta-agent's objective function and your CI gate.
+- **Production surfaces included** — FastAPI serving with SSE/WebSockets and human-in-the-loop approvals, OpenTelemetry + local cost analytics, and a full web console with a live multi-agent flow graph.
+- **1100+ backend tests, zero keys needed** — the entire suite runs offline against mock transports; `mypy --strict` and import-boundary linting enforced throughout.
+
 ## Quickstart
 
 Requires Python 3.12 and [uv](https://docs.astral.sh/uv/). One provider API key is enough to run everything — the examples and the meta-agent default to OpenAI (`openai/gpt-5-mini`), and swapping to Anthropic is a one-line YAML change.
