@@ -2,7 +2,7 @@
 
 A personal developer kit for building, evaluating, versioning, and orchestrating multi-agent LLM systems. Configs are text (YAML + markdown + Pydantic), a meta-agent edits them, and the runtime executes compiled specs against any provider.
 
-**Status: v1.0.0.** All ten build phases are implemented and reviewed. Design docs (normative) live in [docs/](docs/README.md).
+**Status: v1.1.** All ten core build phases plus Foundry Studio (Phase 10 — a full React web console in the companion [agent-foundry-studio](https://github.com/samueleldridge/agent-foundry-studio) repo) are implemented and independently reviewed. Design docs (normative, 34 specs) live in [docs/](docs/README.md).
 
 ## Quickstart
 
@@ -54,6 +54,14 @@ curl -s -X POST localhost:8000/run -H 'content-type: application/json' -d '{"nam
 
 `POST /stream` gives SSE with `Last-Event-ID` resume; `WS /ws` is bidirectional (inject input, approve HITL pauses, cancel); `POST /batch` fans out a list of inputs under one cost budget. OpenAPI at `/openapi.json` is generated from the project's spec.
 
+### Foundry Studio — the web console
+
+```bash
+uv run foundry studio
+```
+
+Every CLI feature behind a polished React UI (dark/light): project browsing, config editing with live server-side validation and commit-on-save, catalog explorer, chat with streamed responses and in-chat human-approval gates, a **multi-agent flow-graph visualisation**, a **live forge console** (launch the meta-agent, watch scores/commits/backoffs stream), AI-assisted eval authoring with a human review gate, per-provider API-key management with a model browser, cost/latency dashboards, and user-composable widget dashboards. The frontend lives in the companion [agent-foundry-studio](https://github.com/samueleldridge/agent-foundry-studio) repo (checked out as a sibling directory, `npm run build`); `foundry studio` serves the built app and its control-plane API from one port — and serves an API-only placeholder if the frontend isn't built.
+
 ### Evaluate
 
 ```bash
@@ -89,7 +97,7 @@ uv run python scripts/demo_phase9.py   # eval → serve → regression → rollb
 
 ## Verifying a fresh setup
 
-`uv run pytest tests/` (~1000 tests, no network or keys needed), then the live-key smoke checklists in [docs/_manual_tests/](docs/_manual_tests/) — start with `phase_1.md` (basic runs) and `phase_9.md` (docker + OTel + live forge demo).
+`uv run pytest tests/` (1100+ tests, no network or keys needed), then the live-key smoke checklists in [docs/_manual_tests/](docs/_manual_tests/) — start with `phase_1.md` (basic runs) and `phase_9.md` (docker + OTel + live forge demo).
 
 ## Layout
 
