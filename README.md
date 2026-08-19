@@ -23,23 +23,15 @@ Configs are the source of truth; everything else compiles from them — and the 
 
 ```mermaid
 flowchart LR
-  subgraph configs["Declarative configs — git-versioned"]
-    Y["system.yaml · agent.yaml<br/>prompts/*.md · tools/ · evals/"]
-  end
-  subgraph runtime["Runtime"]
-    C["Compiler<br/>(state visibility enforced)"] --> G["LangGraph StateGraph<br/>(checkpointed, resumable)"]
-    G --> P["Providers<br/>Anthropic · OpenAI"]
-    G --> T["Tools + pooled<br/>authenticated connections"]
-  end
-  Y --> C
-  subgraph loop["Eval-driven loop"]
-    E["Eval harness"] --> F["Meta-agent (forge)"]
-  end
-  F -->|"writes configs · commits<br/>pins versions · rolls back"| Y
-  G -->|"scored runs"| E
-  G -->|"run artifacts · OTel<br/>cost analytics"| O["Observability"]
-  ST["Foundry Studio<br/>web console"] -->|"control plane API"| C
-  API["FastAPI serve<br/>SSE · WebSocket · HITL"] --> G
+  Y[("Declarative configs<br/>YAML · prompts · tools · evals<br/>git-versioned · per-artifact pins")] --> C["Compiler<br/>state-visibility +<br/>pin validation"]
+  OP["Operator surfaces<br/>CLI · Studio web console · REST/SSE/WS API"] -->|"run · serve · chat · forge"| C
+  C --> G["LangGraph runtime<br/>checkpointed · resumable · HITL"]
+  G --> P["Providers<br/>Anthropic · OpenAI"]
+  G --> T["Tools · connections<br/>cache · RAG · memory"]
+  G --> OBS["Observability<br/>OTel · artifacts · cost"]
+  G -->|"every run scored"| E["Eval harness"]
+  E --> FG["Meta-agent<br/>(forge)"]
+  FG -.->|"rewrites configs · one commit per<br/>iteration · rollback on regression"| Y
 ```
 
 ## Quickstart
