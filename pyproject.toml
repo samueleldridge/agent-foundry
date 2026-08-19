@@ -90,7 +90,7 @@ keywords = [
     "developer-kit",
 ]
 # "Private :: Do Not Upload" makes PyPI reject any accidental publish —
-# this is a source-available reference release, not a PyPI package.
+# this repo is not distributed as a PyPI package (remove to publish).
 classifiers = [
     "Private :: Do Not Upload",
     "Development Status :: 5 - Production/Stable",
