@@ -22,7 +22,7 @@ run; `run.started` emitted once per process on resume).
 ## Setup
 
 ```bash
-cd /Users/sam/projects/agent-foundry
+cd <repo-root>
 export ANTHROPIC_API_KEY=...
 runs() { ls -d ~/.foundry/runs/* | tail -1; }
 ```

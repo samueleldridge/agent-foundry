@@ -42,10 +42,10 @@ After Tier 0 you can either read top-down (Tier 1 → Tier 8) or jump to a speci
 
 - Each spec doc has these sections: **Purpose · Inputs/Outputs · Public interfaces · Schemas · Invariants · Failure modes · Implementation notes · Test expectations · Open questions**. Not every doc uses every section, but the shape is consistent.
 - Pydantic schemas are shown as Python code blocks. They are normative — implementations must match the field names and types exactly.
-- Directory paths are always project-relative from `/Users/sam/projects/agent-foundry/`.
+- Directory paths are always project-relative from the repository root (`<repo-root>/`).
 - Code samples are illustrative signatures, not final implementations. Final implementations may refine them but must preserve the contracts stated in **Invariants**.
 - "MUST / MUST NOT / SHOULD" are used in the RFC-2119 sense when contracts are load-bearing.
 
 ## Relationship to the seed idea
 
-`personal_docs/meta-agent-configurator.jsx` describes a narrow, ~200-line meta-agent that edits YAML/markdown configs. That is the **seed**. This doc tree expands it into a full developer kit. The seed's core claim — *configs are text, LLMs edit text, agents are config-driven* — is preserved as a foundational principle throughout (see `00-vision-and-scope.md` § Guiding principles).
+A private seed document (not included in this repository) describes a narrow, ~200-line meta-agent that edits YAML/markdown configs. That is the **seed**. This doc tree expands it into a full developer kit. The seed's core claim — *configs are text, LLMs edit text, agents are config-driven* — is preserved as a foundational principle throughout (see `00-vision-and-scope.md` § Guiding principles).

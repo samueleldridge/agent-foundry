@@ -15,7 +15,7 @@
 ## Setup
 
 ```bash
-cd /Users/sam/projects/agent-foundry
+cd <repo-root>
 ls projects/   # hello  memory_hello  rag_hello
 export ANTHROPIC_API_KEY=...
 # Convenience: latest run dir

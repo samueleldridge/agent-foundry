@@ -13,7 +13,7 @@ throwaway temp repos only.
 
 **The React frontend lives in a SEPARATE repository** —
 `agent-foundry-studio`, checked out as a sibling of this repo (e.g.
-`/Users/sam/projects/agent-foundry-studio`), with its own git + npm.
+`<repo-root>/../agent-foundry-studio`), with its own git + npm.
 This repo never contains a `studio/` tree, `node_modules`, or TSX.
 Consequences implemented here:
 

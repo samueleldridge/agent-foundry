@@ -14,7 +14,7 @@
 ## Setup
 
 ```bash
-cd /Users/sam/projects/agent-foundry
+cd <repo-root>
 
 # Required for provider swap test
 export ANTHROPIC_API_KEY="sk-ant-..."

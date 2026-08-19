@@ -20,7 +20,7 @@ approval timeouts; graph is top-level; one pending approval per resume).
 ## Setup
 
 ```bash
-cd /Users/sam/projects/agent-foundry
+cd <repo-root>
 uv sync
 export ANTHROPIC_API_KEY=...   # never echo it
 rm -f ~/.foundry/checkpoints/team_hello.sqlite   # fresh thread state

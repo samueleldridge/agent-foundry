@@ -21,7 +21,7 @@ forces temperature 0; exit 2 = all cases errored).
 ## Setup
 
 ```bash
-cd /Users/sam/projects/agent-foundry
+cd <repo-root>
 export ANTHROPIC_API_KEY=...
 evalruns() { ls -dt ~/.foundry/runs/* | head -1; }
 ```

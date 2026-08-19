@@ -79,7 +79,7 @@ src/foundry/studio/        # NEW module — dev-time control plane (this doc)
                            #    this repo never contains node_modules or TSX)
 ```
 
-**The frontend lives in a separate repository** (decided at Phase 10a): `agent-foundry-studio`, checked out as a sibling directory of this repo (e.g. `/Users/sam/projects/agent-foundry-studio`). Rules: framework developers edit it; the meta-agent never writes it; project operators never need to touch it; this repo carries **no** `studio/` tree, `node_modules`, or React/TS source. Built assets are produced by `npm run build` into the frontend repo's `dist/` and served by `foundry.studio.server` — located via `FOUNDRY_STUDIO_DIST` or the sibling-checkout convention (§ Packaging).
+**The frontend lives in a separate repository** (decided at Phase 10a): `agent-foundry-studio`, checked out as a sibling directory of this repo (e.g. `<repo-root>/../agent-foundry-studio`). Rules: framework developers edit it; the meta-agent never writes it; project operators never need to touch it; this repo carries **no** `studio/` tree, `node_modules`, or React/TS source. Built assets are produced by `npm run build` into the frontend repo's `dist/` and served by `foundry.studio.server` — located via `FOUNDRY_STUDIO_DIST` or the sibling-checkout convention (§ Packaging).
 
 ### Module layout — `src/foundry/studio/`
 
@@ -114,7 +114,7 @@ Each module owns one route group and delegates to the existing framework modules
 ### Frontend layout — the `agent-foundry-studio` repository
 
 The frontend is its OWN repository (sibling checkout, e.g.
-`/Users/sam/projects/agent-foundry-studio`), with its own git history and
+`<repo-root>/../agent-foundry-studio`), with its own git history and
 npm tooling. Its internal layout:
 
 ```

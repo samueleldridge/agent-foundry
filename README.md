@@ -2,7 +2,7 @@
 
 A personal developer kit for building, evaluating, versioning, and orchestrating multi-agent LLM systems. Configs are text (YAML + markdown + Pydantic), a meta-agent edits them, and the runtime executes compiled specs against any provider.
 
-**Status: v1.1.** All ten core build phases plus Foundry Studio (Phase 10 — a full React web console in the companion [agent-foundry-studio](https://github.com/samueleldridge/agent-foundry-studio) repo) are implemented and independently reviewed. Design docs (normative, 34 specs) live in [docs/](docs/README.md).
+**Status: v1.1.** All ten core build phases plus Foundry Studio (Phase 10 — a full React web console in the companion [agent-foundry-studio](https://github.com/samueleldridge/agent-foundry-studio) repo) are implemented and independently reviewed. Design docs (normative, 35 specs) live in [docs/](docs/README.md).
 
 ## Quickstart
 
@@ -104,7 +104,7 @@ uv run python scripts/demo_phase9.py   # eval → serve → regression → rollb
 - `src/foundry/` — the framework (core, providers, config, orchestration, runtime, eval, versioning, configurator, api, observability, storage, security, cli).
 - `catalog/` — shared, versioned tools/connections/retrievers. Promotion is human-gated (`foundry catalog promote`).
 - `projects/` — configured systems (the four examples above; yours go here).
-- `docs/` — the 33 normative specs, phase handoffs, retros, demos, manual test checklists.
+- `docs/` — the 35 normative specs, phase handoffs, retros, demos, manual test checklists.
 - `deploy/` — Dockerfile + per-platform manifests.
 
 ## Docs

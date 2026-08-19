@@ -21,7 +21,7 @@
 ## Setup
 
 ```bash
-cd /Users/sam/projects/agent-foundry
+cd <repo-root>
 export ANTHROPIC_API_KEY="sk-ant-..."
 export VOYAGE_API_KEY="..."
 export COHERE_API_KEY="..."

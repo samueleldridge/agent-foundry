@@ -15,7 +15,7 @@
 No env vars or external credentials required for Phase 0 — there's no LLM call yet.
 
 ```bash
-cd /Users/sam/projects/agent-foundry
+cd <repo-root>
 ```
 
 ## Tests

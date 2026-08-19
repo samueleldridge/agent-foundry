@@ -22,7 +22,7 @@ export HELLO_SERVICE_API_KEY=dummy      # worldtimeapi ignores auth; the key is 
 ## Setup
 
 ```bash
-cd /Users/sam/projects/agent-foundry
+cd <repo-root>
 ls catalog/tools/ catalog/connections/
 cat catalog/index.yaml
 ls projects/hello/ projects/hello/agents/hello_agent/

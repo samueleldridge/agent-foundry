@@ -23,7 +23,7 @@ Rollback and promotion COMMIT — run the whole session in a scratch clone
 so `main` is untouched, and throw it away afterwards:
 
 ```bash
-git clone /Users/sam/projects/agent-foundry /tmp/foundry-smoke-5
+git clone <repo-root> /tmp/foundry-smoke-5
 cd /tmp/foundry-smoke-5
 uv sync
 audit() { tail -1 projects/hello/.foundry/audit.jsonl | python3 -m json.tool; }
@@ -154,6 +154,6 @@ cd / && rm -rf /tmp/foundry-smoke-5
 ## Sign-off
 
 - [ ] All 7 tests pass as described.
-- [ ] The REAL repo (`/Users/sam/projects/agent-foundry`) shows no new
+- [ ] The REAL repo (`<repo-root>`) shows no new
       commits and a clean tree afterwards.
 - [ ] Operator notes any deviations in this file before Phase 6 starts.

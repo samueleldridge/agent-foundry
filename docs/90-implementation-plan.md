@@ -1289,7 +1289,7 @@ Node ≥ 26. (@xyflow/react + react-grid-layout are 10c — do not add.)
 
 DELIVERABLES (per docs/03 § Phase 10b):
 1. The agent-foundry-studio repository (a SIBLING checkout of this
-   repo, e.g. /Users/sam/projects/agent-foundry-studio, with its OWN
+   repo, e.g. <repo-root>/../agent-foundry-studio, with its OWN
    git history) per docs/72 § Frontend layout: package.json,
    vite.config.ts (dev proxy /api → studio port), tsconfig (strict),
    eslint config, index.html, src/ skeleton. This repo gains NO

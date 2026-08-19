@@ -23,7 +23,7 @@ frozen-once-superseded version immutability; no resume/interactive in v1).
 Forge COMMITS on a project branch — run everything in a scratch clone:
 
 ```bash
-git clone /Users/sam/projects/agent-foundry /tmp/foundry-smoke-6
+git clone <repo-root> /tmp/foundry-smoke-6
 cd /tmp/foundry-smoke-6
 uv sync
 export ANTHROPIC_API_KEY=...   # never echo it

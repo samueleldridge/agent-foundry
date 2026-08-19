@@ -25,7 +25,7 @@ deferred).
 ## Setup
 
 ```bash
-cd /Users/sam/projects/agent-foundry
+cd <repo-root>
 uv sync
 export ANTHROPIC_API_KEY=...   # never echo it
 rm -f ~/.foundry/checkpoints/hello.sqlite ~/.foundry/checkpoints/team_hello.sqlite
