@@ -118,7 +118,7 @@ def test_placeholder_page_serves_when_no_frontend_built(
     # an explicit override that holds no build is authoritative (see above).
     monkeypatch.setenv("FOUNDRY_STUDIO_DIST", str(tmp_path / "empty"))
     app = create_studio_app(REPO_ROOT)
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         response = client.get("/")
         assert response.status_code == 200
         assert "frontend is not built yet" in response.text
@@ -139,7 +139,7 @@ def test_spa_fallback_serves_built_assets(
     (dist / "assets" / "app.js").write_text("console.log('studio')")
     monkeypatch.setenv("FOUNDRY_STUDIO_DIST", str(dist))
     app = create_studio_app(REPO_ROOT)
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         assert client.get("/assets/app.js").text == "console.log('studio')"
         # history fallback: any non-/api miss serves index.html
         assert client.get("/projects/hello/configs").text == (
@@ -155,7 +155,7 @@ def test_bearer_token_gates_every_api_route(tmp_path: Path) -> None:
     app = create_studio_app(
         REPO_ROOT, auth_token="s3cret", serve_assets=False
     )
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         assert client.get("/api/health").status_code == 401
         assert client.get("/api/projects").status_code == 401
         ok = client.get(
@@ -168,6 +168,59 @@ def test_bearer_token_gates_every_api_route(tmp_path: Path) -> None:
             "/api/health", headers={"Authorization": "Bearer wrong"}
         )
         assert bad.status_code == 401
+
+
+# --- DNS-rebinding guard (TrustedHostMiddleware) -----------------------------------
+
+
+@pytest.mark.unit
+def test_spoofed_host_header_is_rejected() -> None:
+    """DNS rebinding sends the attacker's DNS name as Host; a loopback
+    allowlist must reject it before any route runs."""
+    app = create_studio_app(REPO_ROOT, serve_assets=False)
+    with TestClient(app, base_url="http://localhost") as client:
+        bad = client.get("/api/health", headers={"host": "attacker.com"})
+        assert bad.status_code == 400
+        assert client.get("/api/health").status_code == 200  # Host: localhost
+        assert client.get(
+            "/api/health", headers={"host": "127.0.0.1:8400"}
+        ).status_code == 200
+
+
+@pytest.mark.unit
+def test_token_gated_non_loopback_bind_allows_that_host() -> None:
+    """With a token, a non-loopback bind is legitimate — its exact host
+    joins the allowlist; other hosts stay rejected."""
+    app = create_studio_app(
+        REPO_ROOT,
+        serve_assets=False,
+        auth_token="s3cret",
+        bind_host="studio.internal.example",
+    )
+    headers = {"Authorization": "Bearer s3cret"}
+    with TestClient(app, base_url="http://localhost") as client:
+        ok = client.get(
+            "/api/health",
+            headers={**headers, "host": "studio.internal.example:8400"},
+        )
+        assert ok.status_code == 200
+        bad = client.get(
+            "/api/health", headers={**headers, "host": "attacker.com"}
+        )
+        assert bad.status_code == 400
+
+
+@pytest.mark.unit
+def test_wildcard_bind_without_token_still_loopback_only() -> None:
+    """No token → the allowlist never widens, whatever the bind host."""
+    app = create_studio_app(
+        REPO_ROOT, serve_assets=False, bind_host="0.0.0.0"
+    )
+    with TestClient(app, base_url="http://localhost") as client:
+        assert client.get("/api/health").status_code == 200
+        assert client.get(
+            "/api/health", headers={"host": "attacker.com"}
+        ).status_code == 400
 
 
 # --- layouts + EventLog ---------------------------------------------------------
@@ -194,7 +247,7 @@ def test_layouts_put_persists_and_round_trips(tmp_path: Path) -> None:
         },
     }
     app = create_studio_app(REPO_ROOT, serve_assets=False)
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         put = client.put("/api/layouts", json=document)
         assert put.status_code == 200
         path = foundry_home() / "studio" / "layouts.json"

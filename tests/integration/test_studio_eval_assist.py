@@ -147,7 +147,8 @@ def _client(
     repo: Path, transport: httpx.AsyncBaseTransport | None
 ) -> TestClient:
     return TestClient(
-        create_studio_app(repo, transport=transport, serve_assets=False)
+        create_studio_app(repo, transport=transport, serve_assets=False),
+        base_url="http://localhost",
     )
 
 

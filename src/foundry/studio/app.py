@@ -32,7 +32,9 @@ from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from foundry.api.auth import is_loopback_host
 from foundry.api.errors import (
     headers_for,
     status_for,
@@ -142,6 +144,27 @@ def _studio_status_for(exc: FoundryError) -> int:
     return status_for(exc)
 
 
+def _trusted_hosts(
+    auth_token: str | None, bind_host: str | None
+) -> list[str]:
+    """DNS-rebinding guard allowlist (docs/72 § Security posture).
+
+    A malicious page can point an attacker-controlled DNS name at
+    127.0.0.1 and script same-origin requests against a loopback-bound
+    studio; the browser's Host header carries the attacker's name, so a
+    loopback allowlist defeats it. When a token gates the API a
+    non-loopback bind is legitimate: that exact host is allowed too, and
+    a wildcard bind (0.0.0.0 / ::) disables the host check — reachable
+    hostnames are unknowable then, and the bearer token (which rebinding
+    JavaScript can never attach) is the gate."""
+    allowed = ["localhost", "127.0.0.1", "::1", "[::1]"]
+    if auth_token and bind_host and not is_loopback_host(bind_host):
+        if bind_host in ("0.0.0.0", "::", "[::]"):
+            return ["*"]
+        allowed.append(bind_host)
+    return allowed
+
+
 def create_studio_app(
     repo_root: Path | str | None = None,
     *,
@@ -149,6 +172,7 @@ def create_studio_app(
     checkpoint: str = "sqlite",
     transport: httpx.AsyncBaseTransport | None = None,
     serve_assets: bool = True,
+    bind_host: str | None = None,
 ) -> FastAPI:
     """Build the studio control-plane app rooted at ``repo_root`` (default:
     the current working directory, like the CLI)."""
@@ -277,6 +301,14 @@ def create_studio_app(
         response.headers.setdefault("X-Studio-Request-Id", request_id)
         response.headers.setdefault("X-Foundry-Studio-Version", ctx.version)
         return response
+
+    # Outermost (added last): reject spoofed Host headers before anything
+    # else runs — the DNS-rebinding guard (see _trusted_hosts).
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=_trusted_hosts(auth_token, bind_host),
+        www_redirect=False,
+    )
 
     # --- error envelopes (docs/70 § Failure modes) ----------------------------------
 

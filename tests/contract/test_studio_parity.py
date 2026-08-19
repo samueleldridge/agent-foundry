@@ -166,7 +166,7 @@ def test_openapi_schema_covers_every_api_route() -> None:
     from starlette.testclient import TestClient
 
     app = create_studio_app(REPO_ROOT, serve_assets=False)
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://localhost")
     schema = client.get("/api/openapi.json").json()
     assert schema["info"]["title"] == "foundry studio"
     documented = {

@@ -107,7 +107,7 @@ async def test_planted_credential_reaches_zero_route_responses(
     bodies: dict[str, str] = {}
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://s"
+            transport=httpx.ASGITransport(app=app), base_url="http://localhost"
         ) as client:
             # Produce run artifacts + mirror rows through the chat path.
             sid = (

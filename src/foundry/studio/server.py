@@ -10,10 +10,10 @@
 
 from __future__ import annotations
 
-import ipaddress
 import os
 from pathlib import Path
 
+from foundry.api.auth import is_loopback_host
 from foundry.core.errors import ConfigValidationError, FoundryError
 from foundry.studio.app import create_studio_app, resolve_assets_dir
 
@@ -24,15 +24,6 @@ frontend lives in its OWN repository, a sibling checkout):
 Vite's dev server (port 5173) proxies /api to this studio port
 (configured in the frontend repo's vite.config.ts), giving HMR against
 the live control plane."""
-
-
-def _is_loopback(host: str) -> bool:
-    if host in ("localhost",):
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
 
 
 def resolve_token(auth_token: str | None) -> str | None:
@@ -51,7 +42,7 @@ def execute_studio(
     """The `foundry studio` implementation. Returns the exit code."""
     try:
         token = resolve_token(auth_token)
-        if not _is_loopback(host) and token is None:
+        if not is_loopback_host(host) and token is None:
             raise ConfigValidationError(
                 f"refusing to bind non-loopback host {host!r} without a "
                 "token — pass --auth-token or set FOUNDRY_STUDIO_TOKEN "
@@ -70,7 +61,7 @@ def execute_studio(
                 context={"repo_root": str(repo_root)},
             )
         app = create_studio_app(
-            repo_root, auth_token=token, serve_assets=not dev
+            repo_root, auth_token=token, serve_assets=not dev, bind_host=host
         )
         if dev:
             print(_DEV_WORKFLOW)

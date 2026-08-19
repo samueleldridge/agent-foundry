@@ -43,7 +43,10 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _client(repo: Path) -> TestClient:
-    return TestClient(create_studio_app(repo, serve_assets=False))
+    return TestClient(
+        create_studio_app(repo, serve_assets=False),
+        base_url="http://localhost",
+    )
 
 
 def test_post_projects_scaffolds_skeleton_and_starter_eval(

@@ -67,7 +67,7 @@ def _seed_session_index(tmp_path: Path) -> None:
 
 async def _lifespan_client(app: Any) -> Any:
     return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://studio"
+        transport=httpx.ASGITransport(app=app), base_url="http://localhost"
     )
 
 

@@ -50,7 +50,8 @@ def _client(
     repo: Path, transport: httpx.AsyncBaseTransport | None = None
 ) -> TestClient:
     return TestClient(
-        create_studio_app(repo, transport=transport, serve_assets=False)
+        create_studio_app(repo, transport=transport, serve_assets=False),
+        base_url="http://localhost",
     )
 
 
@@ -389,7 +390,7 @@ def test_key_save_drops_previously_compiled_projects(
 
     app = create_studio_app(repo, serve_assets=False)
     ctx = app.state.studio_context
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         assert client.post("/api/chat/hello/sessions").status_code == 201
         assert "hello" in ctx._compiled_cache
         client.put(

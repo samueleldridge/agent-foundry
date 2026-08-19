@@ -58,7 +58,7 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _client(app: Any) -> httpx.AsyncClient:
     return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://studio"
+        transport=httpx.ASGITransport(app=app), base_url="http://localhost"
     )
 
 

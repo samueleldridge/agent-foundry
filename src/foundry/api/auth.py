@@ -20,6 +20,7 @@ runs an operator starts/resumes.
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import os
 from typing import Protocol
 
@@ -92,6 +93,19 @@ class BearerTokenAuth:
         raise HTTPException(401, detail={"error": "invalid token"})
 
 
+def is_loopback_host(host: str) -> bool:
+    """True when ``host`` is only reachable by local processes
+    (``localhost`` / ``127.x.x.x`` / ``::1``). Shared by the studio and
+    ``foundry serve`` non-loopback-bind refusals (docs/70, docs/72
+    § Security posture)."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
 def default_auth_backend() -> AuthBackend:
     """FOUNDRY_API_TOKENS set → bearer auth; otherwise NoAuth (which
     itself refuses under FOUNDRY_ENV=prod, so a prod deploy without
@@ -107,4 +121,5 @@ __all__ = [
     "BearerTokenAuth",
     "NoAuth",
     "default_auth_backend",
+    "is_loopback_host",
 ]

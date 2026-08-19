@@ -118,8 +118,13 @@ async def stream_sse(
         "query_string": query.encode(),
         "root_path": "",
         "headers": [
-            (key.lower().encode(), value.encode())
-            for key, value in (headers or {}).items()
+            # Loopback Host by default: the studio app's DNS-rebinding
+            # guard (TrustedHostMiddleware) rejects anything else.
+            (b"host", b"localhost"),
+            *(
+                (key.lower().encode(), value.encode())
+                for key, value in (headers or {}).items()
+            ),
         ],
         "client": ("127.0.0.1", 12345),
         "server": ("127.0.0.1", 8400),
