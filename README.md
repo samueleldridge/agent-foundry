@@ -106,6 +106,7 @@ uv run python scripts/demo_phase9.py   # eval → serve → regression → rollb
 - `projects/` — configured systems (the four examples above; yours go here).
 - `docs/` — the 35 normative specs, phase handoffs, retros, demos, manual test checklists.
 - `deploy/` — Dockerfile + per-platform manifests.
+- `scripts/` — demos + release helpers; `scripts/bundle_studio_assets.sh` builds the sibling frontend repo and copies its `dist/` into the wheel's packaged studio assets.
 
 ## Docs
 

@@ -79,6 +79,29 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { file = "LICENSE" }
 authors = [{ name = "Samuel Eldridge" }]
+keywords = [
+    "llm",
+    "agents",
+    "multi-agent",
+    "langgraph",
+    "evals",
+    "meta-agent",
+    "orchestration",
+    "developer-kit",
+]
+# "Private :: Do Not Upload" makes PyPI reject any accidental publish —
+# this is a source-available reference release, not a PyPI package.
+classifiers = [
+    "Private :: Do Not Upload",
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
 dependencies = [
     "pydantic>=2.13,<3",
     "langgraph==1.2.2",
@@ -100,6 +123,7 @@ dependencies = [
 ]
 
 [project.urls]
+Homepage = "https://github.com/samueleldridge/agent-foundry"
 Repository = "https://github.com/samueleldridge/agent-foundry"
 Documentation = "https://github.com/samueleldridge/agent-foundry/tree/main/docs"
 
@@ -119,8 +143,19 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# Release wheels ship the built Studio frontend: run
+# scripts/bundle_studio_assets.sh first — it builds the sibling
+# agent-foundry-studio checkout and copies its dist/ into
+# src/foundry/studio/_assets/ (gitignored; `artifacts` forces
+# VCS-ignored files into the build). Declared build-wide because uv/hatch
+# build the wheel FROM the sdist — the assets must survive both.
+[tool.hatch.build]
+artifacts = ["src/foundry/studio/_assets/**"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/foundry"]
+# The nested ruff.toml lint configs are repo tooling, not package data.
+exclude = ["**/ruff.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

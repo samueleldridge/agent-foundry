@@ -10,6 +10,10 @@ wheels/
 .ruff_cache/
 .pytest_cache/
 
+# Bundled studio frontend build (scripts/bundle_studio_assets.sh output;
+# wheel-only via pyproject [tool.hatch.build.targets.wheel] artifacts)
+src/foundry/studio/_assets/
+
 # Virtual environments
 .venv
 
