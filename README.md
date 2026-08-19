@@ -17,6 +17,31 @@ A personal developer kit for building, evaluating, versioning, and orchestrating
 - **Production surfaces included** — FastAPI serving with SSE/WebSockets and human-in-the-loop approvals, OpenTelemetry + local cost analytics, and a full web console with a live multi-agent flow graph.
 - **1100+ backend tests, zero keys needed** — the entire suite runs offline against mock transports; `mypy --strict` and import-boundary linting enforced throughout.
 
+## Architecture
+
+Configs are the source of truth; everything else compiles from them — and the meta-agent closes the loop by *writing* them, one audited git commit per iteration.
+
+```mermaid
+flowchart LR
+  subgraph configs["Declarative configs — git-versioned"]
+    Y["system.yaml · agent.yaml<br/>prompts/*.md · tools/ · evals/"]
+  end
+  subgraph runtime["Runtime"]
+    C["Compiler<br/>(state visibility enforced)"] --> G["LangGraph StateGraph<br/>(checkpointed, resumable)"]
+    G --> P["Providers<br/>Anthropic · OpenAI"]
+    G --> T["Tools + pooled<br/>authenticated connections"]
+  end
+  Y --> C
+  subgraph loop["Eval-driven loop"]
+    E["Eval harness"] --> F["Meta-agent (forge)"]
+  end
+  F -->|"writes configs · commits<br/>pins versions · rolls back"| Y
+  G -->|"scored runs"| E
+  G -->|"run artifacts · OTel<br/>cost analytics"| O["Observability"]
+  ST["Foundry Studio<br/>web console"] -->|"control plane API"| C
+  API["FastAPI serve<br/>SSE · WebSocket · HITL"] --> G
+```
+
 ## Quickstart
 
 Requires Python 3.12 and [uv](https://docs.astral.sh/uv/). One provider API key is enough to run everything — the examples and the meta-agent default to OpenAI (`openai/gpt-5-mini`), and swapping to Anthropic is a one-line YAML change.
@@ -92,6 +117,18 @@ uv run foundry forge my_agent --description "..." --eval path/to/eval.yaml \
 ```
 
 The meta-agent discovers catalog tools, scaffolds project-local ones, writes agent configs, evals each iteration, commits per iteration on `foundry/my_agent`, and rolls back regressions. It is sandboxed to the project directory.
+
+```mermaid
+flowchart TD
+  D["Describe the agent + eval set<br/>(the eval is the objective — the forge can never edit it)"] --> B["Bootstrap: discover catalog tools,<br/>scaffold project tools + agent configs"]
+  B --> R["Run the eval suite"]
+  R -->|"score ≥ threshold"| DONE["Done — inspect the commit trail"]
+  R -->|"below threshold"| X["Cluster the failures"]
+  X --> W["Rewrite prompts /<br/>bump tool versions"]
+  W --> K["Commit the iteration"]
+  K --> R
+  R -->|"plateau · max-iter · cost cap"| BEST["Best-effort exit —<br/>continue manually or roll back"]
+```
 
 ### Versioning, rollback, observability
 
