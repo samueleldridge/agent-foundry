@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.1.0 — 2026-08-19
+
+Public release: production-hardening pass over both repositories.
+
+- Security: DNS-rebinding guard (TrustedHost) on the studio; `foundry serve`
+  refuses non-loopback binds without a token; empty-string API keys now fail
+  with a clear structured error.
+- `foundry project new` no longer leaves the working tree on the project
+  branch (the skeleton still commits there); studio health reports the
+  current git branch.
+- GitHub Actions CI (ruff, mypy --strict, full test suite — no keys or
+  network needed); failing tests surface as run annotations.
+- Packaging: wheels bundle the built Studio frontend
+  (`scripts/bundle_studio_assets.sh`); PyPI publish guard; MIT license.
+
 ## v1.1 — 2026-07-16
 
 Foundry Studio (Phase 10): a locally-served web console putting every CLI

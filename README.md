@@ -1,5 +1,10 @@
 # agent-foundry
 
+[![ci](https://github.com/samueleldridge/agent-foundry/actions/workflows/ci.yml/badge.svg)](https://github.com/samueleldridge/agent-foundry/actions/workflows/ci.yml)
+![python](https://img.shields.io/badge/python-3.12-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
+![types](https://img.shields.io/badge/mypy-strict-blue)
+
 A personal developer kit for building, evaluating, versioning, and orchestrating multi-agent LLM systems. Configs are text (YAML + markdown + Pydantic), a meta-agent edits them, and the runtime executes compiled specs against any provider.
 
 **Status: v1.1.** All ten core build phases plus Foundry Studio (Phase 10 — a full React web console in the companion [agent-foundry-studio](https://github.com/samueleldridge/agent-foundry-studio) repo) are implemented and independently reviewed. Design docs (normative, 35 specs) live in [docs/](docs/README.md). This is a reference release — not currently accepting external contributions.

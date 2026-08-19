@@ -2,14 +2,17 @@
 
 This directory is the source of truth for the design of `agent-foundry`, a personal developer kit for building, evaluating, versioning, and orchestrating multi-agent systems. The docs are organised in tiers; each tier is a conceptual layer of the system and each file in a tier is a deep spec for one component of that layer.
 
-## Status: v1 COMPLETE (2026-07-13)
+## Status: v1.1 COMPLETE (tagged `v1.1.0`, 2026-08-19)
+
+Phase 10 (Foundry Studio) shipped: a React web console over every CLI feature — chat with in-chat HITL, flow-graph visualisation, live forge console, AI-assisted eval authoring, provider/key management, and widget dashboards — spec'd in [72-web-studio.md](72-web-studio.md) and built as Phases 10a–10c. The frontend lives in the companion [agent-foundry-studio](https://github.com/samueleldridge/agent-foundry-studio) repository. A production-hardening pass (security guards, CI, packaging, MIT license) closed out the release.
+
+## v1 (2026-07-13)
 
 All ten phases (0–9) are implemented, reviewed, and tagged `v1.0.0`. `src/foundry/` ships the full surface these docs specify: core framework + providers, tools/connections/caching/retrieval/memory, LangGraph orchestration + HITL, the eval harness, per-artifact versioning + rollback, the meta-agent (`foundry forge`), the FastAPI serving layer (SSE/WebSocket/batch), and the Phase 9 tier-8 slice — OTel tracing/metrics + SQLite event-mirror (`foundry obs`), pluggable artifact storage + retention, the security guardrails (path sandbox, typed tool-result boundaries, redaction), `foundry.testing` + `foundry test`/`doctor`/`review`/`deploy`, and container packaging under `deploy/`.
 
 - Per-phase ground truth: `_phase_handoffs/` (deviations + exit-gate tables), `_demos/`, `_retros/`, `_manual_tests/`.
 - The ≤5-minute end-to-end demo: `uv run python scripts/demo_phase9.py` (recorded in `_demos/phase_9.md`).
 - v1.1 candidates: [91-v1_1-backlog.md](91-v1_1-backlog.md) (consolidated from the phase handoffs; canonical copy mirrored in operator memory).
-- **v1.1 in progress — Phase 10 (Foundry Studio)**: a React webapp over every CLI feature (chat with in-chat HITL, flow-graph view, live forge console, widget dashboards), spec'd in [72-web-studio.md](72-web-studio.md) and planned as Phases 10a–10c in [03-development-phases.md](03-development-phases.md) + [90-implementation-plan.md](90-implementation-plan.md).
 
 Docs remain normative for maintenance: where an implementation deviates deliberately, the phase handoff records it.
 
