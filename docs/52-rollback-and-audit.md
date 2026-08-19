@@ -208,7 +208,7 @@ Per project: `projects/<name>/.foundry/audit.jsonl`. Append-only JSONL. Each lin
   "operator": {
     "kind": "meta_agent",
     "forge_run_id": "01JKM4ABCDEF",
-    "human_supervisor": "samueleldridge2@gmail.com"
+    "human_supervisor": "operator@example.com"
   },
   "eval": {
     "before_score": 0.91,
@@ -318,7 +318,7 @@ Layout sketch:
 │    cluster: late_amendment (cleared 4/5 cases)                            │
 │                                                                            │
 │  Operator: meta_agent (forge 01JKM4...)                                    │
-│  Human supervisor: samueleldridge2@gmail.com                              │
+│  Human supervisor: operator@example.com                              │
 │                                                                            │
 │  [r] rollback to selected   [d] full diff   [e] open in editor   [q] quit │
 └────────────────────────────────────────────────────────────────────────────┘

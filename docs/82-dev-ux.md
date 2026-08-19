@@ -394,7 +394,7 @@ Layout:
 │    cluster: late_amendment (cleared 4/5 cases)                            │
 │                                                                            │
 │  Operator: meta_agent (forge 01JKM4...)                                    │
-│  Human supervisor: samueleldridge2@gmail.com                              │
+│  Human supervisor: operator@example.com                              │
 │                                                                            │
 │  [r] rollback   [d] full diff   [e] open in editor   [t] tabs   [q] quit │
 └────────────────────────────────────────────────────────────────────────────┘
