@@ -29,14 +29,21 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
-        ["git", "-C", str(repo), "-c", "user.email=t@example.com",
-         "-c", "user.name=t", *args],
+        ["git", "-C", str(repo), *args],
         check=True,
         capture_output=True,
         text=True,
         timeout=30,
     )
     return result.stdout.strip()
+
+
+def _configure_identity(repo: Path) -> None:
+    """Repo-level identity: the PRODUCT code (rollback via GitBackend)
+    commits in this repo too, so transient `-c` flags on the helper's own
+    commits aren't enough — CI runners have no global/auto identity."""
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
 
 
 def _eval_history_line(
@@ -86,6 +93,7 @@ def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Scratch:
     # rollback pre-flight working_tree_clean check).
     (repo / ".gitignore").write_text(".foundry/\n__pycache__/\n")
     _git(repo, "init", "-q", "-b", "main")
+    _configure_identity(repo)
     _git(repo, "add", ".")
     _git(repo, "commit", "-q", "-m", "feat(hello): initial project")
     first_sha = _git(repo, "rev-parse", "HEAD")
