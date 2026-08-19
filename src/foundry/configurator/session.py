@@ -207,10 +207,25 @@ class ForgeSession:
     def _pre_flight(self) -> tuple[Path, GitBackend, EvalSpec, Path]:
         project = self.meta_agent.scoped_project
         project_dir = self.meta_agent.projects_root / project
+        branch = f"foundry/{project}"
+        if not project_dir.is_dir():
+            # `foundry project new` commits the skeleton on
+            # foundry/<project> and restores the operator's original
+            # branch — check the project branch out before concluding the
+            # project is missing (forge works from any starting branch).
+            try:
+                root_backend = GitBackend.discover(
+                    self.meta_agent.projects_root
+                )
+                if root_backend.branch_exists(branch):
+                    root_backend.ensure_branch(branch)
+            except FoundryError:
+                pass  # fall through to the structured error below
         if not project_dir.is_dir():
             raise ForgeError(
                 f"project directory {project_dir} does not exist; create it "
-                f"first: foundry project new {project}",
+                f"first: foundry project new {project} (its skeleton "
+                f"commits to the {branch} branch)",
                 context={"project": project},
             )
         backend = GitBackend.discover(project_dir)
@@ -221,7 +236,7 @@ class ForgeSession:
                 "or stash before forging (docs/62 § Behaviour notes)",
                 context={"project": project},
             )
-        backend.ensure_branch(f"foundry/{project}")
+        backend.ensure_branch(branch)
 
         spec_path = self.eval_spec_path
         if not spec_path.is_absolute():

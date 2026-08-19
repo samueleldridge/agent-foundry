@@ -236,6 +236,10 @@ def create_studio_app(
         from foundry.configurator import forge_max_iter_default
 
         assert ctx.chat is not None and ctx.forge is not None
+        try:
+            current_branch = ctx.backend().current_branch()
+        except FoundryError:
+            current_branch = ""  # not a git repo — health stays green
         return StudioHealth(
             status="ok",
             version=ctx.version,
@@ -244,6 +248,7 @@ def create_studio_app(
             active_chat_sessions=ctx.chat.active_sessions(),
             run_manager_pool=ctx.chat.pool_size(),
             forge_max_iter_default=forge_max_iter_default(),
+            current_branch=current_branch,
         )
 
     for module in (

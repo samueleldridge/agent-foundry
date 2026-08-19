@@ -60,19 +60,28 @@ async def test_forge_bootstraps_and_improves_to_threshold(
     repo: Path, tmp_path: Path
 ) -> None:
     # 1. `foundry project new` creates the skeleton + branch (CLI gate).
+    #    The commit lands on foundry/qa_bot; the operator is returned to
+    #    the branch they started on (main), never stranded.
     code = execute_project_new("qa_bot", projects_root=repo / "projects")
     assert code == 0
-    assert git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == (
-        "foundry/qa_bot"
+    assert git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
+    assert "project skeleton" in git(
+        repo, "log", "--pretty=%s", "foundry/qa_bot"
     )
     project_dir = repo / "projects" / "qa_bot"
+    assert not project_dir.exists()  # skeleton lives on its branch only
+
+    # 2. The operator supplies the eval set on the project branch (the
+    #    meta-agent never writes it).
+    git(repo, "checkout", "-q", "foundry/qa_bot")
     assert (project_dir / "evals").is_dir()
     assert not (project_dir / "system.yaml").exists()  # bootstrap-able
-
-    # 2. The operator supplies the eval set (the meta-agent never writes it).
     (project_dir / "evals" / "qa.yaml").write_text(EVAL_SPEC_YAML)
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "chore(qa_bot): eval set")
+    # Forge must work from ANY starting branch: its pre-flight checks
+    # foundry/qa_bot out itself, so launch from main.
+    git(repo, "checkout", "-q", "main")
 
     # 3. Scripted forge: bootstrap (0.5) → digit rule (0.833) → reverse
     #    rule (1.0 ≥ threshold 0.9).

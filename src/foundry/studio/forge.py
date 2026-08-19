@@ -186,6 +186,14 @@ class ForgeSupervisor:
         candidate = self._ctx.projects_root / project
         if candidate.is_dir():
             return candidate.resolve()
+        # `project new` restores the operator's original branch, so a
+        # fresh skeleton may exist only on foundry/<project>; the forge
+        # session's pre-flight checks that branch out itself.
+        try:
+            if self._ctx.backend().branch_exists(f"foundry/{project}"):
+                return candidate.resolve()
+        except FoundryError:
+            pass
         raise ConfigLoadError(
             f"project {project!r} not found; create it with "
             "`foundry project new <name>`",

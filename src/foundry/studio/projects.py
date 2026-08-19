@@ -198,16 +198,27 @@ def build_router(ctx: StudioContext) -> APIRouter:
     def create_project(
         body: ProjectCreateRequest, request: Request
     ) -> ProjectCreateResponse:
-        from foundry.cli.project import create_project_skeleton
+        from foundry.cli.project import (
+            create_project_skeleton,
+            restore_origin_branch,
+        )
 
+        # Restore is deferred (restore_branch=False) so the starter-eval
+        # commit also lands on foundry/<name>; the finally puts the
+        # operator's original branch back regardless.
         skeleton = create_project_skeleton(
-            body.name, projects_root=ctx.projects_root
+            body.name, projects_root=ctx.projects_root, restore_branch=False
         )
         files = ["README.md"]
         eval_rel: str | None = None
-        if body.scaffold_eval:
-            eval_rel = _scaffold_starter_eval(ctx, body.name)
-            files.append(eval_rel)
+        try:
+            if body.scaffold_eval:
+                eval_rel = _scaffold_starter_eval(ctx, body.name)
+                files.append(eval_rel)
+        finally:
+            restore_origin_branch(
+                ctx.backend(), skeleton.origin_branch, skeleton.branch
+            )
         emit_studio_event(
             "studio.project_created",
             project=body.name,

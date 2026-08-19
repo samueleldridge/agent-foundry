@@ -782,6 +782,11 @@ class StudioHealth(BaseModel):
     forge_max_iter_default: int = 5
     """The resolved global forge iteration cap (FOUNDRY_FORGE_MAX_ITER,
     else 5) — the forge launch form prefills from this."""
+    current_branch: str = ""
+    """The workspace's checked-out git branch. ``project new`` commits on
+    ``foundry/<name>`` then restores the original branch, so the UI can
+    surface where the operator actually is (empty when the workspace is
+    not a git repo)."""
 
 
 # --- providers (docs/72 § Provider panel) ---------------------------------------------

@@ -1,10 +1,13 @@
 """`foundry project new <name>` — project skeleton + branch (docs/62).
 
 Creates ``projects/<name>/`` with an ``evals/`` directory and a README,
-switches to (creating if needed) the ``foundry/<name>`` branch, and commits
-the skeleton there. The meta-agent scaffolds everything else during the
-forge bootstrap — ``project new`` deliberately ships NO system.yaml, so
-``foundry forge`` detects the bootstrap case from project state.
+switches to (creating if needed) the ``foundry/<name>`` branch, commits
+the skeleton there, then RETURNS to the branch the operator started on —
+the commit lives on ``foundry/<name>``; the operator is never stranded
+on it. ``foundry forge`` does its own ``ensure_branch`` when launched.
+The meta-agent scaffolds everything else during the forge bootstrap —
+``project new`` deliberately ships NO system.yaml, so ``foundry forge``
+detects the bootstrap case from project state.
 
 Exit codes: 0 created, 1 refused (already exists / dirty tree), 2
 unexpected failure.
@@ -54,12 +57,24 @@ class ProjectSkeleton:
     commit_sha: str
     files: list[str] = field(default_factory=list)
     """Project-relative paths committed with the skeleton."""
+    origin_branch: str = ""
+    """The branch the operator was on before ``project new`` — restored
+    afterwards unless ``restore_branch=False``."""
 
 
 def create_project_skeleton(
-    name: str, *, projects_root: Path | None = None
+    name: str,
+    *,
+    projects_root: Path | None = None,
+    restore_branch: bool = True,
 ) -> ProjectSkeleton:
     """The shared ``project new`` executor (CLI + studio route).
+
+    The skeleton commit lands on ``foundry/<name>``; afterwards the
+    original branch is checked out again so the operator is never
+    stranded (``restore_branch=False`` lets a caller commit more onto
+    the project branch first — the studio's starter-eval scaffold — and
+    restore itself).
 
     Raises :class:`ConfigValidationError` on refusal; the context carries
     the structured reason: ``{"exists": True}`` for an existing project,
@@ -95,6 +110,7 @@ def create_project_skeleton(
             context={"name": name, "dirty_files": dirty},
         )
     branch = f"foundry/{name}"
+    origin_branch = backend.current_branch()
     backend.ensure_branch(branch)
     (project_dir / "evals").mkdir(parents=True)
     (project_dir / "README.md").write_text(_README_TEMPLATE.format(name=name))
@@ -106,13 +122,25 @@ def create_project_skeleton(
         ],
         f"chore({name}): project skeleton (foundry project new)",
     )
+    if restore_branch:
+        restore_origin_branch(backend, origin_branch, branch)
     return ProjectSkeleton(
         name=name,
         project_dir=project_dir,
         branch=branch,
         commit_sha=commit_sha,
         files=["README.md", "evals/"],
+        origin_branch=origin_branch,
     )
+
+
+def restore_origin_branch(
+    backend: GitBackend, origin_branch: str, project_branch: str
+) -> None:
+    """Check the operator's original branch back out after committing on
+    ``foundry/<name>`` (a detached-HEAD origin is left where it is)."""
+    if origin_branch not in (project_branch, "HEAD", ""):
+        backend.run_git("checkout", origin_branch)
 
 
 def execute_project_new(
@@ -133,10 +161,13 @@ def execute_project_new(
         project_dir = skeleton.project_dir
         print(
             f"Created {project_dir} on branch {skeleton.branch} "
-            f"({skeleton.commit_sha[:8]})."
+            f"({skeleton.commit_sha[:8]}); back on {skeleton.origin_branch}."
         )
         print("Next steps:")
-        print(f"  1. add an eval set under {project_dir / 'evals'}")
+        print(
+            f"  1. git checkout {skeleton.branch}, then add an eval set "
+            f"under {project_dir / 'evals'}"
+        )
         print(
             f"  2. foundry forge {name} --description \"...\" "
             f"--eval projects/{name}/evals/<set>.yaml"
@@ -149,4 +180,9 @@ def execute_project_new(
         return 2
 
 
-__all__ = ["ProjectSkeleton", "create_project_skeleton", "execute_project_new"]
+__all__ = [
+    "ProjectSkeleton",
+    "create_project_skeleton",
+    "execute_project_new",
+    "restore_origin_branch",
+]

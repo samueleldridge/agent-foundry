@@ -159,6 +159,8 @@ Library mode is what powers automated experiments, A/B comparison of forge confi
 
 ## Session lifecycle
 
+> **Errata (2026-08, branch stranding):** `foundry project new` commits the skeleton on `foundry/<name>` and then RESTORES the branch the operator started on (the CLI prints "…; back on `<branch>`"); the forge pre-flight checks `foundry/<project>` out itself when the project directory only exists on that branch, so forge launches from any starting branch.
+
 ```
 foundry forge <project> ...
    │

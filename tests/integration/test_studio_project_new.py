@@ -62,12 +62,17 @@ def test_post_projects_scaffolds_skeleton_and_starter_eval(
     assert body["eval_repo_path"] == "projects/qa_bot/evals/qa_bot.yaml"
     assert "evals/qa_bot.yaml" in body["files"]
 
-    # Skeleton on its branch; starter eval committed (clean tree after).
-    assert git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == (
-        "foundry/qa_bot"
-    )
+    # Skeleton + starter eval committed on foundry/qa_bot; the operator's
+    # original branch (main) is restored — never stranded (clean tree).
+    assert git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
     assert not git(repo, "status", "--porcelain").strip()
     project_dir = repo / "projects" / "qa_bot"
+    assert not project_dir.exists()  # skeleton lives on its branch only
+    subjects = git(repo, "log", "--pretty=%s", "foundry/qa_bot")
+    assert "project skeleton" in subjects
+    assert "scaffold starter eval template" in subjects
+
+    git(repo, "checkout", "-q", "foundry/qa_bot")
     assert not (project_dir / "system.yaml").exists()  # bootstrap-able
 
     # The template is a REAL project-scope EvalSpec with TODO markers.
@@ -91,6 +96,9 @@ def test_starter_eval_is_deep_linkable_in_the_config_editor(
     assert client.post(
         "/api/projects", json={"name": "qa_bot"}
     ).status_code == 201
+    # File routes read the working tree: switch to the project branch
+    # (project new restored the original branch).
+    git(repo, "checkout", "-q", "foundry/qa_bot")
 
     tree = client.get("/api/projects/qa_bot/files")
     assert tree.status_code == 200, tree.text
@@ -122,6 +130,9 @@ def test_bootstrap_projects_listed_only_on_request(repo: Path) -> None:
     assert client.post(
         "/api/projects", json={"name": "qa_bot"}
     ).status_code == 201
+    # Listing reads the working tree: switch to the project branch
+    # (project new restored the original branch).
+    git(repo, "checkout", "-q", "foundry/qa_bot")
 
     default_names = [
         row["name"] for row in client.get("/api/projects").json()
@@ -165,6 +176,7 @@ def test_scaffold_eval_false_skips_the_template(repo: Path) -> None:
     )
     assert created.status_code == 201
     assert created.json()["eval_path"] is None
+    git(repo, "checkout", "-q", "foundry/qa_bot")
     assert not (
         repo / "projects" / "qa_bot" / "evals" / "qa_bot.yaml"
     ).exists()
@@ -177,3 +189,20 @@ def test_health_reflects_forge_max_iter_env_default(
     assert client.get("/api/health").json()["forge_max_iter_default"] == 5
     monkeypatch.setenv("FOUNDRY_FORGE_MAX_ITER", "9")
     assert client.get("/api/health").json()["forge_max_iter_default"] == 9
+
+
+def test_health_reports_current_branch_across_project_new(
+    repo: Path,
+) -> None:
+    """The UI surfaces where the operator actually is: health carries the
+    checked-out branch, which project new leaves unchanged."""
+    client = _client(repo)
+    assert client.get("/api/health").json()["current_branch"] == "main"
+    assert client.post(
+        "/api/projects", json={"name": "qa_bot"}
+    ).status_code == 201
+    assert client.get("/api/health").json()["current_branch"] == "main"
+    git(repo, "checkout", "-q", "foundry/qa_bot")
+    assert client.get("/api/health").json()["current_branch"] == (
+        "foundry/qa_bot"
+    )
