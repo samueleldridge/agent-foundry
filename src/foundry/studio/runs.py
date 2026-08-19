@@ -175,7 +175,11 @@ def build_router(ctx: StudioContext) -> APIRouter:
         return RunArtifactView(
             run_id=run_id,
             metadata=redacted(metadata),
-            inputs=redacted(_read_json(directory / "inputs.json")),
+            # Both files persist under a wrapper key (docs/81) — unwrap so
+            # consumers get the actual payloads, not the envelopes.
+            inputs=redacted(
+                (_read_json(directory / "inputs.json") or {}).get("inputs")
+            ),
             outputs=redacted(
                 (_read_json(directory / "outputs.json") or {}).get("output")
             ),
