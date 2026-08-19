@@ -43,6 +43,8 @@ def test_load_sets_missing_and_never_overrides_real_env(
 ) -> None:
     (tmp_path / ".env").write_text("FROM_FILE=filevalue\nALREADY_SET=fromfile\n")
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FOUNDRY_NO_ENV_FILE", raising=False)
+    monkeypatch.delenv("FOUNDRY_ENV_FILE", raising=False)
     monkeypatch.delenv("FROM_FILE", raising=False)
     monkeypatch.setenv("ALREADY_SET", "fromenv")  # real env must win
 
@@ -83,6 +85,9 @@ def test_explicit_path_and_upward_search(
     # Upward search from a subdirectory finds the ancestor .env.
     monkeypatch.chdir(sub)
     monkeypatch.delenv("FOUNDRY_ENV_FILE", raising=False)
+    # Isolate from the developer's real environment: an exported
+    # FOUNDRY_NO_ENV_FILE=1 would disable the search under test.
+    monkeypatch.delenv("FOUNDRY_NO_ENV_FILE", raising=False)
     assert find_env_file() == root_env
 
     # Explicit path overrides the search.

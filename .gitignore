@@ -9,6 +9,7 @@ wheels/
 # Tool caches
 .ruff_cache/
 .pytest_cache/
+.mypy_cache/
 
 # Bundled studio frontend build (scripts/bundle_studio_assets.sh output;
 # wheel-only via pyproject [tool.hatch.build.targets.wheel] artifacts)
@@ -24,3 +25,4 @@ personal_docs/
 # Local secrets (never commit)
 .env
 .env.*
+**/credentials.env

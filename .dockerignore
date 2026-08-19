@@ -1,0 +1,35 @@
+# Keep image build contexts lean and secret-free (docs/84's sample
+# Dockerfile COPYs the repo root; nothing below belongs in an image).
+
+# VCS + local state
+.git/
+.github/
+.claude/
+
+# Python build/tool caches
+__pycache__/
+*.py[oc]
+.venv/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+wheels/
+*.egg-info
+
+# Node / frontend build inputs (the studio frontend lives in a sibling
+# repo; only bundled _assets belong in an image, via the wheel)
+node_modules/
+
+# Never in an image: secrets, private docs, per-project runtime state
+.env
+.env.*
+**/credentials.env
+personal_docs/
+projects/*/.foundry/
+
+# Tests + docs are repo material, not runtime material
+tests/
+docs/
+scripts/
