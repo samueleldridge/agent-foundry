@@ -90,6 +90,10 @@ curl -s -X POST localhost:8000/run -H 'content-type: application/json' -d '{"nam
 uv run foundry studio
 ```
 
+![Foundry Studio — multi-agent flow graph (supervisor + workers, compiled from config)](docs/assets/studio-graph.png)
+
+![Foundry Studio — chat with streamed runs, tool activity, and per-run cost](docs/assets/studio-chat.png)
+
 Every CLI feature behind a polished React UI (dark/light): project browsing, config editing with live server-side validation and commit-on-save, catalog explorer, chat with streamed responses and in-chat human-approval gates, a **multi-agent flow-graph visualisation**, a **live forge console** (launch the meta-agent, watch scores/commits/backoffs stream), AI-assisted eval authoring with a human review gate, per-provider API-key management with a model browser, cost/latency dashboards, and user-composable widget dashboards. The frontend lives in the companion [agent-foundry-studio](https://github.com/samueleldridge/agent-foundry-studio) repo (checked out as a sibling directory, `npm run build`); `foundry studio` serves the built app and its control-plane API from one port — and serves an API-only placeholder if the frontend isn't built.
 
 ### Evaluate

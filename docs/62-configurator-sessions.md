@@ -504,3 +504,20 @@ Audit log entries (per `52-rollback-and-audit.md`):
 3. **Forge templates**. `foundry forge --template pipeline_recon_starter` to bootstrap from a known-good template. Lean: yes, ship as `catalog/forge_templates/` Phase 5+.
 4. **Real-time observability piping**. Pipe forge events into the institution's observability stack (Datadog, Langfuse) in real time, not just at termination. Lean: already supported via OTel — every `forge.*` event is in the standard event stream. Document the pattern.
 5. **Forge dry-run**. Run the meta-agent's reasoning + proposed changes without actually committing or running evals. Useful for "what would the meta-agent do?" exploration. Lean: yes, `foundry forge --dry-run`; the meta-agent emits proposals but skips apply + eval; produces a "trajectory of intentions" artifact. Phase 9 polish.
+
+## As-built: the iteration commit trail
+
+Every forge iteration is one commit on the project branch; regressions are
+reverted with the same per-artifact rollback the operator uses:
+
+```mermaid
+gitGraph
+    commit id: "project skeleton"
+    branch foundry/qa_bot
+    checkout foundry/qa_bot
+    commit id: "forge: bootstrap (score 0.50)"
+    commit id: "forge: iteration 1 (score 0.83)"
+    commit id: "forge: iteration 2 — regression (0.61)"
+    commit id: "rollback: prompt pin v3 → v2"
+    commit id: "forge: iteration 3 (score 0.92) ✓"
+```

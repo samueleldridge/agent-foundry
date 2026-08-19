@@ -449,3 +449,27 @@ Every failure mode emits a structured event and structured API error.
 3. **Bulk approvals**. Operator wants to approve "all auto-resolve recommendations from the last 5 minutes for trades under $10k". Implementable as an external batch script that walks `foundry approvals list` and calls `approve` for each. Lean: don't build into framework; ship the CLI primitives that make scripts trivial.
 4. **Approval-required on flow edges with predicates**. Currently `requires_approval: true` is unconditional. A `requires_approval_when: <predicate>` field would enable conditional approval gating without writing a router agent. Lean: yes, additive in v1.1; preserves the edge-as-data principle.
 5. **Approval as agent output vs separate flag.** Today: agents indicate approval need via output schema (`requires_approval: bool` + `approval_prompt: str | None`). Alternative: a special `ApprovalRequiredFromOutput` field type the framework recognises. Lean: keep current pattern; simpler. Document the convention so projects implement it consistently.
+
+## As-built: the approval round-trip at a glance
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant O as Operator
+    participant A as API / Studio chat
+    participant R as LangGraph runtime
+    participant T as publish tool
+    O->>A: send message (run starts)
+    A->>R: run_project(input)
+    R->>T: tool call
+    T-->>R: ApprovalRequired
+    R-->>A: approval.required (run pauses, checkpointed)
+    Note over R: process can die here —<br/>state survives in the checkpoint
+    A-->>O: in-chat approve / reject card
+    O->>A: approve
+    A->>R: resume(approval_id, approved)
+    R->>T: tool re-runs with the decision
+    T-->>R: result
+    R-->>A: run.completed
+    A-->>O: final answer
+```
