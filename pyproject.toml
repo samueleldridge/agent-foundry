@@ -77,9 +77,8 @@ version = "1.0.0"
 description = "A developer kit for building, evaluating, versioning, and orchestrating multi-agent LLM systems."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-license = { text = "Proprietary" }
-authors = [{ name = "agent-foundry contributors" }]
-
+license = { file = "LICENSE" }
+authors = [{ name = "Samuel Eldridge" }]
 dependencies = [
     "pydantic>=2.13,<3",
     "langgraph==1.2.2",
@@ -99,6 +98,10 @@ dependencies = [
     "rich>=15",
     "wsproto>=1.2",
 ]
+
+[project.urls]
+Repository = "https://github.com/samueleldridge/agent-foundry"
+Documentation = "https://github.com/samueleldridge/agent-foundry/tree/main/docs"
 
 [project.scripts]
 foundry = "foundry.cli.__main__:main"
