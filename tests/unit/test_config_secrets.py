@@ -109,6 +109,23 @@ def test_env_provider_missing_var_errors(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("empty_value", ["", "   "])
+def test_env_provider_empty_var_errors_like_unset(
+    monkeypatch: pytest.MonkeyPatch, empty_value: str
+) -> None:
+    """Set-but-empty (`OPENAI_API_KEY=`) must fail like unset — never an
+    empty Bearer header downstream."""
+    monkeypatch.setenv("FOUNDRY_TEST_SECRET", empty_value)
+    with pytest.raises(ConfigLoadError) as excinfo:
+        EnvSecretsProvider().resolve(
+            CredentialsRef(kind="env", value="FOUNDRY_TEST_SECRET")
+        )
+    assert "FOUNDRY_TEST_SECRET" in str(excinfo.value)
+    assert "empty" in str(excinfo.value)
+    assert excinfo.value.context["env_var"] == "FOUNDRY_TEST_SECRET"
+
+
+@pytest.mark.unit
 def test_env_provider_default_kind_returns_empty_credential() -> None:
     creds = EnvSecretsProvider().resolve(CredentialsRef(kind="default"))
     assert creds.secret is None

@@ -123,9 +123,12 @@ class EnvSecretsProvider:
                     context={"kind": "env"},
                 )
             value = os.environ.get(name)
-            if value is None:
+            # Set-but-empty (e.g. `OPENAI_API_KEY=`) is treated exactly like
+            # unset: an empty/whitespace secret would otherwise flow into an
+            # empty `Authorization: Bearer` header downstream.
+            if value is None or not value.strip():
                 raise ConfigLoadError(
-                    f"environment variable {name!r} is not set "
+                    f"environment variable {name!r} is not set or is empty "
                     "(required by a credentials_ref)",
                     context={"env_var": name},
                 )
